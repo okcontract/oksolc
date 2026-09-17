@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ConstructorHierarchy.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract Root { uint256 public rootInit = 1; uint256 public rootLength; uint256 public rootSeed; constructor(bytes memory payload, uint256 seed) { rootLength = payload.length; rootSeed = seed; } }\ncontract Middle is Root(bytes(\"root\"), 11) { uint256 public middleInit = rootInit + 2; uint256 public middleLength; uint256 public middleSeed; bytes4 public callbackSelector; constructor(bytes memory payload, function(uint256) external returns (uint256) callback, uint256 seed) { middleLength = payload.length; middleSeed = seed; callbackSelector = callback.selector; } }\ncontract Final is Middle { uint256 public marker = 4; modifier around(uint256 delta) { marker += delta; _; marker += delta * 10; } constructor(bytes memory payload, function(uint256) external returns (uint256) callback, uint256 seed) Middle(payload, callback, seed + 2) around(seed) { marker += payload.length; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "Final": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

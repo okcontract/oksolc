@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Special.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { receive() external payable {} fallback() external {} }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

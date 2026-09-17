@@ -1,0 +1,216 @@
+{
+  "repository": "https://github.com/ethereum/execution-specs",
+  "commit": "4887bcaa2b92c27f0d12891b3518dffe5bbd1749",
+  "forks": [
+    {
+      "revision": "homestead",
+      "source": "src/ethereum/forks/homestead/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "revision": "tangerineWhistle",
+      "source": "src/ethereum/forks/tangerine_whistle/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "revision": "spuriousDragon",
+      "source": "src/ethereum/forks/spurious_dragon/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "revision": "byzantium",
+      "source": "src/ethereum/forks/byzantium/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    },
+    {
+      "revision": "constantinople",
+      "source": "src/ethereum/forks/constantinople/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    },
+    {
+      "revision": "petersburg",
+      "source": "src/ethereum/forks/constantinople/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    },
+    {
+      "revision": "istanbul",
+      "source": "src/ethereum/forks/istanbul/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ]
+    },
+    {
+      "revision": "berlin",
+      "source": "src/ethereum/forks/berlin/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ]
+    },
+    {
+      "revision": "london",
+      "source": "src/ethereum/forks/london/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ]
+    },
+    {
+      "revision": "paris",
+      "source": "src/ethereum/forks/paris/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ]
+    },
+    {
+      "revision": "shanghai",
+      "source": "src/ethereum/forks/shanghai/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ]
+    },
+    {
+      "revision": "cancun",
+      "source": "src/ethereum/forks/cancun/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "revision": "prague",
+      "source": "src/ethereum/forks/prague/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ]
+    },
+    {
+      "revision": "osaka",
+      "source": "src/ethereum/forks/osaka/vm/precompiled_contracts/mapping.py",
+      "addresses": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        256
+      ]
+    }
+  ]
+}

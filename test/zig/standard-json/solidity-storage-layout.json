@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Layout.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ntype Small is uint32;\nenum Choice { A, B, C }\ncontract Base {\n    uint128 a;\n    uint64 b;\n    uint24 transient tempA;\n}\ncontract Layout is Base layout at 42 {\n    struct Inner { uint128 x; uint64 y; }\n    struct Data {\n        Inner inner;\n        uint256[] values;\n        mapping(address owner => uint256 amount) balances;\n    }\n    uint64 c;\n    Data data;\n    uint8[40] fixedValues;\n    bytes blob;\n    string text;\n    mapping(address owner => uint256 amount) totals;\n    Choice choice;\n    Small small;\n    uint256 constant K = 1;\n    uint256 immutable I = 2;\n    int24 transient tempB;\n    uint8 transient tempC;\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "Layout": [
+          "storageLayout",
+          "transientStorageLayout"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Base.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\npragma abicoder v2;\ncontract Base { struct S { uint256 value; } function f(S memory value) public virtual {} }"
+    },
+    "Derived.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\npragma abicoder v1;\nimport \"./Base.sol\";\ncontract Derived is Base {}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

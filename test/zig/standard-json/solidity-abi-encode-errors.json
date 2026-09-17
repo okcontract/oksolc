@@ -1,0 +1,36 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "01_Fractional.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() public pure returns (bytes memory) { return abi.encode(0.1, 1); } }"
+    },
+    "02_LargeLiteral.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() public pure { abi.encode(2 ** 500); } }"
+    },
+    "03_PackedLiteral.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() public pure returns (bytes memory) { return abi.encodePacked(1); } }"
+    },
+    "04_PackedStruct.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { struct S { uint x; } function f(S memory value) public pure { abi.encodePacked(value); } }"
+    },
+    "05_InternalFunctions.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() payable public { abi.encodePacked(keccak256, f, this.f{value: 2}, blockhash); } }"
+    },
+    "06_EncodeCall.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f(int) public {} function f2(int, int) public {} function wrongType() public view returns (bytes memory) { return abi.encodeCall(this.f, (\"test\")); } function tooMany() public view returns (bytes memory) { return abi.encodeCall(this.f, (1, 2)); } function tooFew() public view returns (bytes memory) { return abi.encodeCall(this.f, ()); } function missingTuple() public view returns (bytes memory) { return abi.encodeCall(this.f); } function arrayInsteadOfTuple() public view returns (bytes memory) { return abi.encodeCall(this.f2, [1, 2]); } }"
+    },
+    "07_EncodeCallKinds.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function internalFunction(uint) internal pure {} function firstNotFunction() public pure returns (bytes memory) { return abi.encodeCall(1, (2)); } function internalKind() public pure returns (bytes memory) { return abi.encodeCall(internalFunction, (2)); } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "EvmVersion.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f(address target) public view returns (uint, uint, uint, uint, bytes32) { target.staticcall(\"\"); return (block.chainid, block.basefee, block.blobbasefee, block.prevrandao, target.codehash); } }"
+    }
+  },
+  "settings": {
+    "evmVersion": "homestead",
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

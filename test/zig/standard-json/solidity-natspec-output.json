@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "NatSpec.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\n/// @title Foundation docs\n/// @author Zig Port\n/// @notice Base contract notice.\n/// @dev Base contract details.\n/// @custom:security reviewed\nabstract contract Base {\n    /// @notice Initialize the counter.\n    /// @dev Stores the initial value.\n    /// @param seed Initial counter.\n    constructor(uint256 seed) { count = seed; }\n\n    /// @notice Read the counter.\n    /// @dev Tracks the current counter.\n    /// @return current counter value\n    uint256 public count;\n\n    /// @notice A move occurred.\n    /// @dev Emitted for every move.\n    /// @param from Source account.\n    /// @param amount Moved amount.\n    event Moved(address indexed from, uint256 amount);\n\n    /// @notice A bad value was supplied.\n    /// @dev Rejects invalid input.\n    /// @param code Rejection code.\n    error Bad(uint256 code);\n\n    /// @notice Compute the result.\n    /// @dev Returns its input.\n    /// @param x Input value.\n    /// @return result Computed value.\n    function f(uint256 x) public virtual returns (uint256 result) { return x; }\n\n    /// @notice Double a value.\n    /// @dev This documentation is inherited implicitly.\n    /// @param value Input value.\n    /// @return doubled Doubled value.\n    function g(uint256 value) public pure virtual returns (uint256 doubled) { return value * 2; }\n}\n\ncontract Derived is Base {\n    constructor() Base(7) {}\n\n    /// @inheritdoc Base\n    function f(uint256 renamed) public pure override returns (uint256 output) { return renamed; }\n\n    function g(uint256 value) public pure override returns (uint256 doubled) { return value * 2; }\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "devdoc",
+          "userdoc"
+        ]
+      }
+    }
+  }
+}

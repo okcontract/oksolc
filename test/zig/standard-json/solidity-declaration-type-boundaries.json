@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "DeclarationTypeBoundaries.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { mapping(uint outer => mapping(address inner => uint outer)) private records; uint[] transient values; }"
+    }
+  },
+  "settings": {
+    "evmVersion": "cancun",
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,393 @@
+//! Implementation of [`textDocument/foldingRange`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_foldingRange)
+
+const std = @import("std");
+const Ast = std.zig.Ast;
+
+const ast = @import("../ast.zig");
+const types = @import("lsp").types;
+const offsets = @import("../offsets.zig");
+const tracy = @import("tracy");
+
+const FoldingRange = struct {
+    loc: offsets.Loc,
+    kind: ?types.FoldingRange.Kind = null,
+};
+
+const Inclusivity = enum {
+    /// Include the token itself as part of the folding range.
+    inclusive,
+    /// Do not include the token itself as part of the folding range.
+    exclusive,
+    /// Same as `exclusive` but will also not include any adjacent whitespace.
+    exclusive_ignore_space,
+};
+
+/// Check if a node is an @import() call or an alias/field access based on an import.
+/// This drills down field accesses to find the base, assuming identifiers are aliases.
+fn isImportOrAlias(tree: *const Ast, init_node: Ast.Node.Index) bool {
+    var node = init_node;
+    while (true) {
+        switch (tree.nodeTag(node)) {
+            .builtin_call_two, .builtin_call_two_comma => {
+                // Check if this is @import("...")
+                const token = tree.nodeMainToken(node);
+                const builtin_name = offsets.tokenToSlice(tree, token);
+                if (!std.mem.eql(u8, builtin_name, "@import")) return false;
+
+                const first_param, const second_param = tree.nodeData(node).opt_node_and_opt_node;
+                const param_node = first_param.unwrap() orelse return false;
+                if (second_param != .none) return false;
+                return tree.nodeTag(param_node) == .string_literal;
+            },
+            .field_access => {
+                // Field access like @import("foo").bar or std.ascii
+                // Continue drilling down to check the left side
+                node = tree.nodeData(node).node_and_token[0];
+            },
+            .identifier => {
+                // Assume identifiers are aliases like `const ascii = std.ascii`
+                return true;
+            },
+            else => return false,
+        }
+    }
+}
+
+const Builder = struct {
+    allocator: std.mem.Allocator,
+    locations: std.ArrayList(FoldingRange),
+    tree: *const Ast,
+    encoding: offsets.Encoding,
+
+    fn deinit(builder: *Builder) void {
+        builder.locations.deinit(builder.allocator);
+    }
+
+    fn add(
+        builder: *Builder,
+        kind: ?types.FoldingRange.Kind,
+        start: Ast.TokenIndex,
+        end: Ast.TokenIndex,
+        start_reach: Inclusivity,
+        end_reach: Inclusivity,
+    ) error{OutOfMemory}!void {
+        if (start >= end) return;
+        if (builder.tree.tokensOnSameLine(start, end)) return;
+
+        const start_index = switch (start_reach) {
+            .inclusive => builder.tree.tokenStart(start),
+            .exclusive => offsets.tokenToLoc(builder.tree, start).end,
+            .exclusive_ignore_space => blk: {
+                const start_index = offsets.tokenToLoc(builder.tree, start).end;
+                const end_index = builder.tree.tokenStart(end);
+                break :blk std.mem.findNonePos(u8, builder.tree.source[0..end_index], start_index, " \t") orelse end_index;
+            },
+        };
+
+        const end_index = switch (end_reach) {
+            .inclusive => offsets.tokenToLoc(builder.tree, end).end,
+            .exclusive => builder.tree.tokenStart(end),
+            .exclusive_ignore_space => std.mem.findLastNone(u8, builder.tree.source[0..builder.tree.tokenStart(end)], " \t") orelse 0,
+        };
+
+        std.debug.assert(start_index <= end_index);
+        if (start_index == end_index) return;
+
+        try builder.locations.append(builder.allocator, .{
+            .loc = .{ .start = start_index, .end = end_index },
+            .kind = kind,
+        });
+    }
+
+    fn addNode(
+        builder: *Builder,
+        kind: ?types.FoldingRange.Kind,
+        node: Ast.Node.Index,
+        start_reach: Inclusivity,
+        end_reach: Inclusivity,
+    ) error{OutOfMemory}!void {
+        try builder.add(kind, builder.tree.firstToken(node), ast.lastToken(builder.tree, node), start_reach, end_reach);
+    }
+
+    fn getRanges(builder: Builder) error{OutOfMemory}![]types.FoldingRange {
+        const tracy_zone = tracy.trace(@src());
+        defer tracy_zone.end();
+
+        const result_ranges = try builder.allocator.alloc(types.Range, builder.locations.items.len);
+        errdefer builder.allocator.free(result_ranges);
+
+        // one mapping for every start and end position
+        var mappings = try builder.allocator.alloc(offsets.multiple.IndexToPositionMapping, builder.locations.items.len * 2);
+        defer builder.allocator.free(mappings);
+
+        for (builder.locations.items, result_ranges, 0..) |folding_range, *result, i| {
+            mappings[2 * i + 0] = .{ .output = &result.start, .source_index = folding_range.loc.start };
+            mappings[2 * i + 1] = .{ .output = &result.end, .source_index = folding_range.loc.end };
+        }
+
+        offsets.multiple.indexToPositionWithMappings(builder.tree.source, mappings, builder.encoding);
+
+        var result_locations: std.ArrayList(types.FoldingRange) = try .initCapacity(builder.allocator, builder.locations.items.len);
+        errdefer result_locations.deinit(builder.allocator);
+
+        for (builder.locations.items, result_ranges) |folding_range, range| {
+            if (range.start.line == range.end.line) continue;
+            result_locations.appendAssumeCapacity(.{
+                .startLine = range.start.line,
+                .startCharacter = range.start.character,
+                .endLine = range.end.line,
+                .endCharacter = range.end.character,
+                .kind = folding_range.kind,
+                // TODO this should be simplified https://codeberg.org/ziglang/zig/issues/30627
+                .collapsedText = if (folding_range.kind != null and folding_range.kind.? == .imports) "@import(...)" else null,
+            });
+        }
+
+        return try result_locations.toOwnedSlice(builder.allocator);
+    }
+};
+
+pub fn generateFoldingRanges(allocator: std.mem.Allocator, tree: *const Ast, encoding: offsets.Encoding) error{OutOfMemory}![]types.FoldingRange {
+    var builder: Builder = .{
+        .allocator = allocator,
+        .locations = .empty,
+        .tree = tree,
+        .encoding = encoding,
+    };
+    defer builder.deinit();
+
+    var start_doc_comment: ?Ast.TokenIndex = null;
+    var end_doc_comment: ?Ast.TokenIndex = null;
+    for (0..tree.tokens.len) |i| {
+        const token: Ast.TokenIndex = @intCast(i);
+        switch (tree.tokenTag(token)) {
+            .doc_comment,
+            .container_doc_comment,
+            => {
+                if (start_doc_comment == null) {
+                    start_doc_comment = token;
+                    end_doc_comment = token;
+                } else {
+                    end_doc_comment = token;
+                }
+            },
+            else => {
+                if (start_doc_comment != null and end_doc_comment != null) {
+                    try builder.add(.comment, start_doc_comment.?, end_doc_comment.?, .inclusive, .inclusive);
+                    start_doc_comment = null;
+                    end_doc_comment = null;
+                }
+            },
+        }
+    }
+
+    // TODO add folding range normal comments
+
+    // Folding range for top level imports
+    if (tree.mode == .zig) blk: {
+        var start_import: ?Ast.Node.Index = null;
+        var end_import: ?Ast.Node.Index = null;
+        var import_count: usize = 0;
+
+        const root_decls = tree.rootDecls();
+        for (root_decls) |node| {
+            const is_import = is_import: {
+                if (tree.nodeTag(node) != .simple_var_decl) break :is_import false;
+                const var_decl = tree.simpleVarDecl(node);
+                const init_node = var_decl.ast.init_node.unwrap() orelse break :is_import false;
+
+                break :is_import isImportOrAlias(tree, init_node);
+            };
+
+            if (is_import) {
+                if (start_import == null) {
+                    start_import = node;
+                }
+                end_import = node;
+                import_count += 1;
+                continue;
+            }
+            defer {
+                start_import = null;
+                end_import = null;
+                import_count = 0;
+            }
+
+            const start = start_import orelse continue;
+            const end = end_import orelse continue;
+            if (import_count < 3) continue;
+            try builder.add(.imports, tree.firstToken(start), ast.lastToken(tree, end) + 1, .inclusive, .inclusive);
+        }
+
+        // Handle the case where imports continue to the end of the file
+        const start = start_import orelse break :blk;
+        const end = end_import orelse break :blk;
+        if (import_count < 3) break :blk;
+        try builder.add(.imports, tree.firstToken(start), ast.lastToken(tree, end) + 1, .inclusive, .inclusive);
+    }
+
+    for (0..tree.nodes.len) |i| {
+        const node: Ast.Node.Index = @enumFromInt(i);
+
+        switch (tree.nodeTag(node)) {
+            .root => continue,
+            // TODO: Should folding multiline condition expressions also be supported? Ditto for the other control flow structures.
+
+            .fn_proto,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto_simple,
+            // .fn_decl
+            => {
+                var buffer: [1]Ast.Node.Index = undefined;
+                const fn_proto = tree.fullFnProto(&buffer, node).?;
+
+                var last_param: ?Ast.full.FnProto.Param = null;
+                var it: ast.FnParamIterator = .init(&fn_proto, tree);
+                while (it.next()) |param| {
+                    last_param = param;
+                }
+
+                const list_start_tok = fn_proto.lparen;
+                const last_param_tok = ast.paramLastToken(tree, last_param orelse continue);
+                const param_has_comma = last_param_tok + 1 < tree.tokens.len and tree.tokenTag(last_param_tok + 1) == .comma;
+                const list_end_tok = last_param_tok + @intFromBool(param_has_comma);
+
+                try builder.add(null, list_start_tok, list_end_tok, .exclusive, .inclusive);
+            },
+
+            .block_two,
+            .block_two_semicolon,
+            .block,
+            .block_semicolon,
+            => {
+                try builder.addNode(null, node, .exclusive, .exclusive_ignore_space);
+            },
+            .@"switch",
+            .switch_comma,
+            => {
+                const lhs = tree.nodeData(node).node_and_extra[0];
+                const start_tok = ast.lastToken(tree, lhs) + 2; // lparen + rbrace
+                const end_tok = ast.lastToken(tree, node);
+                try builder.add(null, start_tok, end_tok, .exclusive, .exclusive_ignore_space);
+            },
+
+            .switch_case_one,
+            .switch_case_inline_one,
+            .switch_case,
+            .switch_case_inline,
+            => {
+                const switch_case = tree.fullSwitchCase(node).?.ast;
+                if (switch_case.values.len >= 4) {
+                    const first_value = switch_case.values[0];
+                    const last_value = switch_case.values[switch_case.values.len - 1];
+
+                    const last_token = ast.lastToken(tree, last_value);
+                    const last_value_has_comma = last_token + 1 < tree.tokens.len and tree.tokenTag(last_token + 1) == .comma;
+
+                    const start_tok = tree.firstToken(first_value);
+                    const end_tok = last_token + @intFromBool(last_value_has_comma);
+                    try builder.add(null, start_tok, end_tok, .inclusive, .inclusive);
+                }
+            },
+
+            .container_decl,
+            .container_decl_trailing,
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            .container_decl_two,
+            .container_decl_two_trailing,
+            .tagged_union,
+            .tagged_union_trailing,
+            .tagged_union_two,
+            .tagged_union_two_trailing,
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            => {
+                var buffer: [2]Ast.Node.Index = undefined;
+                const container_decl = tree.fullContainerDecl(&buffer, node).?;
+                if (container_decl.ast.members.len != 0) {
+                    const first_member = container_decl.ast.members[0];
+                    var start_tok = tree.firstToken(first_member) -| 1;
+                    while (start_tok != 0 and
+                        (tree.tokenTag(start_tok) == .doc_comment or tree.tokenTag(start_tok) == .container_doc_comment))
+                    {
+                        start_tok -= 1;
+                    }
+                    const end_tok = ast.lastToken(tree, node);
+                    try builder.add(null, start_tok, end_tok, .exclusive, .exclusive_ignore_space);
+                } else { // no members (yet), ie `const T = type {};`
+                    var start_tok = tree.firstToken(node);
+                    while (tree.tokenTag(start_tok) != .l_brace) start_tok += 1;
+                    const end_tok = ast.lastToken(tree, node);
+                    try builder.add(null, start_tok, end_tok, .exclusive, .exclusive_ignore_space);
+                }
+            },
+
+            .call,
+            .call_comma,
+            .call_one,
+            .call_one_comma,
+            .array_init,
+            .array_init_one,
+            .array_init_dot_two,
+            .array_init_one_comma,
+            .array_init_dot_two_comma,
+            .array_init_dot,
+            .array_init_dot_comma,
+            .array_init_comma,
+            .struct_init,
+            .struct_init_one,
+            .struct_init_one_comma,
+            .struct_init_dot_two,
+            .struct_init_dot_two_comma,
+            .struct_init_dot,
+            .struct_init_dot_comma,
+            .struct_init_comma,
+            => {
+                const start = tree.nodeMainToken(node);
+                try builder.add(null, start, ast.lastToken(tree, node), .exclusive, .exclusive_ignore_space);
+            },
+            .builtin_call,
+            .builtin_call_comma,
+            .builtin_call_two,
+            .builtin_call_two_comma,
+            .error_set_decl,
+            => {
+                const start = tree.nodeMainToken(node) + 1;
+                try builder.add(null, start, ast.lastToken(tree, node), .exclusive, .exclusive_ignore_space);
+            },
+
+            .multiline_string_literal => {
+                try builder.addNode(null, node, .inclusive, .inclusive);
+            },
+
+            else => {},
+        }
+    }
+
+    // We add opened folding regions to a stack as we go and pop one off when we find a closing brace.
+    var stack: std.ArrayList(usize) = .empty;
+    defer stack.deinit(allocator);
+
+    var i: usize = 0;
+    while (std.mem.findPos(u8, tree.source, i, "//#")) |possible_region| {
+        i = possible_region + "//#".len;
+        i = std.mem.findScalarPos(u8, tree.source, i, '\n') orelse tree.source.len;
+
+        if (std.mem.startsWith(u8, tree.source[possible_region..], "//#region")) {
+            try stack.append(allocator, possible_region);
+        } else if (std.mem.startsWith(u8, tree.source[possible_region..], "//#endregion")) {
+            const start_index = stack.pop() orelse break; // null means there are more endregions than regions
+            try builder.locations.append(allocator, .{
+                .loc = .{
+                    .start = start_index,
+                    .end = i,
+                },
+                .kind = .region,
+            });
+        }
+    }
+
+    return try builder.getRanges();
+}

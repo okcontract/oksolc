@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "UnaryMutation.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint8 public value = 3; int8 public signedValue = -2; function mutate(uint8 input) external returns (uint8) { uint8 prior = input++; ++input; value++; uint8 oldValue = value--; unchecked { --value; value++; signedValue = -signedValue; } signedValue = -signedValue; delete prior; delete value; return input + oldValue; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

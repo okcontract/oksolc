@@ -1,0 +1,137 @@
+name: Fuzz
+
+on:
+  push:
+    paths:
+      - .github/workflows/fuzz.yml
+      - .zigversion
+      - build.zig
+      - build.zig.zon
+      - include/**
+      - src/**
+      - test/fuzz/**
+      - test/zig/**
+  pull_request:
+    paths:
+      - .github/workflows/fuzz.yml
+      - .zigversion
+      - build.zig
+      - build.zig.zon
+      - include/**
+      - src/**
+      - test/fuzz/**
+      - test/zig/**
+  schedule:
+    - cron: '17 2 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  trusted:
+    if: github.event_name != 'pull_request'
+    name: Trusted fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FUZZ_ITERATIONS: ${{ github.event_name == 'schedule' && '100K' || '10K' }}
+      ADAPTER_FUZZ_RUNS: ${{ github.event_name == 'schedule' && '100000' || '10000' }}
+      ADAPTER_FUZZ_SEED: ${{ github.run_id }}
+      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz/local
+      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz/global
+      XDG_CACHE_HOME: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz/xdg-cache
+      XDG_CONFIG_HOME: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz/xdg-config
+    steps:
+      - name: Check out trusted revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+          use-tool-cache: false
+
+      - name: Restore trusted fuzz cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.ZIG_LOCAL_CACHE_DIR }}
+            ${{ env.ZIG_GLOBAL_CACHE_DIR }}
+          key: zig-v1-trusted-${{ runner.os }}-${{ runner.arch }}-fuzz-${{ hashFiles('.zigversion', 'build.zig.zon') }}-${{ github.run_id }}
+          restore-keys: |
+            zig-v1-trusted-${{ runner.os }}-${{ runner.arch }}-fuzz-${{ hashFiles('.zigversion', 'build.zig.zon') }}-
+
+      - name: Run bounded native and sanitizer fuzzing
+        run: zig build fuzz -Doptimize=ReleaseSafe -Dadapter-fuzz-runs="${ADAPTER_FUZZ_RUNS}" -Dadapter-fuzz-seed="${ADAPTER_FUZZ_SEED}" --fuzz="${FUZZ_ITERATIONS}" -j2 --summary all
+
+      # Keep the checkpoint through ASan/UBSan/LSan process teardown. This
+      # parent step runs only after the complete fuzz command exits cleanly.
+      - name: Remove successful C fuzz checkpoint
+        run: rm -f -- "${ZIG_LOCAL_CACHE_DIR}/f/json-adapter-current-input"
+
+      - name: Upload fuzz crash reproducers
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trusted-fuzz-crashes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.ZIG_LOCAL_CACHE_DIR }}/f/crash
+            ${{ env.ZIG_LOCAL_CACHE_DIR }}/f/json-adapter-current-input
+          if-no-files-found: ignore
+          retention-days: 30
+
+  untrusted:
+    if: github.event_name == 'pull_request'
+    name: Untrusted fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FUZZ_ITERATIONS: 1K
+      ADAPTER_FUZZ_RUNS: 1000
+      ADAPTER_FUZZ_SEED: ${{ github.run_id }}
+      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz/local
+      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz/global
+      XDG_CACHE_HOME: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz/xdg-cache
+      XDG_CONFIG_HOME: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz/xdg-config
+    steps:
+      - name: Check out pull request merge revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+          use-tool-cache: false
+
+      - name: Run bounded native and sanitizer fuzzing
+        run: zig build fuzz -Doptimize=ReleaseSafe -Dadapter-fuzz-runs="${ADAPTER_FUZZ_RUNS}" -Dadapter-fuzz-seed="${ADAPTER_FUZZ_SEED}" --fuzz="${FUZZ_ITERATIONS}" -j2 --summary all
+
+      # Keep the checkpoint through ASan/UBSan/LSan process teardown. This
+      # parent step runs only after the complete fuzz command exits cleanly.
+      - name: Remove successful C fuzz checkpoint
+        run: rm -f -- "${ZIG_LOCAL_CACHE_DIR}/f/json-adapter-current-input"
+
+      - name: Upload fuzz crash reproducers
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: untrusted-fuzz-crashes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.ZIG_LOCAL_CACHE_DIR }}/f/crash
+            ${{ env.ZIG_LOCAL_CACHE_DIR }}/f/json-adapter-current-input
+          if-no-files-found: ignore
+          retention-days: 30

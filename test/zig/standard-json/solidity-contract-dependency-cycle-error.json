@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "DependencyCycle.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract A { B private b = new B(); }\ncontract B { A private a = new A(); }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"contracts":{"A.yul":{"A":{"evm":{"bytecode":{"object":"60015f5200fe"},"deployedBytecode":{"object":"60025f5260205ff3","opcodes":"PUSH1 0x2 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN ","sourceMap":"124:1:0:-:0;121;114:12;153:2;150:1;143:13"}}}}},"errors":[]}

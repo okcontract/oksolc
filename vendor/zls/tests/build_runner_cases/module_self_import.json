@@ -1,0 +1,18 @@
+{
+  "dependencies": {},
+  "modules": {
+    "root.zig": {
+      "import_table": {
+        "bar": "root.zig"
+      },
+      "c_macros": [],
+      "include_dirs": []
+    }
+  },
+  "compilations": [],
+  "top_level_steps": [
+    "install",
+    "uninstall"
+  ],
+  "available_options": {}
+}

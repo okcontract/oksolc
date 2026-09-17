@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "BadNatSpec.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\n/// @custom:Invalid rejected\ncontract BadNatSpec {\n    /// @param missing Not a parameter.\n    /// @return wrong Wrong return name.\n    /// @return extra Too many returns.\n    function f(uint256 x) public pure returns (uint256 value) { return x; }\n\n    /// @title Functions cannot have titles.\n    function g() public pure {}\n\n    /// @param\n    function h() public pure {}\n\n    /// @param x\n    function i(uint256 x) public pure {}\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

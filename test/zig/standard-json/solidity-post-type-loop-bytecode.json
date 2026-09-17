@@ -1,0 +1,24 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "PostTypeLoop.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\n\ncontract LoopAssembly {\n    function readOnly(uint256 n) external pure returns (uint256 total) {\n        for (uint256 i = 0; i < n; i++) {\n            assembly { total := add(total, i) }\n        }\n    }\n\n    function writesCounter(uint256 n) external pure returns (uint256 total) {\n        for (uint256 i = 0; i < n; i++) {\n            assembly { i := add(i, 1) total := add(total, i) }\n        }\n    }\n}\n\ncontract StorageBase {\n    uint256 internal baseMarker;\n}\n\ncontract NearEnd is StorageBase layout at 2**256 - 3 {\n    uint256 internal marker;\n}\n\ncontract EmptyNearEnd layout at 2**256 - 1 {}"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "irOptimized",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

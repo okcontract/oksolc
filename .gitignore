@@ -1,0 +1,31 @@
+# Zig build and dependency caches
+.zig-cache/
+/zig-cache/
+/zig-global-cache/
+/zig-out/
+/zig-pkg/
+.zsolc/
+.oksolc/
+
+# Local build and benchmark output
+/build/
+/reports/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.orig
+*~
+[._]*.sw[a-p]
+[._]sw[a-p]
+
+# Local AI tooling
+/.claude/
+/.codex/
+/.agents/

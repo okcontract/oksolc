@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "OverrideGraphSuccess.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\n\ninterface RootI {\n    function f() external;\n    function g() external;\n}\ninterface RootJ { function f() external; }\nabstract contract Shared is RootI, RootJ {\n    function f() external virtual override(RootI, RootJ);\n}\nabstract contract ImplementsF is Shared {\n    function f() external override {}\n}\nabstract contract ImplementsG is Shared {\n    function g() external override {}\n}\ncontract Combined is ImplementsF, ImplementsG {}\n\nabstract contract GetterBase {\n    struct Pair { uint256 x; string text; }\n    struct Complex {\n        uint256 scalar;\n        mapping(address => uint256) ignoredMapping;\n        uint256[] ignoredArray;\n        bytes blob;\n        string text;\n        uint256[2] ignoredFixedArray;\n    }\n    function mapped(address key) external virtual returns (uint256, string memory);\n    function direct() external virtual returns (uint256, string memory);\n    function complex() external virtual returns (uint256, bytes memory, string memory);\n}\ncontract GetterImpl is GetterBase {\n    mapping(address => Pair) public override mapped;\n    Pair public override direct;\n    Complex public override complex;\n}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

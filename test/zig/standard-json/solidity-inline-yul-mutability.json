@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "InlineYulMutability.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C {\n    function callValue(uint256 value) public {\n        assembly { value := callvalue() }\n    }\n    function environment() external pure returns (uint256 value) {\n        assembly { value := address() }\n    }\n    function storageRead() external pure returns (uint256 value) {\n        assembly { value := sload(0) }\n    }\n    function stateWrite() external view {\n        assembly { sstore(0, 1) }\n    }\n    function logWrite() external view {\n        assembly { log0(0, 0) }\n    }\n    function memoryOnly() external {\n        assembly { mstore(0, 1) }\n    }\n    modifier readsValue() {\n        assembly { pop(callvalue()) }\n        _;\n    }\n    function modified() public readsValue {}\n}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

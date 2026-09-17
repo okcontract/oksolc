@@ -1,0 +1,211 @@
+//! Disallow using inferred error sets in function return types — always declare them explicitly.
+//!
+//! In Zig, when you write `!T` as a return type without an explicit error set
+//! (e.g. `!void`), Zig infers the error set from whatever operations inside the
+//! function can fail.
+//!
+//! This is powerful, but it can:
+//!
+//! * Make APIs harder to understand - the possible errors aren’t visible at the signature.
+//! * Make refactoring risky - adding or changing a failing operation silently changes the function’s error type.
+//! * Lead to brittle dependencies - downstream callers may break if the inferred error set grows or changes.
+//!
+//! The goal of the rule is to keep error contracts clear and stable. If it can fail, say how.
+
+/// Config for no_inferred_error_unions rule.
+pub const Config = struct {
+    /// The severity of inferred error unions (off, warning, error).
+    severity: zlinter.rules.LintProblemSeverity = .warning,
+
+    /// Allow inferred error unions for private functions.
+    allow_private: bool = true,
+
+    /// Allow `anyerror` as the explicit error.
+    allow_anyerror: bool = true,
+};
+
+/// Builds and returns the no_inferred_error_unions rule.
+pub fn buildRule(options: zlinter.rules.RuleOptions) zlinter.rules.LintRule {
+    _ = options;
+
+    return zlinter.rules.LintRule{
+        .rule_id = @tagName(.no_inferred_error_unions),
+        .run = &run,
+    };
+}
+
+/// Runs the no_inferred_error_unions rule.
+fn run(
+    rule: zlinter.rules.LintRule,
+    _: *zlinter.session.LintContext,
+    doc: *const zlinter.session.LintDocument,
+    gpa: std.mem.Allocator,
+    options: zlinter.rules.RunOptions,
+) zlinter.rules.RunError!?zlinter.results.LintResult {
+    const config = options.getConfig(Config);
+    if (config.severity == .off) return null;
+
+    var lint_problems = std.ArrayList(zlinter.results.LintProblem).empty;
+    defer lint_problems.deinit(gpa);
+
+    const tree = doc.handle.tree;
+
+    const root: Ast.Node.Index = .root;
+    var it = try doc.nodeLineageIterator(root, gpa);
+    defer it.deinit();
+
+    var fn_decl_buffer: [1]Ast.Node.Index = undefined;
+    nodes: while (try it.next()) |tuple| {
+        const node, const connections = tuple;
+        _ = connections;
+
+        const tag = tree.nodeTag(node);
+        if (tag != .fn_decl) continue :nodes;
+
+        const fn_decl = tree.fullFnProto(&fn_decl_buffer, node) orelse continue :nodes;
+        if (config.allow_private and zlinter.ast.fnProtoVisibility(tree, fn_decl) == .private) continue :nodes;
+
+        const return_type = fn_decl.ast.return_type.unwrap() orelse continue :nodes;
+
+        const return_type_tag = tree.nodeTag(return_type);
+        switch (return_type_tag) {
+            .error_union => if (config.allow_anyerror or
+                !std.mem.eql(u8, tree.tokenSlice(tree.firstToken(return_type)), "anyerror"))
+                continue :nodes,
+            .identifier => switch (tree.tokens.items(.tag)[tree.firstToken(return_type) - 1]) {
+                .bang => {},
+                else => continue :nodes,
+            },
+            else => continue :nodes,
+        }
+
+        try lint_problems.append(gpa, .{
+            .rule_id = rule.rule_id,
+            .severity = config.severity,
+            .start = .startOfToken(tree, tree.firstToken(node)),
+            .end = .endOfNode(tree, return_type),
+            .message = try gpa.dupe(u8, "Function returns an inferred error union. Prefer an explicit error set"),
+        });
+    }
+
+    return if (lint_problems.items.len > 0)
+        try zlinter.results.LintResult.init(
+            gpa,
+            doc.path,
+            try lint_problems.toOwnedSlice(gpa),
+        )
+    else
+        null;
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}
+
+test "no_inferred_error_unions - valid function declarations" {
+    inline for (&.{
+        \\pub fn pubGood() error{Always}!void {
+        \\  return error.Always;
+        \\}
+        ,
+        \\const Errors = error{Always};
+        \\pub fn pubGood() Errors!void {
+        \\  return error.Always;
+        \\}
+        ,
+        \\pub fn pubAlsoAllowedByDefault() anyerror!void {
+        \\return error.Always;
+        \\}
+        ,
+        \\pub fn hasNoError() void {}
+        ,
+        \\fn privateAllowInferred() !void {
+        \\ return error.Always;
+        \\}
+    }) |source| {
+        try zlinter.testing.testRunRule(
+            buildRule(.{}),
+            source,
+            .{},
+            Config{},
+            &.{},
+        );
+    }
+}
+
+test "no_inferred_error_unions - Invalid function declarations - off" {
+    try zlinter.testing.testRunRule(
+        buildRule(.{}),
+        \\pub fn inferred() !void {
+        \\  return error.Always;
+        \\}
+    ,
+        .{},
+        Config{ .severity = .off },
+        &.{},
+    );
+}
+
+test "no_inferred_error_unions - Invalid function declarations - defaults" {
+    try zlinter.testing.testRunRule(
+        buildRule(.{}),
+        \\pub fn inferred() !void {
+        \\  return error.Always;
+        \\}
+    ,
+        .{},
+        Config{},
+        &.{
+            .{
+                .rule_id = "no_inferred_error_unions",
+                .severity = .warning,
+                .slice = "pub fn inferred() !void",
+                .message = "Function returns an inferred error union. Prefer an explicit error set",
+            },
+        },
+    );
+}
+
+test "no_inferred_error_unions - Invalid function declarations - allow_private = false" {
+    try zlinter.testing.testRunRule(
+        buildRule(.{}),
+        \\fn inferred() !void {
+        \\  return error.Always;
+        \\}
+    ,
+        .{},
+        Config{ .allow_private = false },
+        &.{
+            .{
+                .rule_id = "no_inferred_error_unions",
+                .severity = .warning,
+                .slice = "fn inferred() !void",
+                .message = "Function returns an inferred error union. Prefer an explicit error set",
+            },
+        },
+    );
+}
+
+test "no_inferred_error_unions - Invalid function declarations - allow_anyerror = false" {
+    try zlinter.testing.testRunRule(
+        buildRule(.{}),
+        \\pub fn inferred() anyerror!void {
+        \\  return error.Always;
+        \\}
+    ,
+        .{},
+        Config{ .allow_anyerror = false, .severity = .@"error" },
+        &.{
+            .{
+                .rule_id = "no_inferred_error_unions",
+                .severity = .@"error",
+                .slice = "pub fn inferred() anyerror!void",
+                .message = "Function returns an inferred error union. Prefer an explicit error set",
+            },
+        },
+    );
+}
+
+const std = @import("std");
+const zlinter = @import("zlinter");
+const Ast = std.zig.Ast;

@@ -1,0 +1,2 @@
+# User-wide defaults used by the isolated CLI smoke tests.
+parallel = false

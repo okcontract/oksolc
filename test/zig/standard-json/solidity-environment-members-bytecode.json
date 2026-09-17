@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Environment.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { address public sender; uint256 public paid; function capture() external payable { sender = msg.sender; paid = msg.value; } function environment() external view returns (address, uint256, uint256, uint256, uint256, address, uint256, uint256, uint256, uint256) { return (block.coinbase, block.timestamp, block.number, block.gaslimit, block.chainid, tx.origin, tx.gasprice, block.basefee, block.prevrandao, block.blobbasefee); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "NamedEventsErrors.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint256 private sequence; event Named(uint256 indexed first, uint256 second); error NamedError(uint256 first, uint256 second); function next(uint256 value) internal returns (uint256) { sequence += 1; return value + sequence; } function exercise(uint256 mode) external { if (mode == 0) { emit Named({second: next(20), first: next(10)}); return; } if (mode == 1) revert NamedError({second: next(40), first: next(30)}); require(false, NamedError({second: next(60), first: next(50)})); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

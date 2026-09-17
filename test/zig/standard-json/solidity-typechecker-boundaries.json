@@ -1,0 +1,57 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "01_PublicAbstract.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nabstract contract C { constructor() public {} }"
+    },
+    "02_InternalConcrete.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { constructor() internal {} }"
+    },
+    "03_ExternalConstructor.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { constructor() external {} }"
+    },
+    "04_AddressContractConversion.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() public pure returns (C c) { address a = address(2); c = C(a); } fallback() external payable {} }"
+    },
+    "05_FunctionAddressConversion.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() public view returns (address) { return address(this.f); } }"
+    },
+    "06_ContractNameCall.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { function f() external {} function g() external pure {} function h() public pure {} } contract B { function i() external { A.f(); A.g(); A.h(); } }"
+    },
+    "09_MappingPush.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { mapping(uint => uint)[] array; mapping(uint => uint) map; function f() public { array.push(); array.push(map); } }"
+    },
+    "10_RuntimeCode.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { address public immutable user = address(0); } contract C { function f() public pure returns (bytes memory) { return type(A).runtimeCode; } }"
+    },
+    "11_AddressChecksum.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() pure public { address x = 0xFA0bFc97E48458494Ccd857e1A85DC91F7F0046E; x; } }"
+    },
+    "12_DeprecatedBuiltins.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() pure public { bytes32 x = sha3(\"\"); x; } function g() public { suicide(payable(address(1))); } function h() public { selfdestruct(payable(address(1))); } function timestamp() public view returns (uint) { return now; } }"
+    },
+    "13_FunctionComparison.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() public pure returns (bool) { return f == f; } function g() public pure returns (bool) { return f != f; } }"
+    },
+    "14_ExponentWarning.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function f() public pure { uint8 x = 3; int16 y = 4; x ** y; } }"
+    },
+    "15_ContractComparison.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A {} contract C { function f(A a, A b) public pure returns (bool) { return a == b; } }"
+    },
+    "16_DeprecatedCallOptions.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { function payableCall() external payable {} } contract C { function f(A a) public { a.payableCall.value(1)(); a.payableCall.gas(1000)(); } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

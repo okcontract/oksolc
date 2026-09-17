@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "CallableControlFlow.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ninterface Target { function complex(bytes calldata data, uint256[] calldata values) external payable returns (bytes memory, uint256[] memory); function named(uint256 a, uint256 b) external view returns (uint256); }\nerror Bad(uint256 code, string reason);\ncontract C { uint256[] private values; function externalCall(Target target, bytes memory data, uint256[] memory input) external payable returns (bytes memory, uint256[] memory) { return target.complex{gas: 100000, value: 1}(data, input); } function namedCall(Target target) external view returns (uint256) { return target.named({b: 2, a: 1}); } function lowCall(address target, bytes memory data) external payable returns (bool, bytes memory) { return target.call{gas: 90000, value: 1}(data); } function storageOps(uint256 value) external returns (uint256) { values.push() = value; values.push(value + 1); uint256 result = values[values.length - 1]; values.pop(); return result; } function payments(address payable recipient) external payable returns (bool) { bool sent = recipient.send(1); recipient.transfer(0); return sent; } function encodeAll(bytes4 selector, string memory signature, uint256 value) external pure returns (bytes memory, bytes memory, bytes memory, bytes memory, bytes memory) { return (abi.encode(value), abi.encodePacked(value), abi.encodeWithSelector(selector, value), abi.encodeWithSignature(signature, value), abi.encodeCall(Target.named, (value, value + 1))); } function hashAll(bytes memory data, uint8 v, bytes32 r, bytes32 s) external pure returns (bytes32, bytes32, bytes20, address) { return (keccak256(data), sha256(data), ripemd160(data), ecrecover(keccak256(data), v, r, s)); } function checks(bool condition, string memory reason, uint256 code) external pure returns (uint256) { require(condition, reason); require(code != 0, Bad(code, reason)); return code; } function fail(string memory reason) external pure { revert(reason); } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

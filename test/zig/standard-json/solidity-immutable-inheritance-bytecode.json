@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ImmutableInheritance.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { uint8 public immutable base = 2; } contract C is A { uint8 public immutable derived; constructor(uint8 input) { derived = base + input; } function combined() external view returns (uint8) { return base + derived; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

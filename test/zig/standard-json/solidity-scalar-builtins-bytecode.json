@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Builtins.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function values(uint256 a, uint256 b, uint256 modulus, uint256 index) external view returns (uint256, uint256, bytes32, bytes32, uint256) { return (addmod(a, b, modulus), mulmod(a, b, modulus), blockhash(index), blobhash(index), gasleft()); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

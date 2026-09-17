@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ConstantEvaluatorBoundaries.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C { uint256 constant ZERO = 0; uint256[((5 / 2) % (3 / 2))] private exactFractionalModulo; function divByConstant(uint256 value) external pure returns (uint256) { return value / ZERO; } function addmodByConstant() external pure returns (uint256) { return addmod(1, 2, ZERO); } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

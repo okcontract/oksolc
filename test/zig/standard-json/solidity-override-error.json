@@ -1,0 +1,33 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "01-MissingVirtual.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nabstract contract A {\n    function test() external virtual returns (uint256);\n    function test2() external returns (uint256) {}\n}\nabstract contract X is A {\n    function test() external returns (uint256) {}\n    function test2() external override(A) returns (uint256) {}\n}"
+    },
+    "02-ReturnMismatch.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nabstract contract A {\n    function foo() internal virtual returns (uint256);\n}\nabstract contract B {\n    function foo() internal virtual returns (uint8);\n    function test() internal virtual returns (uint256);\n}\nabstract contract X is A, B {\n    function test() internal override virtual returns (uint256);\n}"
+    },
+    "03-Mutability.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { function foo() external pure virtual returns (uint256) {} }\ncontract B is A { function foo() external pure override virtual returns (uint256) {} }\ncontract C is A { function foo() external view override virtual returns (uint256) {} }\ncontract D is B, C { function foo() external override(B, C) virtual returns (uint256) {} }\ncontract E is C, B { function foo() external pure override(B, C) virtual returns (uint256) {} }\ncontract F is C, B { function foo() external payable override(B, C) virtual returns (uint256) {} }"
+    },
+    "04-DuplicateList.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nabstract contract A { function foo() internal virtual returns (uint256); function test(uint8 value) internal virtual returns (uint256); }\nabstract contract B { function foo() internal virtual returns (uint256); function test() internal virtual returns (uint256); }\nabstract contract C { function foo() internal virtual returns (uint256); }\nabstract contract D { function foo() internal virtual returns (uint256); function test() internal virtual returns (uint256); }\nabstract contract X is A, B, C, D {\n    function test() internal override(B, D, D) virtual returns (uint256);\n    function foo() internal override(A, C, B, B, B, D, D) virtual returns (uint256);\n}"
+    },
+    "05-MissingList.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nabstract contract A { function foo() internal virtual returns (uint256); function test(uint8 value) internal virtual returns (uint256); }\nabstract contract B { function foo() internal virtual returns (uint256); function test() internal virtual returns (uint256); }\nabstract contract C { function foo() internal virtual returns (uint256); }\nabstract contract D { function foo() internal virtual returns (uint256); function test() internal virtual returns (uint256); }\nabstract contract X is A, B, C, D {\n    function test() internal override(B, D, C) virtual returns (uint256);\n    function foo() internal override(A, C) virtual returns (uint256);\n}"
+    },
+    "06-PublicVariableList.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ninterface A { function foo() external returns (uint256); }\ninterface B {}\ncontract X is A { uint256 public override(A, B) foo; }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

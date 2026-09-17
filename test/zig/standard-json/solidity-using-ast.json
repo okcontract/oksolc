@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "U.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\nusing L for uint; contract C { using {f as +} for uint global; function(uint) external cb; }"
+    }
+  },
+  "settings": {
+    "stopAfter": "parsing",
+    "outputSelection": {
+      "U.sol": {
+        "": [
+          "ast"
+        ]
+      }
+    }
+  }
+}

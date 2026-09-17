@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "BaseConstructor.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { uint256 public value; constructor(uint256 x) { value = x; } } contract C is A { constructor(uint256 x) A(x + 1) {} }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

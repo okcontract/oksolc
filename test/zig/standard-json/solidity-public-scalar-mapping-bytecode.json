@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "PublicMapping.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { mapping(uint8 => mapping(address => uint8)) public values; function set(uint8 group, address account, uint8 value) external { values[group][account] = value; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "AddressMembers.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function inspect(address target) external view returns (uint256, bytes32, uint256, uint256) { return (target.balance, target.codehash, target.code.length, bytes17(0).length); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"language":"Yul","sources":{"A.yul":{"content":"object \"A\" { code { mstore(0, linkersymbol(\"lib.sol:L\")) return(0, 32) } }"}},"settings":{"optimizer":{"enabled":false,"details":{"yulDetails":{"optimizerSteps":":"}}},"outputSelection":{"*":{"*":["evm.bytecode.object","evm.bytecode.linkReferences"]}}}}

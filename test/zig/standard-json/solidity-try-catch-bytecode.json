@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "TryCatch.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ninterface Target { function run(uint256 value) external returns (uint256, string memory); function one(uint256 value) external returns (uint256); }\ncontract C { function attempt(Target target, uint256 input) external returns (uint256 code, string memory text) { try target.run(input) returns (uint256 value, string memory message) { return (value, message); } catch Error(string memory reason) { return (1, reason); } catch Panic(uint256 panicCode) { return (panicCode, \"panic\"); } catch (bytes memory data) { return (data.length, string(data)); } } function attemptWithoutFallback(Target target, uint256 input) external returns (uint256) { try target.one(input) returns (uint256 value) { return value; } catch Panic(uint256 panicCode) { return panicCode; } } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

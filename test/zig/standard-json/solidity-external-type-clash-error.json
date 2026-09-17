@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ExternalTypeClashError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\nstruct A { uint256 value; }\nstruct B { uint256 value; }\ncontract C { function f(A memory value) public {} function f(B memory value) public {} }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ViaIRSmoke.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\npragma solidity 0.8.36; contract ViaIRSmoke { function sum(uint256 a, uint256 b) external pure returns (uint256 result) { result = a + b; } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode.object",
+          "ir",
+          "irOptimized"
+        ]
+      }
+    }
+  }
+}

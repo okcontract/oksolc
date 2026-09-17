@@ -1,0 +1,79 @@
+<!doctype html>
+<!--
+// Copyright (C) 2026 OKcontract Pte. Ltd.
+SPDX-License-Identifier: GPL-3.0
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>oksolc · Workspace</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to source</a>
+  <header class="topbar">
+    <button class="icon-button mobile-menu" id="menu-toggle" aria-label="Toggle project navigation" aria-expanded="false">☰</button>
+    <a class="brand" href="#" aria-label="oksolc workspace">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" xml:space="preserve" fill-rule="evenodd" clip-rule="evenodd" stroke-linejoin="round" stroke-miterlimit="2" class="brand-mark" aria-hidden="true" focusable="false">
+        <path d="M23.808 98.822a6.066 6.066 0 0 1-2.088 1.539c-.828.378-1.782.567-2.862.567-.984 0-1.893-.162-2.727-.486a6.406 6.406 0 0 1-2.169-1.377 6.377 6.377 0 0 1-1.44-2.133c-.348-.828-.522-1.74-.522-2.736 0-1.02.177-1.944.531-2.772a6.166 6.166 0 0 1 1.467-2.115 6.497 6.497 0 0 1 2.196-1.341 7.745 7.745 0 0 1 2.718-.468c.9 0 1.785.159 2.655.477.87.318 1.575.783 2.115 1.395l-2.088 2.088a2.584 2.584 0 0 0-1.134-.882 3.761 3.761 0 0 0-1.44-.288c-.54 0-1.035.099-1.485.297-.45.198-.837.471-1.161.819a3.731 3.731 0 0 0-.756 1.233c-.18.474-.27.993-.27 1.557 0 .576.09 1.104.27 1.584.18.48.429.891.747 1.233.318.342.699.609 1.143.801.444.192.93.288 1.458.288.612 0 1.146-.12 1.602-.36.456-.24.822-.552 1.098-.936l2.142 2.016ZM38.801 94.16c0 1.008-.174 1.929-.522 2.763a6.291 6.291 0 0 1-1.449 2.142 6.447 6.447 0 0 1-2.205 1.377 7.735 7.735 0 0 1-2.772.486c-.996 0-1.917-.162-2.763-.486a6.465 6.465 0 0 1-2.196-1.377 6.291 6.291 0 0 1-1.449-2.142c-.348-.834-.522-1.755-.522-2.763 0-1.02.174-1.941.522-2.763a6.05 6.05 0 0 1 1.449-2.097 6.455 6.455 0 0 1 2.196-1.332c.846-.312 1.767-.468 2.763-.468s1.92.156 2.772.468A6.438 6.438 0 0 1 36.83 89.3a6.05 6.05 0 0 1 1.449 2.097c.348.822.522 1.743.522 2.763Zm-3.294 0c0-.552-.09-1.068-.27-1.548a3.689 3.689 0 0 0-.747-1.233 3.448 3.448 0 0 0-1.152-.81 3.647 3.647 0 0 0-1.485-.297c-.54 0-1.032.099-1.476.297a3.573 3.573 0 0 0-1.152.81 3.503 3.503 0 0 0-.747 1.233c-.174.48-.261.996-.261 1.548 0 .576.09 1.107.27 1.593.18.486.429.903.747 1.251a3.41 3.41 0 0 0 1.143.819c.444.198.936.297 1.476.297.54 0 1.032-.099 1.476-.297a3.508 3.508 0 0 0 1.152-.819c.324-.348.576-.765.756-1.251.18-.486.27-1.017.27-1.593ZM49.435 100.586l-5.13-8.334h-.054l.072 8.334h-2.988V87.842h3.51l5.112 8.316h.054l-.072-8.316h2.988v12.744h-3.492ZM61.509 90.47v10.116h-3.078V90.47h-3.6v-2.628h10.278v2.628h-3.6ZM73.835 100.586l-2.754-5.058h-1.044v5.058h-3.024V87.842h4.86a8.44 8.44 0 0 1 1.791.189 4.656 4.656 0 0 1 1.566.639c.462.3.831.696 1.107 1.188s.414 1.104.414 1.836c0 .864-.234 1.59-.702 2.178-.468.588-1.116 1.008-1.944 1.26l3.33 5.454h-3.6Zm-.126-8.838c0-.3-.063-.543-.189-.729a1.295 1.295 0 0 0-.486-.432 2.111 2.111 0 0 0-.666-.207 4.912 4.912 0 0 0-.711-.054h-1.638v2.97h1.458c.252 0 .51-.021.774-.063.264-.042.504-.117.72-.225.216-.108.393-.264.531-.468.138-.204.207-.468.207-.792ZM88.587 100.586l-.99-2.502h-4.932l-.936 2.502h-3.348l5.346-12.744h2.988l5.292 12.744h-3.42Zm-3.42-9.342-1.62 4.374h3.204l-1.584-4.374ZM104.459 98.822a6.066 6.066 0 0 1-2.088 1.539c-.828.378-1.782.567-2.862.567-.984 0-1.893-.162-2.727-.486a6.406 6.406 0 0 1-2.169-1.377 6.377 6.377 0 0 1-1.44-2.133c-.348-.828-.522-1.74-.522-2.736 0-1.02.177-1.944.531-2.772a6.166 6.166 0 0 1 1.467-2.115 6.497 6.497 0 0 1 2.196-1.341 7.745 7.745 0 0 1 2.718-.468c.9 0 1.785.159 2.655.477.87.318 1.575.783 2.115 1.395l-2.088 2.088a2.584 2.584 0 0 0-1.134-.882 3.761 3.761 0 0 0-1.44-.288c-.54 0-1.035.099-1.485.297-.45.198-.837.471-1.161.819a3.731 3.731 0 0 0-.756 1.233c-.18.474-.27.993-.27 1.557 0 .576.09 1.104.27 1.584.18.48.429.891.747 1.233.318.342.699.609 1.143.801.444.192.93.288 1.458.288.612 0 1.146-.12 1.602-.36.456-.24.822-.552 1.098-.936l2.142 2.016ZM112.289 90.47v10.116h-3.078V90.47h-3.6v-2.628h10.278v2.628h-3.6Z" transform="translate(2.42 4.2) scale(.96301)" fill-rule="nonzero" />
+        <path d="m96.506 11.449-3.695-4.248 3.415-4.248h2.568l-3.488 4.248 3.876 4.248h-2.676Z" transform="translate(-504.157 8.324) scale(6.23279)" fill-rule="nonzero" />
+        <path d="M95.637 6.889V2.953h3.157l-3.157 3.936Z" transform="translate(-523.955 8.327) scale(6.23279)" fill-rule="nonzero" />
+        <path d="M41.882 79.784c14.818-.577 26.386-12.956 25.814-27.625-.404-10.382-6.78-19.146-15.724-23.18L19.55 69.439a26.928 26.928 0 0 0 22.33 10.346ZM16.664 64.827c.069.141 1.142 2.102 1.142 2.102l31.348-39.014s-4.398-1.482-9.342-1.29c-14.82.574-26.387 12.955-25.815 27.625a26.26 26.26 0 0 0 2.667 10.577Z" />
+      </svg>
+      <span class="brand-name">oksolc</span>
+    </a>
+    <div class="document-heading"><div class="eyebrow" id="directory">PROJECT</div><h1 id="filename">Your compilation</h1></div>
+    <div id="summary" class="summary">
+      <button id="diagnostics-summary" class="summary-button" data-kind="diagnostic" hidden></button>
+    </div>
+    <div class="session-picker"><span class="live-dot" aria-hidden="true"></span><label class="sr-only" for="compilation">Compilation</label><select id="compilation"></select><button id="older" class="quiet" hidden>Older</button></div>
+    <a id="download-output" class="button subtle" download="output.json">Export output <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <div class="workspace">
+    <aside class="sidebar" id="navigation" aria-label="Project navigation">
+      <div class="sidebar-heading"><span class="eyebrow">EXPLORER</span><span class="count" id="file-count"></span></div>
+      <div class="search-field"><span aria-hidden="true">⌕</span><label class="sr-only" for="search">Search project files, symbols and code</label><input id="search" type="search" placeholder="Search this project…" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+      <div class="nav-scroll"><nav id="tree" aria-label="Source files"></nav><div id="search-results" hidden></div></div>
+      <div class="sidebar-footer"><span class="live-dot" aria-hidden="true"></span>Local session<span id="snapshot-origin"></span></div>
+    </aside>
+
+    <main id="main" tabindex="-1">
+      <div class="document-toolbar">
+        <nav class="tabs" aria-label="Compiler views">
+          <button data-tab="source" aria-current="page">Source</button>
+          <button data-tab="abi">ABI</button>
+          <button data-tab="bytecode">Bytecode</button>
+          <button data-tab="artifacts">Artifacts</button>
+        </nav>
+        <label class="sr-only" for="contract">Contract</label><select id="contract" aria-label="Contract"></select>
+      </div>
+      <div id="view-status" class="view-status" role="status" aria-live="polite"></div>
+      <div id="live-bar" class="live-bar" hidden>
+        <div class="live-heading"><span id="live-status" role="status" aria-live="polite"></span><div class="live-actions"><button id="workspace-live" class="quiet" hidden>Browse workspace</button><button id="follow-live" class="quiet" hidden>Follow latest</button></div></div>
+        <div id="compilation-progress" class="compilation-progress" hidden>
+          <progress id="live-progress" aria-label="Project compilation" aria-describedby="progress-item"></progress>
+          <div class="progress-caption"><span id="progress-item"></span><span id="progress-count"></span></div>
+        </div>
+      </div>
+      <div id="content" class="document-content"></div>
+      <footer class="document-footer"><div class="source-position"><button id="line-position" popovertarget="line-jump" aria-label="Go to line" hidden></button><span id="position">Ready</span></div><div><a id="download-request" download="request.json">Request JSON</a><span class="dot-separator">·</span><span id="timestamp"></span></div></footer>
+    </main>
+
+    <aside class="inspector" aria-label="Source details">
+      <div class="inspector-tabs" role="group" aria-label="Details view"><button data-panel="outline" aria-pressed="true">Outline</button><button data-panel="diagnostics" aria-pressed="false">Diagnostics</button><button data-panel="references" aria-pressed="false">References</button></div>
+      <div id="details" class="inspector-content"></div>
+    </aside>
+  </div>
+  <form id="line-jump" class="status-popover line-jump" popover="auto" role="dialog" aria-labelledby="line-jump-title">
+    <div class="popover-heading"><h2 id="line-jump-title">Go to line</h2><button id="line-jump-close" type="button" class="quiet" aria-label="Close line navigation">×</button></div>
+    <label for="line-number">Line number <span id="line-range" class="muted"></span></label>
+    <div class="line-jump-controls"><input id="line-number" type="number" inputmode="numeric" min="1" step="1" required autofocus aria-label="Go to line" aria-describedby="line-range"><button type="submit" class="button">Go</button></div>
+  </form>
+  <div id="toast" role="alert" hidden></div>
+  <noscript>This local source browser needs JavaScript. Compiler output remains available from oksolc standard-json.</noscript>
+</body>
+</html>

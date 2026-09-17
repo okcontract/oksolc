@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+
+<head>
+    <link rel="stylesheet" href="style.css?b={build_timestamp}">
+    <title>Zlinter - Zig AST Explorer - Visualize and Explore Zig Abstract Syntax Trees Online</title>
+    <meta name="description"
+        content="Visualize and explore the Abstract Syntax Tree (AST) of Zig code. A tool for learning, debugging, and understanding Zig syntax and semantics.">
+    <meta name="keywords"
+        content="Zig, AST Explorer, Zig AST, Abstract Syntax Tree, Zig language, Zig compiler, Zig visualization, Zig code analysis, Zig development tools, Zig syntax tool">
+</head>
+
+<body spellcheck=false class="editor">
+    <div class="editor__toolbar">
+        <span class="editor__toolbar__title"><a href="http://github.com/kurtwagner/zlinter" target="_blank">Zlinter</a>
+            - Zig AST
+            Explorer (zig {zig_version})</span>
+        <div class="editor__toolbar__builtwith">Built with <a href="http://github.com/kurtwagner/zlinter"
+                target="_blank">zlinter</a>
+            and <a href="https://github.com/zigtools/zls" target="_blank">zls</a></div>
+        <a class="editor__toolbar__github" title="Open project in Github" target="_blank"
+            href="https://github.com/KurtWagner/zlinter/tree/0.14.x/website/explorer">
+            <img width="25px" height="25px" src="github.svg" />
+        </a>
+    </div>
+    <div class="editor__body">
+        <div class="editor__body__content">
+            <div class="editor__body__line-numbers" id="line_numbers"></div>
+            <div class="editor__body__code">
+                <div class="editor__body__code__highlight" id="highlight"></div>
+                <div class="editor__body__code__input" id="input" tabindex="1" contenteditable="plaintext-only">
+                </div>
+            </div>
+            <div class="editor__body__options">
+                <div class="editor__body__options__fmt" id="fmt-button" title="Fmt code">F</div>
+            </div>
+        </div>
+        <div class="editor__body__tree" id="tree">
+        </div>
+    </div>
+</body>
+<script src="./explorer.js?b={build_timestamp}"></script>
+
+</html>

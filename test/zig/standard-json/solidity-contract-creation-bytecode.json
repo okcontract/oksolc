@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ContractCreation.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract Child { uint256 public value; constructor(uint256 initial) payable { value = initial; } }\ncontract Parent { Child public first; constructor(uint256 seed) { first = new Child(seed + 1); } function make(uint256 value, bytes32 salt) external payable returns (address) { Child created = new Child{salt: salt, value: msg.value}(value); return address(created); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "Parent": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

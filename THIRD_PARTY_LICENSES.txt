@@ -1,0 +1,118 @@
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+============================================
+
+This file covers third-party code compiled or linked into solidity-zig and
+dependencies resolved by its build and benchmark steps. Unless stated
+otherwise, the project's own code is licensed under GPL-3.0; see LICENSE.txt
+and COPYRIGHT.txt.
+
+MIT-licensed components
+-----------------------
+
+The following components use the MIT License. The copyright notice listed
+for each component and the license text below apply to that component.
+
+* Zig 0.16 standard library
+  Copyright (c) Zig contributors
+
+* zqlite.zig at b519eea9b1a2b5fcad68af6d0629e717e8746684
+  Copyright (c) 2024 Karl Seguin.
+  The Zig wrapper uses this repository's pinned SQLite amalgamation.
+
+* http.zig at 9b14af98fde5e98abb9a8376fe02b42003e835bf
+  Copyright (c) 2024 Karl Seguin.
+
+* metrics.zig at 6de29b83a750a06c438d268543e0e3c3c1b309da
+  Copyright (c) 2024 Karl Seguin.
+
+* websocket.zig at b70e733bc0d0ba0a98ff5fe5ef64d3017c85f369
+  Copyright (c) 2024 Karl Seguin.
+
+* clap 0.12.0
+  Copyright (c) 2018 Jimmi Holst Christensen
+
+* zig-toml 0.3.0 at 8685923e32e8b8a795eb2715684236975a70faed
+  Copyright (c) 2022-present Alexei Samokvalov & Contributors
+
+* yyjson 0.12.0
+  Copyright (c) 2020 YaoYuan <ibireme@gmail.com>
+
+* zBench 0.11.2 (benchmark-only dependency)
+  Copyright (c) 2023 hndrk
+
+* zlinter 0.16.x at 8b10b45d33c684be4f869baf95a37c282e9db750
+  Copyright (c) 2025 zlinter contributors
+
+* ZLS 0.16.0 at 494486203c3a48927f2383aa3d5ce5fca112186d
+  Copyright (c) ZLS contributors
+
+* known-folders at d6d03830968cca6b7b9f24fd97ee348346a6905d
+  Copyright (c) 2020 ziglibs
+
+* diffz 0.0.1 at b39fe07e7fdbcf56e43ba2890b9f484f16969f90
+  Copyright (c) 2023 diffz authors
+
+* lsp-kit 0.1.0 at b886a2b0d5cee85ecbcc3089b863f7517cc9ff7f
+  Copyright (c) 2022 zig-lsp-codegen contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+Public-domain components
+------------------------
+
+* SQLite 3.53.4 amalgamation
+
+  SQLite is in the public domain. The official project dedication and blessing
+  are available at https://www.sqlite.org/copyright.html. Vendored provenance
+  and cryptographic hashes are recorded in vendor/README.md.
+
+
+V8-derived scanner and token code
+---------------------------------
+
+The structural translations in src/liblangutil/char_stream.zig,
+src/liblangutil/scanner.zig, and src/liblangutil/token.zig retain ancestry
+from the V8-derived scanner and token code in upstream Solidity.
+
+Copyright 2006-2012, the V8 project authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+* Neither the name of Google Inc. nor the names of its contributors may be
+  used to endorse or promote products derived from this software without
+  specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

@@ -1,0 +1,24 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Modifier.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract Base { uint256 internal value; modifier gate() virtual { value = 1; _; } function run() public gate { value = 2; } } contract Derived is Base { modifier gate() override { value = 3; _; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "debug": {
+      "debugInfo": [
+        "location",
+        "ast-id"
+      ]
+    },
+    "outputSelection": {
+      "Modifier.sol": {
+        "Derived": [
+          "ir"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "InlineAssembly.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint128 private packed; uint128 private state; uint256[] private values; uint256 constant NUMBER = 0x123456; bytes4 constant WORD = \"abcd\"; function assemblyAll(uint256 x, bytes calldata data, function(uint256) external returns (uint256) callback) external returns (uint256 result) { uint256[] storage aliasValues = values; assembly (\"memory-safe\") { function bump(v) -> r { r := add(v, 1) } let slot := state.slot let offset := state.offset let dataOffset := data.offset let dataLength := data.length let target := callback.address let selector := callback.selector let aliasSlot := aliasValues.slot aliasValues.slot := aliasSlot result := xor(bump(add(x, NUMBER)), WORD) mstore(0x80, add(add(dataOffset, dataLength), add(target, selector))) sstore(slot, add(result, offset)) } } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

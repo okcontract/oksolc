@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "TypeMembers.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { enum Mode { Off, On, Paused } function values() external pure returns (Mode, Mode, Mode, uint8, uint8, int8, int8) { return (Mode.On, type(Mode).min, type(Mode).max, type(uint8).min, type(uint8).max, type(int8).min, type(int8).max); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

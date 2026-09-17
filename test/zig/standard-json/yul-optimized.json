@@ -1,0 +1,1 @@
+{"language":"Yul","sources":{"A.yul":{"content":"object \"A\" { code { let x := add(0, mul(1, 9)) mstore(0, x) return(0, 32) } }"}},"settings":{"optimizer":{"enabled":true,"runs":1},"outputSelection":{"*":{"*":["irOptimized","evm.bytecode.object"]}}}}

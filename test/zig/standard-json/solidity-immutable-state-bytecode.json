@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ImmutableState.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint8 public immutable seed = 2; uint8 public immutable value; constructor(uint8 input) { value = seed + input; } function combined() external view returns (uint8) { return seed + value; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

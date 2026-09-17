@@ -1,0 +1,23 @@
+.{
+    .name = .zlinter,
+    .fingerprint = 0x10e04548f134343a,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{
+        .zls = .{
+            .path = "../zls",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build_rules.zig",
+        "build_docs.zig",
+        "build.zig.zon",
+        "src",
+        "website",
+        "integration_tests",
+        "LICENSE",
+        "README.md",
+        "RULES.md",
+    },
+}

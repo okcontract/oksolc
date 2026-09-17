@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2014-2026 The Solidity Authors.
+// Copyright (C) 2026 OKcontract Pte. Ltd.
+
+.{
+    .name = .solidity_zig,
+    .version = "0.8.36",
+    .fingerprint = 0x532998ed66b1991d, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .httpz = .{
+            .url = "https://github.com/karlseguin/http.zig/archive/9b14af98fde5e98abb9a8376fe02b42003e835bf.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrMgTCQDhzfBLRRebTx9LU056Ph2erdN9-42rFbhj",
+        },
+        .zqlite = .{
+            .url = "https://github.com/karlseguin/zqlite.zig/archive/b519eea9b1a2b5fcad68af6d0629e717e8746684.tar.gz",
+            .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
+        },
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
+        },
+        .yyjson = .{
+            .url = "https://github.com/ibireme/yyjson/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "N-V-__8AADJobAAfcT3EULUqTBZto6rfWBxzeDyfBxrSCP_b",
+        },
+        .zbench = .{
+            .url = "https://github.com/hendriknielaender/zBench/archive/c24d128bfa80ec6a1b495b84ec827c6a0bec7865.tar.gz",
+            .hash = "zbench-0.11.2-YTdc76Q_AQAxonIKZ2-H1PdcESJGwyuYylw6RkPiBqyx",
+        },
+        .zlinter = .{
+            .path = "vendor/zlinter",
+        },
+        .toml = .{
+            .url = "git+https://github.com/sam701/zig-toml?ref=zig-0.16#8685923e32e8b8a795eb2715684236975a70faed",
+            .hash = "toml-0.3.0-bV14BRmKAQAWR0FT0KUKFwVJTImaFhWjSe6HfSMtNZOH",
+        },
+    },
+    .paths = .{
+        "README.md",
+        "SECURITY.md",
+        "COPYRIGHT.txt",
+        "THIRD_PARTY_LICENSES.txt",
+        "build.zig",
+        "build.zig.zon",
+        "build_support",
+        ".zigversion",
+        "include",
+        "src",
+        "test/benchmarks",
+        "test/fuzz",
+        "test/zig",
+        "vendor",
+        "LICENSE.txt",
+    },
+}

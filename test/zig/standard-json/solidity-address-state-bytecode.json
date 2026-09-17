@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "AddressState.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { address public owner; function set(address value) external { owner = value; } function asUint(address value) external pure returns (uint160) { return uint160(value); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

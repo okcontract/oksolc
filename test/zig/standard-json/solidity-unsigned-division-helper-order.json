@@ -1,0 +1,23 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Division.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\n// Copyright (C) 2026 OKcontract Pte. Ltd.\npragma solidity 0.8.36;\ncontract C { function f(uint96 x, uint96 y) external pure returns(uint96) { return x / y; } function g(uint x) external pure returns(uint) { return x - 1; } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": false,
+      "runs": 200
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

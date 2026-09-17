@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ConstantState.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint8 constant BASE = 3; uint8 public constant TOTAL = BASE + 2; function add(uint8 value) external pure returns (uint8) { return TOTAL + value; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

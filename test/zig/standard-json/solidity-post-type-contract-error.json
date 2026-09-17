@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "PostTypeContract.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\n\nuint256 constant CASTED = uint256(42);\nint256 constant NEGATIVE = -42;\nint256 constant POSITIVE_SIGNED = 64;\ntype MyUint is uint128;\nMyUint constant WRAPPED = MyUint.wrap(42);\nfunction layoutBase() pure returns (uint256) { return 128; }\n\ncontract Collision { error gsf(); error tgeo(); }\ncontract CallIsNotConstant layout at layoutBase() {}\ncontract AddressLayout layout at address(0x1234) {}\ncontract FixedBytesLayout layout at bytes1(0x12) {}\ncontract UserDefinedLayout layout at WRAPPED {}\ncontract FractionalLayout layout at 3 / 2 {}\ncontract CastRemainsUnsupported layout at CASTED {}\ncontract ConditionalRemainsUnsupported layout at (true ? 1 : 2) {}\ncontract TypeMemberRemainsUnsupported layout at type(uint256).max {}\ncontract NegativeLayout layout at NEGATIVE {}\ncontract SignedLayout layout at POSITIVE_SIGNED {}\ncontract OverflowLayout layout at 2**256 {}\ncontract ExtendsPastEnd layout at 2**256 - 2 { uint256 x; bool y; }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

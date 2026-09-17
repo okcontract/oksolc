@@ -1,0 +1,31 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "src/Vault.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\n// Copyright (C) 2026 OKcontract Pte. Ltd.\npragma solidity >=0.0.0;\n\nimport \"../lib/Math.sol\";\n\n/// @title A small vault for exploring compiler output\n/// @dev \u03bb \u2014 UTF-8 source locations stay accurate.\ncontract Vault {\n    uint256 public balance;\n    address public immutable owner;\n\n    event Deposited(address indexed sender, uint256 amount);\n\n    constructor() {\n        owner = msg.sender;\n    }\n\n    function deposit(uint256 amount) external {\n        uint256 next = balance + amount;\n        assert(next >= balance);\n        balance = next;\n        emit Deposited(msg.sender, amount);\n    }\n\n    function preview(uint256 amount) external pure returns (uint256) {\n        uint256 unused = amount;\n        assert(amount == amount);\n        assert(amount > 1);\n        return Math.twice(amount);\n    }\n}\n\n// Navigation pagination fixture\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// extra line\n// </script><script>window.sourceExecuted = true</script>\n"
+    },
+    "lib/Math.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\n// Copyright (C) 2026 OKcontract Pte. Ltd.\npragma solidity >=0.0.0;\n\nlibrary Math {\n    function twice(uint256 value) internal pure returns (uint256) {\n        uint256 unused = value;\n        return value * 2;\n    }\n}\n"
+    }
+  },
+  "settings": {
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "": [
+          "ast"
+        ],
+        "*": [
+          "abi",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object",
+          "metadata"
+        ]
+      }
+    }
+  }
+}

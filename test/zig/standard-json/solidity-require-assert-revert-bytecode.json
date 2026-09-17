@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "FailureControl.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function check(uint8 value) external pure returns (uint8) { require(value > 0); assert(value < 10); if (value == 5) revert(); return value; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

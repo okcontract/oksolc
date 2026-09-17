@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "TypeError.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\npragma solidity 0.8.36; contract TypeError { function broken() external pure returns (uint256) { return true; } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

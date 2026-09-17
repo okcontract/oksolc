@@ -1,0 +1,348 @@
+//! Enforces that references aren't deprecated (i.e., doc commented with `Deprecated:`)
+//!
+//! If you're indefinitely targetting fixed versions of a dependency or zig
+//! then using deprecated items may not be a big deal. Although, it's still
+//! worth undertsanding why they're deprecated, as there may be risks associated
+//! with use.
+
+/// Config for no_deprecated rule.
+pub const Config = struct {
+    /// The severity of deprecations (off, warning, error).
+    severity: zlinter.rules.LintProblemSeverity = .warning,
+};
+
+/// Builds and returns the no_deprecated rule.
+pub fn buildRule(options: zlinter.rules.RuleOptions) zlinter.rules.LintRule {
+    _ = options;
+
+    return zlinter.rules.LintRule{
+        .rule_id = @tagName(.no_deprecated),
+        .run = &run,
+    };
+}
+
+/// Runs the no_deprecated rule.
+fn run(
+    rule: zlinter.rules.LintRule,
+    context: *zlinter.session.LintContext,
+    doc: *const zlinter.session.LintDocument,
+    gpa: std.mem.Allocator,
+    options: zlinter.rules.RunOptions,
+) zlinter.rules.RunError!?zlinter.results.LintResult {
+    const config = options.getConfig(Config);
+    if (config.severity == .off) return null;
+
+    var lint_problems = std.ArrayList(zlinter.results.LintProblem).empty;
+    defer lint_problems.deinit(gpa);
+
+    const handle = doc.handle;
+    const tree = doc.handle.tree;
+
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
+    var index: u32 = @intFromEnum(Ast.Node.Index.root);
+    while (index < handle.tree.nodes.len) : (index += 1) {
+        defer _ = arena_allocator.reset(.retain_capacity);
+
+        const node: Ast.Node.Index = @enumFromInt(index);
+        const tag = tree.nodeTag(node);
+        switch (tag) {
+            .enum_literal => try handleEnumLiteral(
+                rule,
+                gpa,
+                arena,
+                context,
+                doc,
+                node,
+                tree.nodeMainToken(node),
+                &lint_problems,
+                config,
+            ),
+            .field_access => try handleFieldAccess(
+                rule,
+                gpa,
+                arena,
+                context,
+                doc,
+                node,
+                tree.nodeData(node).node_and_token.@"1",
+                &lint_problems,
+                config,
+            ),
+            .identifier => try handleIdentifierAccess(
+                rule,
+                gpa,
+                arena,
+                context,
+                doc,
+                node,
+                tree.nodeMainToken(node),
+                &lint_problems,
+                config,
+            ),
+            else => {},
+        }
+    }
+
+    for (lint_problems.items) |*problem| {
+        problem.severity = config.severity;
+    }
+
+    return if (lint_problems.items.len > 0)
+        try zlinter.results.LintResult.init(
+            gpa,
+            doc.path,
+            try lint_problems.toOwnedSlice(gpa),
+        )
+    else
+        null;
+}
+
+fn handleIdentifierAccess(
+    rule: zlinter.rules.LintRule,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    context: *zlinter.session.LintContext,
+    doc: *const zlinter.session.LintDocument,
+    node_index: Ast.Node.Index,
+    identifier_token: Ast.TokenIndex,
+    lint_problems: *std.ArrayList(zlinter.results.LintProblem),
+    config: Config,
+) !void {
+    const handle = doc.handle;
+    const tree = doc.handle.tree;
+
+    const source_index = handle.tree.tokens.items(.start)[identifier_token];
+
+    const decl_with_handle = (try context.analyser.lookupSymbolGlobal(
+        handle,
+        tree.tokenSlice(identifier_token),
+        source_index,
+    )) orelse return;
+
+    // Check whether the identifier is itself the declaration, in which case
+    // we should skip as its not the usage but the declaration of it and we
+    // dont want to list the declaration as deprecated only its usages
+    if (std.mem.eql(u8, decl_with_handle.handle.uri.raw, handle.uri.raw)) {
+        const is_identifier = switch (decl_with_handle.decl) {
+            .ast_node => |decl_node| switch (decl_with_handle.handle.tree.nodeTag(decl_node)) {
+                .container_field_init,
+                .container_field_align,
+                .container_field,
+                => decl_with_handle.handle.tree.nodeMainToken(decl_node) == identifier_token,
+                else => false,
+            },
+            .error_token => |err_token| err_token == identifier_token,
+            else => false,
+        };
+        if (is_identifier) return;
+    }
+
+    if (try decl_with_handle.docComments(arena)) |comment| {
+        if (getDeprecationFromDoc(comment)) |message| {
+            try lint_problems.append(gpa, .{
+                .start = .startOfNode(doc.handle.tree, node_index),
+                .end = .endOfNode(doc.handle.tree, node_index),
+                .message = try std.fmt.allocPrint(gpa, "Deprecated - {s}", .{message}),
+                .rule_id = rule.rule_id,
+                .severity = config.severity,
+            });
+        }
+    }
+}
+
+fn handleEnumLiteral(
+    rule: zlinter.rules.LintRule,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    context: *zlinter.session.LintContext,
+    doc: *const zlinter.session.LintDocument,
+    node_index: Ast.Node.Index,
+    identifier_token: Ast.TokenIndex,
+    lint_problems: *std.ArrayList(zlinter.results.LintProblem),
+    config: Config,
+) !void {
+    const doc_comment = try getSymbolEnumLiteralDocComment(
+        context,
+        doc,
+        node_index,
+        doc.handle.tree.tokenSlice(identifier_token),
+        arena,
+    ) orelse return;
+    const deprecated_message = getDeprecationFromDoc(doc_comment) orelse return;
+
+    try lint_problems.append(gpa, .{
+        .start = .startOfNode(doc.handle.tree, node_index),
+        .end = .endOfNode(doc.handle.tree, node_index),
+        .message = try std.fmt.allocPrint(gpa, "Deprecated: {s}", .{deprecated_message}),
+        .rule_id = rule.rule_id,
+        .severity = config.severity,
+    });
+}
+
+fn getSymbolEnumLiteralDocComment(
+    context: *zlinter.session.LintContext,
+    doc: *const zlinter.session.LintDocument,
+    node: Ast.Node.Index,
+    name: []const u8,
+    arena: std.mem.Allocator,
+) !?[]const u8 {
+    std.debug.assert(doc.handle.tree.nodeTag(node) == .enum_literal);
+
+    var ancestors = std.ArrayList(Ast.Node.Index).empty;
+    defer ancestors.deinit(arena);
+
+    var current = node;
+    try ancestors.append(arena, current);
+
+    var it = doc.nodeAncestorIterator(current);
+    while (it.next()) |ancestor| {
+        if (ancestor == .root) break;
+        if (ast.isNodeOverlapping(doc.handle.tree, current, ancestor)) {
+            try ancestors.append(arena, ancestor);
+            current = ancestor;
+        } else {
+            break;
+        }
+    }
+
+    var decl_with_handle = try context.analyser.lookupSymbolFieldInit(
+        doc.handle,
+        name,
+        ancestors.items[0],
+        ancestors.items[1..],
+    ) orelse return null;
+
+    return try decl_with_handle.docComments(arena);
+}
+
+fn handleFieldAccess(
+    rule: zlinter.rules.LintRule,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    context: *zlinter.session.LintContext,
+    doc: *const zlinter.session.LintDocument,
+    node_index: Ast.Node.Index,
+    identifier_token: Ast.TokenIndex,
+    lint_problems: *std.ArrayList(zlinter.results.LintProblem),
+    config: Config,
+) !void {
+    const handle = doc.handle;
+    const tree = doc.handle.tree;
+    const token_starts = handle.tree.tokens.items(.start);
+
+    const held_loc: std.zig.Token.Loc = loc: {
+        const first_token = tree.firstToken(node_index);
+        const last_token = tree.lastToken(node_index);
+
+        break :loc .{
+            .start = token_starts[first_token],
+            .end = token_starts[last_token] + tree.tokenSlice(last_token).len,
+        };
+    };
+
+    if (try context.analyser.getSymbolFieldAccesses(
+        arena,
+        handle,
+        token_starts[identifier_token],
+        held_loc,
+        tree.tokenSlice(identifier_token),
+    )) |decls| {
+        for (decls) |decl| {
+            const doc_comment = try decl.docComments(arena) orelse continue;
+            const deprecated_message = getDeprecationFromDoc(doc_comment) orelse continue;
+
+            try lint_problems.append(gpa, .{
+                .start = .startOfNode(doc.handle.tree, node_index),
+                .end = .endOfNode(doc.handle.tree, node_index),
+                .message = try std.fmt.allocPrint(gpa, "Deprecated: {s}", .{deprecated_message}),
+                .rule_id = rule.rule_id,
+                .severity = config.severity,
+            });
+        }
+    }
+}
+
+/// Returns a slice of a deprecation notice if one was found.
+///
+/// Deprecation notices must appear on a single document comment line.
+fn getDeprecationFromDoc(doc: []const u8) ?[]const u8 {
+    var line_it = std.mem.splitScalar(u8, doc, '\n');
+    while (line_it.next()) |line| {
+        const trimmed = std.mem.trim(
+            u8,
+            line,
+            &std.ascii.whitespace,
+        );
+
+        for ([_][]const u8{
+            "deprecated:",
+            "deprecated;",
+            "deprecated,",
+            "deprecated.",
+            "deprecated ",
+            "deprecated-",
+        }) |line_prefix| {
+            if (doc.len < line_prefix.len) continue;
+            if (!std.ascii.startsWithIgnoreCase(trimmed, line_prefix)) continue;
+
+            return std.mem.trim(
+                u8,
+                trimmed[line_prefix.len..],
+                &std.ascii.whitespace,
+            );
+        }
+    }
+    return null;
+}
+
+test getDeprecationFromDoc {
+    try std.testing.expectEqualStrings("", getDeprecationFromDoc("DEPRECATED:").?);
+    try std.testing.expectEqualStrings("", getDeprecationFromDoc("deprecated; ").?);
+    try std.testing.expectEqualStrings("Hello world", getDeprecationFromDoc("DepreCATED-  Hello world").?);
+    try std.testing.expectEqualStrings("Hello world", getDeprecationFromDoc("DEPRECATED  Hello world\nAnother comment").?);
+    try std.testing.expectEqualStrings("Hello world", getDeprecationFromDoc("DEPrecated,\t  Hello world  \t  ").?);
+    try std.testing.expectEqualStrings("use x instead", getDeprecationFromDoc(" Comment above\n deprecated. use x instead\t  \n Comment underneath").?);
+
+    try std.testing.expectEqual(null, getDeprecationFromDoc(""));
+    try std.testing.expectEqual(null, getDeprecationFromDoc("DEPRECATE: "));
+    try std.testing.expectEqual(null, getDeprecationFromDoc("deprecatttteeeedddd: "));
+    try std.testing.expectEqual(null, getDeprecationFromDoc(" "));
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}
+
+test "no_deprecated - regression test for #36" {
+    try zlinter.testing.testRunRule(
+        buildRule(.{}),
+        \\const convention: namespace.CallingConvention = .Stdcall;
+        \\
+        \\const namespace = struct {
+        \\  const CallingConvention = enum {
+        \\    /// Deprecated: Don't use
+        \\    Stdcall,
+        \\    std_call,
+        \\  };
+        \\};
+    ,
+        .{},
+        Config{ .severity = .@"error" },
+        &.{
+            .{
+                .rule_id = "no_deprecated",
+                .severity = .@"error",
+                .slice = ".Stdcall",
+                .message = "Deprecated: Don't use",
+            },
+        },
+    );
+}
+
+const std = @import("std");
+const zlinter = @import("zlinter");
+const ast = zlinter.ast;
+const Ast = std.zig.Ast;

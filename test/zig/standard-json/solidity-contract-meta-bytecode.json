@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ContractMeta.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ninterface I { function one(uint256 value) external; function two(bytes32 value) external; }\ncontract Child { uint256 public value; constructor(uint256 initial) { value = initial; } }\ncontract Meta { function inspect() external pure returns (bytes memory creation, bytes memory runtime, string memory contractName, bytes4 interfaceId) { creation = type(Child).creationCode; runtime = type(Child).runtimeCode; contractName = type(Child).name; interfaceId = type(I).interfaceId; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "Meta": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

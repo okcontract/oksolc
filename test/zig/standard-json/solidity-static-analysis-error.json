@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "StaticAnalysisError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C { function f() public pure returns (uint256) { return addmod(1, 2, 0); } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ControlFlowUnreachable.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C {\n    function stopped() internal pure {\n        return;\n        {}\n    }\n    function recursive() internal returns (uint256) {\n        (uint256 value) = recursive();\n        value;\n    }\n    function forceLaterPhase() public pure returns (uint256) {\n        return addmod(1, 2, 0);\n    }\n}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

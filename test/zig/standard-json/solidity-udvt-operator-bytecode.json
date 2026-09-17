@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Operators.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ntype Wad is uint256; function add(Wad left, Wad right) pure returns (Wad) { return Wad.wrap(Wad.unwrap(left) + Wad.unwrap(right)); } using {add as +} for Wad global; contract C { function sum(Wad left, Wad right) external pure returns (Wad) { return left + right; } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

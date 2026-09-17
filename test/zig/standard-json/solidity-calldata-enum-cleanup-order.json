@@ -1,0 +1,23 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Enums.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\n// Copyright (C) 2026 OKcontract Pte. Ltd.\npragma solidity 0.8.36;\ncontract C { enum E { A, B, C } struct S { E e; } function f(S calldata s) external pure returns (uint) { return uint(s.e); } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": false,
+      "runs": 200
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

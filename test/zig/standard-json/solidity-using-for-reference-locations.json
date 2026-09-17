@@ -1,0 +1,23 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Using.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\n// Copyright (C) 2026 OKcontract Pte. Ltd.\npragma solidity 0.8.36;\nlibrary L {\n    function cd(bytes calldata self) internal pure returns (uint) { return self.length; }\n    function mem(bytes memory self) internal pure returns (uint) { return self.length; }\n    function store(bytes storage self) internal view returns (uint) { return self.length; }\n}\ncontract C {\n    using L for bytes;\n    bytes value;\n    function calldataReceiver(bytes calldata input) external pure returns (uint) { return input.cd() + input.mem(); }\n    function memoryReceiver(bytes memory input) public pure returns (uint) { return input.mem(); }\n    function storageReceiver() external view returns (uint) { return value.store() + value.mem(); }\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

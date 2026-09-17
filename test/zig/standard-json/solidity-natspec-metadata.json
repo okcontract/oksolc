@@ -1,0 +1,23 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "MetadataDocs.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\n/// @notice Documented metadata contract.\n/// @dev Metadata must include this detail.\ncontract MetadataDocs {\n    /// @notice Return one.\n    /// @dev A documented method.\n    /// @return value The constant.\n    function one() public pure returns (uint256 value) { return 1; }\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "metadata": {
+      "bytecodeHash": "none",
+      "appendCBOR": false,
+      "useLiteralContent": true
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "metadata"
+        ]
+      }
+    }
+  }
+}

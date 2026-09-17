@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ModifierArgs.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint256 public value; modifier around(uint256 n) { value += n; _; value += n; } function bump(uint256 n) external around(n) { value += 1; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

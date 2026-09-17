@@ -1,0 +1,24 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Lib.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nuint256 constant FREE = 5;\nfunction bump(uint256 value) pure returns (uint256) { return value + 1; }\nlibrary Math { function doubled(uint256 value) internal pure returns (uint256) { return value * 2; } function linkedAdd(uint256 left, uint256 right) external pure returns (uint256) { return left + right; } }\n"
+    },
+    "Qualified.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nimport * as M from \"Lib.sol\";\nimport {Math} from \"Lib.sol\";\ncontract C { using Math for uint256; function linked(uint256 left, uint256 right) external returns (uint256) { return M.Math.linkedAdd(left, right); } function imported(uint256 value) external pure returns (uint256) { return M.bump(value) + M.FREE + value.doubled(); } function inspect(function(uint256) external returns (uint256) callback) external pure returns (address target, bytes4 selector) { return (callback.address, callback.selector); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object",
+          "evm.bytecode.linkReferences",
+          "evm.deployedBytecode.object",
+          "evm.deployedBytecode.linkReferences"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "LibraryStruct.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nlibrary L { struct S { uint256 a; uint256 b; } }\ncontract C { function f() external pure returns (uint256) { L.S memory value = L.S(1, 2); return value.a + value.b; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": ["abi"]
+      }
+    }
+  }
+}

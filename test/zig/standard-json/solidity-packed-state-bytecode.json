@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Packed.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint8 public small; bool public flag; function set(uint8 x, bool y) external { small = x; flag = y; } function read() external view returns (uint8, bool) { return (small, flag); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

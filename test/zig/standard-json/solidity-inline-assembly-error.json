@@ -1,0 +1,11 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "AssemblyError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\ncontract C { function f() external { assembly { let := 1 } } }"
+    }
+  },
+  "settings": {
+    "stopAfter": "parsing"
+  }
+}

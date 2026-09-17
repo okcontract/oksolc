@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ScalarExternalCalls.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ninterface Target { function inspect(uint256 value, address account, bool flag) external view returns (uint256, address, bool); function mutate(uint256 value) external returns (uint256); function ping() external; }\ncontract C { function inspect(Target target, uint256 value, address account, bool flag) external view returns (uint256, address, bool) { return target.inspect(value, account, flag); } function mutate(Target target, uint256 value) external returns (uint256) { return target.mutate(value); } function ping(Target target) external { target.ping(); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

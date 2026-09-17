@@ -1,0 +1,22 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Nondeployable.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nabstract contract AbstractBase { function value() public virtual returns (uint256); }\ninterface InterfaceOnly { function ping(bytes calldata input) external returns (bytes memory); }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "ir",
+          "irOptimized",
+          "evm.bytecode",
+          "evm.deployedBytecode"
+        ]
+      }
+    }
+  }
+}

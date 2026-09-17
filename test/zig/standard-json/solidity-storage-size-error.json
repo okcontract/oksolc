@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "StorageSizeError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C { struct S { uint256 a; uint256 b; } S[2**255] values; }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

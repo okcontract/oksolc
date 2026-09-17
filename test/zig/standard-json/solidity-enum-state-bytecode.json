@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "EnumState.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { enum Mode { Off, On } Mode public mode; function set(Mode value) external { mode = value; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

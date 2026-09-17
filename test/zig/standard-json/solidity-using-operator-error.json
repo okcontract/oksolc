@@ -1,0 +1,45 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "01_GlobalType.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nstruct S { uint x; }"
+    },
+    "02_GlobalUse.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nusing {f} for S global;\nfunction f(S memory) pure {}\nimport {S} from \"01_GlobalType.sol\";"
+    },
+    "10_Builtin.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nusing {f as +} for uint global;\nfunction f(uint, uint) pure returns (uint) {}"
+    },
+    "20_Private.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nlibrary L { function privateFunction(uint) private pure {} }\nusing {L.privateFunction} for uint;\ncontract C { using {L.privateFunction} for uint; }"
+    },
+    "30_Attach.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nstruct S { uint8 x; }\nlibrary A { function narrow(uint16 x) internal pure returns (uint16) { return x; } }\ncontract C { using {A.narrow} for uint256; using {A.narrow} for S; }"
+    },
+    "40_OperatorShape.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ntype Int is int128;\nusing {add as +, sub as -, mul as *, div as /} for Int global;\nfunction add(Int, int128) pure returns (Int) {}\nfunction sub(int128, Int) pure returns (int128) {}\nfunction mul(int128, int256) pure returns (Int) {}\nfunction div(Int, Int) pure returns (int256) {}"
+    },
+    "50_OperatorConflict.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ntype Int is uint128;\nusing {add1 as +, add2 as +} for Int global;\nusing {unsub1 as -, unsub2 as -} for Int global;\nfunction add1(Int, Int) pure returns (Int) {}\nfunction add2(Int, Int) pure returns (Int) {}\nfunction unsub1(Int) pure returns (Int) {}\nfunction unsub2(Int) pure returns (Int) {}"
+    },
+    "60_OperatorCall.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nusing {add as +, unsub as -} for U global;\ntype U is uint;\nfunction add(U, U) pure returns (U) {}\nfunction unsub(U) pure returns (U) {}\ncontract C { function fromBool() public { U u; u + true; true + u; -true; } function fromUint() public { U u; uint32 u32; u + u32; u32 + u; -u32; } }"
+    },
+    "70_NonPure.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nusing {add as +, sub as -} for A global;\nfunction add(A, A) view returns (A) {}\nfunction sub(A, A) returns (A) {}\ntype A is address;"
+    },
+    "80_NonGlobal.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ntype Int is int256;\nusing {add as +} for Int;\nfunction add(Int a, Int b) pure returns (Int) {}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

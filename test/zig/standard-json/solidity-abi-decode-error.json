@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "AbiDecodeError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C { function f(uint256 value) public pure returns (uint256) { return abi.decode(value, (uint256)); } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "TupleDeclarationError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C { function f() public pure { (uint256 a, uint256 b) = (1, 2, 3); } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

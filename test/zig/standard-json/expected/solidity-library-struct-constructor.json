@@ -1,0 +1,1 @@
+{"contracts":{"LibraryStruct.sol":{"C":{"abi":[{"inputs":[],"name":"f","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"pure","type":"function"}]},"L":{"abi":[]}}},"sources":{"LibraryStruct.sol":{"id":0}}}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Errors.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { error Unauthorized(address caller, uint8 code); error Empty(); function fail(uint8 code) external view { if (code == 0) revert Empty(); revert Unauthorized(msg.sender, code); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

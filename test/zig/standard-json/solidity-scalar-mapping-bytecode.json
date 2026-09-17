@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ScalarMapping.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { mapping(uint8 => mapping(address => uint8)) private values; function set(uint8 group, address account, uint8 value) external { values[group][account] = value; } function bump(uint8 group, address account) external returns (uint8) { values[group][account]++; return values[group][account]; } function clear(uint8 group, address account) external { delete values[group][account]; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

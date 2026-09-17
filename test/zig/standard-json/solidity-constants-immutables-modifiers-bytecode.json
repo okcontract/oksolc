@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ConstantsImmutablesModifiers.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract Base { uint256 public value = 7; modifier mark(uint256 next) virtual { value = next; _; } }\ncontract C is Base { bytes constant RAW = hex\"030102\"; string public constant TEXT = \"hello\"; function() internal pure returns (uint256) immutable callback = target; modifier mark(uint256 next) override { value = next + 1; _; } function target() internal pure returns (uint256) { return 11; } function staticallyResolved() external Base.mark(2) returns (bytes memory, uint256) { return (RAW, callback()); } function virtuallyResolved() external mark(3) returns (string memory, uint256) { return (TEXT, value); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

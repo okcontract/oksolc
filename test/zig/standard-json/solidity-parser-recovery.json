@@ -1,0 +1,32 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ARecovery.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract A {}\ncontract B {}\ncontract C is A is B layout at 0 layout at 1 {\n    event Ping();\n    error Nope();\n    function fallback() public public pure pure {}\n    uint constant immutable public private x;\n    function valid(address a) external returns (address payable) {\n        emit Ping();\n        if (a == address(0)) revert Nope();\n        try this.valid(a) returns (address payable p) { return p; }\n        catch { return payable(a); }\n    }\n}\nusing { f as ** } for uint;"
+    },
+    "BEmptyVersion.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ;\ncontract V {}"
+    },
+    "CFunctionType.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\ncontract Old { function() external { } }"
+    },
+    "DIllegalPragma.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity @0.8.36;\ncontract P {}"
+    },
+    "ETryWithoutCatch.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\ncontract T { function f() external { try this.f() {} } }"
+    },
+    "FAbstractRecovery.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\nabstract Missing {}"
+    },
+    "GEmptyImport.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\nimport {} from \"x\";\ncontract I {}"
+    },
+    "HUnicodeImport.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\nimport unicode\"x\";\ncontract U {}"
+    }
+  },
+  "settings": {
+    "stopAfter": "parsing"
+  }
+}

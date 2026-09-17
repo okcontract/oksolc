@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ControlFlowShifts.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function shifts(uint8 x, int16 y, uint8 amount) external pure returns (uint8 left, int16 right, bytes4 word, uint8 compoundLeft, int16 compoundRight) { left = x << amount; right = y >> amount; word = bytes4(0x12345678) << amount; x <<= 1; y >>= amount; return (left, right, word, x, y); } function loops(uint256 n) external pure returns (uint256 sum) { for (uint256 i = 0; i < n; ++i) { if (i == 2) continue; if (i == 7) break; sum += i; } uint256 j; while (j < n && j < 3) { sum += j; ++j; } do { if (n == 0) break; sum += n; unchecked { --n; } } while (n > 1); unchecked { sum += type(uint256).max; } return sum > 10 ? sum : 10; } function compare(function(uint256) external returns (uint256) first, function(uint256) external returns (uint256) second) external pure returns (bool, bool) { return (first == second, first != second); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

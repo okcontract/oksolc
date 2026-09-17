@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "State.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint256 public value; function set(uint256 x) external { value = x; } function read() external view returns (uint256) { return value; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

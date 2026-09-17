@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "C.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\ncontract C { uint public x; }"
+    }
+  },
+  "settings": {
+    "stopAfter": "parsing",
+    "viaIR": false,
+    "outputSelection": {
+      "C.sol": {
+        "": [
+          "ast"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "LegacySmoke.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\npragma solidity 0.8.36; contract LegacySmoke { function increment(uint256 value) external pure returns (uint256) { return value + 1; } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "optimizer": {
+      "enabled": false
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object",
+          "metadata"
+        ]
+      }
+    }
+  }
+}

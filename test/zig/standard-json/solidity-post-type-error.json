@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "PostTypeError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\n\ncontract EventAndModifierUse {\n    event E(uint256 value);\n    modifier guarded() { _; }\n    function badEvent() public { E(1); }\n    function goodEvent() public { emit E(1); }\n    function badModifier() public { guarded; }\n    function goodModifier() public guarded {}\n}\n\nerror Outside();\nfunction badError() pure { Outside(); }\nfunction goodRequire(bool condition) pure { require(condition, Outside()); }\nfunction goodRevert() pure { revert Outside(); }\n\ninterface VariableInterface {\n    struct Payload { uint256 value; }\n    uint256 stateValue;\n    function allowed(uint256 input) external returns (uint256 output);\n}\n\ncontract OverrideA { function f() public virtual {} }\ncontract OverrideB { function g() public {} }\ncontract OverrideC is OverrideA, OverrideB {\n    function f() public override(g) {}\n}\n\nerror Error(uint256);\nerror test266151307();\nerror buyAndFree22457070633(uint256);"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

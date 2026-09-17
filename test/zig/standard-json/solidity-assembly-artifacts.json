@@ -1,0 +1,28 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "C.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C {}\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "metadata": {
+      "appendCBOR": false,
+      "bytecodeHash": "none"
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.assembly",
+          "evm.legacyAssembly",
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

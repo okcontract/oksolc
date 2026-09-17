@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "AssemblyDocs.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract AssemblyDocs {\n    function f() public pure {\n        /// @solidity memory-safe-assembly memory-safe-assembly future-value\n        assembly (\"memory-safe\") {}\n    }\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

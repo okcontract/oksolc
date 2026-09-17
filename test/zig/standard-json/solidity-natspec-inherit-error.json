@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "InheritDocs.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract Base {}\ncontract Derived is Base {\n    /// @inheritdoc Base\n    function f() internal {}\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

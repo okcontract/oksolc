@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "StaticAnalyzerBoundaries.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\n\ncontract StorageHazards {\n    struct S { uint256 a; uint256 b; }\n    S x;\n    S y;\n    bytes data;\n\n    function storageCopies() public {\n        (x, y) = (y, x);\n        uint256 z;\n        ((x, y), z) = ((y, x), 0);\n        ((((x, y))), z) = ((((y, x))), 0);\n    }\n\n    function byteCopies() public {\n        (data.push(), data[0]) = (0, 0);\n        (((data.push())), (data.push())) = (0, 0);\n        bytes storage aliasData = data;\n        (data.push(), aliasData.push()) = (0, 0);\n    }\n}\n\ncontract LargeStorage {\n    struct Huge { uint256[2**255] cells; }\n    function inspect(Huge storage) internal {}\n}\n\ncontract AssemblyBase {\n    constructor() { assembly { pop(0) } }\n}\n\ncontract AssemblyChild is AssemblyBase {}\n\ncontract RuntimeProbe {\n    function inspect() external pure returns (uint256) {\n        return type(AssemblyBase).runtimeCode.length +\n            type(AssemblyChild).runtimeCode.length +\n            type(AssemblyBase).creationCode.length;\n    }\n}\n\ncontract ThisDuringConstruction {\n    function ping() external pure {}\n    constructor() {\n        this.ping();\n        (this).ping();\n        ((this)).ping();\n    }\n}\n\nlibrary SelfCall {\n    using SelfCall for *;\n    function invoke() public pure returns (uint256 result) { return result.bump(); }\n    function bump(uint256 value) public pure returns (uint256) { return value; }\n}\n\ncontract EvaluationDiagnostics {\n    uint256 constant ZERO = 0;\n    function arithmetic(uint256 unused) external pure returns (uint256 result) {\n        uint256 local;\n        1 / ZERO;\n        result = addmod(1, 2, ZERO);\n    }\n}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

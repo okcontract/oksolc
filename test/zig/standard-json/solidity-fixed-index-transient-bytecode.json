@@ -1,0 +1,20 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "FixedIndexTransient.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { enum Mode { Off, On } uint8 transient public small; address transient public who; Mode transient public mode; function() external transient callback; function target() external {} function fixedIndex(bytes32 value, uint8 index) external pure returns (bytes1) { return value[index]; } function write(uint256 dirty, address next) external returns (uint8, address, Mode, address, bytes4) { small = uint8(dirty); who = next; mode = Mode.On; callback = this.target; small += 1; return (small, who, mode, callback.address, callback.selector); } function clear() external { delete small; delete who; delete mode; delete callback; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "evmVersion": "cancun",
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"language":"Solidity","sources":{"B.sol":{"content":"contract B {}"},"A.sol":{"urls":["error:A.sol"]},"B.sol":{"content":"contract B2 {}"}},"settings":{}}

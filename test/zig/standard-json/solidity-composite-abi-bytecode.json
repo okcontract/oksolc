@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "CompositeABI.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { struct Payload { uint256 amount; bytes data; } function echoArray(uint256[] calldata values) external pure returns (uint256[] calldata) { return values; } function echoBytes(bytes calldata value) external pure returns (bytes calldata) { return value; } function echoStruct(Payload calldata value) external pure returns (Payload calldata) { return value; } function echoCallback(function(uint256) external returns (uint256) callback) external pure returns (function(uint256) external returns (uint256)) { return callback; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

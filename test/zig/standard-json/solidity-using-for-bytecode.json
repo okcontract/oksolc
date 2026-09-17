@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Using.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nlibrary L { function twice(uint256 self) internal pure returns (uint256) { return self * 2; } } function plus(uint256 self, uint256 amount) pure returns (uint256) { return self + amount; } contract C { using L for uint256; using {plus} for uint256; function check(uint256 value) external pure returns (uint256) { return value.twice().plus(1); } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ControlFlowUninitialized.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C {\n    struct S { bool f; }\n    S s;\n    function storagePointer(bool condition) internal view {\n        S storage value;\n        condition && (value = s).f;\n        value;\n    }\n    function unnamedReturn(bool condition) internal pure returns (uint256) {\n        if (condition) return 1;\n    }\n    function calldataReturn() internal returns (uint256[] calldata) {}\n}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

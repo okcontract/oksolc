@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Assembly.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\ncontract C { function f() external { assembly (\"memory-safe\") { let x := add(1, 2) mstore(0, x) } } }"
+    }
+  },
+  "settings": {
+    "stopAfter": "parsing",
+    "outputSelection": {
+      "Assembly.sol": {
+        "": [
+          "ast"
+        ]
+      }
+    }
+  }
+}

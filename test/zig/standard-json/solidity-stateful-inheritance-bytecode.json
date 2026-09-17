@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "StateInheritance.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { uint8 public a = 1; } contract B is A { bool public b = true; } contract C is B { uint256 public c = 3; }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

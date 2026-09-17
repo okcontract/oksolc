@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "InternalDispatch.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract InternalDispatch { uint256 public seeded; constructor(uint256 value, bool alternate) { function(uint256) internal pure returns (uint256) selected = alternate ? plusTwo : plusOne; seeded = selected(value); } function exercise(uint256 value, bool alternate) external pure returns (uint256) { function(uint256) internal pure returns (uint256) selected = alternate ? plusTwo : plusOne; return selected(value); } function plusOne(uint256 value) internal pure returns (uint256) { return value + 1; } function plusTwo(uint256 value) internal pure returns (uint256) { return value + 2; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "InternalDispatch": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

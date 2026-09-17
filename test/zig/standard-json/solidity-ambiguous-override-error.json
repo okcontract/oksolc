@@ -1,0 +1,27 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "01-Simple.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { function f() public virtual {} }\ncontract B { function f() public virtual {} }\ncontract C is A, B {}"
+    },
+    "02-CommonBase.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ninterface I { function f() external; function g() external; }\nabstract contract A is I { function f() external {} function g() external virtual; }\nabstract contract B is I { function g() external {} function f() external virtual; }\ncontract C is A, B {}"
+    },
+    "03-Modifier.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { modifier f() virtual { _; } }\ncontract B { modifier f() virtual { _; } }\ncontract C is A, B {}"
+    },
+    "04-PublicGetter.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ninterface I {}\ncontract A is I { uint256 public f; }\nabstract contract B is I { function f() external virtual returns (uint256); }\nabstract contract C is A, B {}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "BytesState.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { bytes4 public tag; function set(bytes4 value) external { tag = value; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

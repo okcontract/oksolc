@@ -1,0 +1,6 @@
+Copyright (C) 2014-2026 The Solidity Authors.
+Copyright (C) 2026 OKcontract Pte. Ltd.
+
+This Zig implementation derives from the Solidity compiler and new work by
+OKcontract Pte. Ltd. It is distributed under the GNU General Public License,
+version 3; see LICENSE.txt.

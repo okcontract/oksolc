@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Selectors.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { event Seen(uint256 value); error Bad(uint256 value); function target(uint256 value) external pure returns (uint256) { return value; } function selectors() external pure returns (bytes4, bytes4, bytes32, bytes4) { return (this.target.selector, Bad.selector, Seen.selector, msg.sig); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

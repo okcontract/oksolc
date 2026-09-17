@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "EmitTypeError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C { function target() public {} function f() public { emit target(); } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "RationalOperatorError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C { function f() public pure returns (uint256) { return 1 / 0; } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Exponentiation.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function powers(uint8 base, uint8 exponent, uint256 wideBase, uint256 wideExponent) external pure returns (uint8 checkedSmall, uint8 wrappedSmall, uint256 checkedWide, uint256 wrappedWide, uint256 literalBase) { checkedSmall = base ** exponent; unchecked { wrappedSmall = base ** exponent; } checkedWide = wideBase ** wideExponent; unchecked { wrappedWide = wideBase ** wideExponent; } literalBase = 3 ** wideExponent; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

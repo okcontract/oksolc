@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "CompositeGettersFallback.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract CompositeGettersFallback { struct Record { uint16 small; uint256 big; bytes payload; uint256[] omittedArray; mapping(uint256 => uint256) omittedMapping; } mapping(address => Record[]) public records; mapping(string => uint256) public named; bytes public blob; uint256[] public values; fallback(bytes calldata input) external returns (bytes memory) { return input; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "CompositeGettersFallback": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

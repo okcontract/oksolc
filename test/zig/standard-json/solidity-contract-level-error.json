@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ContractLevelError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\n\nfunction free(uint256 value) pure returns (uint256) { return value; }\nfunction free(uint256 value) pure returns (uint256) { return value + 1; }\nfunction free(uint256 value) pure returns (uint256) { return value + 2; }\n\nevent FreeEvent(address indexed who);\nevent FreeEvent(address who);\nevent FreeEvent(address who);\n\ncontract Target {}\n\ncontract DuplicateSpecial {\n    constructor() {}\n    constructor(uint256 value) { value; }\n}\n\ncontract DuplicateCallables {\n    function z(uint256 value) public { value; }\n    function z(uint256 value) public { value; }\n    function z(uint256 value) public { value; }\n\n    event E(address indexed who);\n    event E(address who);\n    event E(address who);\n\n    function externalized(Target value) public { value; }\n    function externalized(address value) public { value; }\n}\n\nabstract contract AbstractBase {\n    function zebra() public virtual;\n    function alpha(uint256 value) public virtual;\n    modifier middle() virtual;\n}\n\ncontract MissingImplementation is AbstractBase {}\n\ncontract PayableBase {\n    fallback() external payable {}\n}\n\ncontract InheritedFallback is PayableBase {\n    function exposed() public {}\n}\n\nlibrary BadLibrary {\n    uint256 value;\n}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

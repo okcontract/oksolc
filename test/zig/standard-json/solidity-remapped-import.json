@@ -1,0 +1,38 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Main.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\nimport {Dependency} from \"pkg/Dependency.sol\";\ncontract Main is Dependency { function doubled() external view returns (uint256) { return value * 2; } }\n"
+    },
+    "vendor/Dependency.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract Dependency { uint256 public value = 21; }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "remappings": [
+      "pkg/=vendor/"
+    ],
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "metadata": {
+      "appendCBOR": false,
+      "bytecodeHash": "none"
+    },
+    "outputSelection": {
+      "*": {
+        "": [
+          "ast"
+        ],
+        "*": [
+          "abi",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object",
+          "evm.deployedBytecode.sourceMap"
+        ]
+      }
+    }
+  }
+}

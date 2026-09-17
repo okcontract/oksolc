@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Analyzed.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ntype Wad is uint256;\ncontract Base {\n    struct Pair { uint256 first; uint256 second; }\n    enum Mode { Off, On }\n    event Changed(address indexed who, uint256 value);\n    error Bad(uint256 value);\n    uint256 public value;\n    function bump(uint256 x) public virtual returns (uint256 y) {\n        y = x + 1;\n        value = y;\n        emit Changed(msg.sender, y);\n    }\n}\ncontract Derived is Base {\n    function bump(uint256 x) public override returns (uint256) {\n        if (x == 0) revert Bad(x);\n        return super.bump(x);\n    }\n}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "": [
+          "ast"
+        ]
+      }
+    }
+  }
+}

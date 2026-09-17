@@ -1,0 +1,19 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "AggregateLValues.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract AggregateLValues { struct Item { uint256 amount; bytes data; uint256[] values; } mapping(string => Item) private items; bytes public blob; uint256[][] public matrix; Item private left; Item private right; function mutate(string calldata key, bytes calldata payload, uint256[] calldata incoming) external returns (uint256, bytes1, uint256, uint256) { Item storage item = items[key]; item.amount = incoming.length; item.data = payload; item.values = incoming; item.values.push(item.amount); blob = payload; blob.push(0x7f); if (blob.length != 0) blob[0] = 0x01; matrix.push(); matrix[matrix.length - 1].push(item.values[0]); (item.amount, matrix[matrix.length - 1][0]) = (matrix[matrix.length - 1][0], item.amount); uint256 old = item.values[0]++; if (item.values.length > 1) delete item.values[1]; return (item.amount, blob[0], matrix[matrix.length - 1][0], old); } function memoryOps(Item calldata input) external pure returns (uint256, bytes1, uint256, bytes32) { Item memory copied = input; copied.amount += 1; if (copied.data.length != 0) { copied.data[0] = 0x02; delete copied.data[copied.data.length - 1]; } uint256[] memory made = new uint256[](2); made[0] = copied.amount; made[1] = input.values[0]; (made[0], made[1]) = (made[1], made[0]); bytes calldata tail = input.data[1:]; return (made[0], copied.data[0], made[1], keccak256(tail)); } function fixedMemory() external pure returns (uint256) { uint256[3] memory values = [uint256(1), 2, 3]; (values[0], values[2]) = (values[2], values[0]); return values[0] > values[1] ? values[0] : values[1]; } function copies(Item calldata input) external { left = input; right = left; left.data = \"literal\"; delete right; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "AggregateLValues": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

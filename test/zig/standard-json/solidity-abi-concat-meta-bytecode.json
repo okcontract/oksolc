@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Calls.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { struct S { uint256 amount; string label; } function check(bytes memory encoded) external pure returns (uint256) { S memory item = S({amount: 1, label: \"zig\"}); (uint256 value, string memory label) = abi.decode(encoded, (uint256, string)); bytes memory packed = bytes.concat(bytes1(0x01), encoded); string memory joined = string.concat(item.label, label); return value + item.amount + packed.length + bytes(joined).length + type(uint8).max; } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Artifacts.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract Artifacts {\n    uint256 public immutable stored;\n    constructor() { stored = 7; }\n    function ping(uint256 value) external view returns (uint256) { return helper(value) + stored; }\n    function helper(uint256 value) internal pure returns (uint256) { return value + 1; }\n    fallback() external {}\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "metadata": {
+      "appendCBOR": false,
+      "bytecodeHash": "none"
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.methodIdentifiers",
+          "evm.gasEstimates",
+          "evm.bytecode.object",
+          "evm.bytecode.opcodes",
+          "evm.bytecode.sourceMap",
+          "evm.bytecode.functionDebugData",
+          "evm.bytecode.generatedSources",
+          "evm.bytecode.linkReferences",
+          "evm.deployedBytecode.object",
+          "evm.deployedBytecode.opcodes",
+          "evm.deployedBytecode.sourceMap",
+          "evm.deployedBytecode.functionDebugData",
+          "evm.deployedBytecode.generatedSources",
+          "evm.deployedBytecode.linkReferences",
+          "evm.deployedBytecode.immutableReferences"
+        ]
+      }
+    }
+  }
+}

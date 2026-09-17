@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Events.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { event Changed(address indexed who, uint8 indexed kind, uint256 value); event Anonymous(uint8 indexed kind, uint256 value) anonymous; function fire(uint8 kind, uint256 value) external { emit Changed(msg.sender, kind, value); emit Anonymous(kind, value + 1); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

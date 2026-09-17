@@ -1,0 +1,58 @@
+{
+  "schema_version": 6,
+  "baseline": {
+    "version": "0.8.36"
+  },
+  "reference": {
+    "command": "solc --standard-json",
+    "required_version": "0.8.36"
+  },
+  "merkle": {
+    "algorithm": "keccak256",
+    "format": "zsolc-reference-output-v1",
+    "odd_node": "duplicate_last",
+    "root": "2d1eebee4555faef4bf20645a221e05c9cd88135b488135dac7c049ae51e2fa7"
+  },
+  "cases": [
+    {
+      "id": "empty-sources",
+      "input": "test/zig/standard-json/empty-sources.json",
+      "reference_output": "test/zig/standard-json/expected/empty-sources.json",
+      "reference_sha256": "3d1389bfd86a92dd634feb0cb90378f6d467aba64e0c32a4ed6efb49fef8a1ec",
+      "expected": "error",
+      "pipeline": "frontend"
+    },
+    {
+      "id": "solidity-abi",
+      "input": "test/zig/standard-json/solidity-abi.json",
+      "reference_output": "test/zig/standard-json/expected/solidity-abi.json",
+      "reference_sha256": "d4e638a862db86b6735e35eea41dc1f519a9b1bb81cc23b4064a8aa968acf4f4",
+      "expected": "success",
+      "pipeline": "frontend"
+    },
+    {
+      "id": "via-ir-smoke",
+      "input": "test/zig/standard-json/via-ir-smoke.json",
+      "reference_output": "test/zig/standard-json/expected/via-ir-smoke.json",
+      "reference_sha256": "15f991897b36a20edffaa0e9a0ee541f8bcb2dda98f745943a0e80de81069ab7",
+      "expected": "success",
+      "pipeline": "via_ir"
+    },
+    {
+      "id": "parser-error",
+      "input": "test/zig/standard-json/parser-error.json",
+      "reference_output": "test/zig/standard-json/expected/parser-error.json",
+      "reference_sha256": "ac17f476d61040453bd5f53e6813056433f77600e333a2c4adb3056f380de068",
+      "expected": "error",
+      "pipeline": "frontend"
+    },
+    {
+      "id": "type-error",
+      "input": "test/zig/standard-json/type-error.json",
+      "reference_output": "test/zig/standard-json/expected/type-error.json",
+      "reference_sha256": "51ad5516513c3e09ee585c5cb67d14ca952d93b96b9cfaf9f7def8f494cea030",
+      "expected": "error",
+      "pipeline": "frontend"
+    }
+  ]
+}

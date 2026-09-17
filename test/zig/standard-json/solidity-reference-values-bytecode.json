@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Indexing.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { function allocated() external pure returns (uint256) { uint256[] memory values = new uint256[](2); return values[0]; } function sliced(uint256[] calldata values) external pure returns (uint256) { return values[:][0]; } }"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

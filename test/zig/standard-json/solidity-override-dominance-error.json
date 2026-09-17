@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Dominance.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { function f() public virtual {} } contract B is A { function f() public virtual override {} } contract C is A, B {}"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

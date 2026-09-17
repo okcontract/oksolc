@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ControlFlowInlineYul.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract AssemblyFlow {\n    struct S { bool f; }\n    S private s;\n    function conditional(bool flag) internal view {\n        S storage value;\n        assembly { if flag { value.slot := s.slot } }\n        value;\n    }\n    function missingDefault(uint256 selector) internal view {\n        S storage value;\n        assembly { switch selector case 0 { value.slot := s.slot } }\n        value;\n    }\n    function completeSwitch(bool selector) internal view {\n        S storage value;\n        assembly { switch selector case 0 { value.slot := s.slot } default { value.slot := s.slot } }\n        value;\n    }\n    function readBeforeAssignment() internal view {\n        S storage value;\n        assembly { pop(value.slot) value.slot := s.slot }\n    }\n    function terminal(uint256 y) public pure returns (uint256 x) {\n        assembly { revert(0, 0) x := y }\n    }\n    function transactionReturn(uint256 y) public pure returns (uint256 x) {\n        assembly { return(0, 0) }\n        x = y;\n    }\n    function loopBreak() public pure {\n        assembly {\n            for { let a := 0 } lt(a, 1) { a := add(a, 1) } {\n                break\n                let b := 42\n            }\n        }\n    }\n}\nabstract contract VirtualBase {\n    function always() internal pure virtual {}\n    function inherited(bool flag) external pure returns (uint256) {\n        if (flag) return 1;\n        always();\n    }\n}\ncontract VirtualDerived is VirtualBase {\n    function always() internal pure override { revert(); }\n}\ncontract ModifierBase {\n    modifier guarded() virtual { revert(); _; }\n    function inherited() internal guarded returns (uint256) { uint256 local; local; }\n}\ncontract ModifierDerived is ModifierBase {\n    modifier guarded() override { _; }\n    function expose() external { inherited(); }\n}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

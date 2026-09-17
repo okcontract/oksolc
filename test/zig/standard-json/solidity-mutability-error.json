@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "MutabilityError.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.36;\ncontract C { uint256 x; function f() public pure returns (uint256) { return x; } }"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

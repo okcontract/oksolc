@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "CompleteABI.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract External {}\nlibrary L { struct Inner { uint256[2] x; } struct S { uint256 amount; Inner[] children; bytes data; } function excluded(S storage value) public view {} function mutate(uint256[] storage values) public { values.push(1); } function inspect(S memory value, External target) public pure returns (S memory result, External echoed) { return (value, target); } }\nabstract contract A { struct Item { External[] targets; bytes payload; } event Seen(address indexed sender, Item item); error Bad(Item item); function f(Item calldata item) public virtual returns (External); }\ncontract B is A { function f(Item calldata item) public pure virtual override returns (External) { return item.targets[0]; } }\ncontract C is B { mapping(address owner => mapping(uint256 index => uint256 value)) public balances; Item public item; constructor(uint256 seed) payable { balances[msg.sender][0] = seed; } function f(Item calldata item_) public pure override returns (External) { return item_.targets[0]; } fallback() external payable {} receive() external payable {} }\n"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi"
+        ]
+      }
+    }
+  }
+}

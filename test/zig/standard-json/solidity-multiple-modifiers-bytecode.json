@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ModifierState.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { uint256 public value; modifier passthrough() { _; } modifier twice() { _; _; } function bump() external passthrough twice { value += 1; } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

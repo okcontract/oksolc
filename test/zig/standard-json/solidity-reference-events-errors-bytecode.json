@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ReferenceEventsErrors.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { struct Pair { uint256 number; string text; } error Complex(string message, bytes data, uint256[] values, Pair pair); event ComplexEvent(string indexed message, bytes indexed data, function(uint256) external returns (uint256) indexed callback, uint256[] values, Pair pair); function exercise(string memory message, bytes memory data, uint256[] memory values, Pair memory pair, function(uint256) external returns (uint256) callback, bool fail) external { emit ComplexEvent(message, data, callback, values, pair); if (fail) revert Complex(message, data, values, pair); } }\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "evm.bytecode.object"
+        ]
+      }
+    }
+  }
+}

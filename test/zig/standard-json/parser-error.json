@@ -1,0 +1,17 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "ParserError.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\npragma solidity 0.8.36; contract ParserError { function broken( external { } }"
+    }
+  },
+  "settings": {
+    "outputSelection": {
+      "*": {
+        "": [
+          "ast"
+        ]
+      }
+    }
+  }
+}

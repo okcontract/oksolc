@@ -1,0 +1,18 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "OverrideChain.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract A { function f() public pure virtual returns (uint256) { return 1; } } contract B is A { function f() public pure virtual override returns (uint256) { return 2; } } contract C is B {}"
+    }
+  },
+  "settings": {
+    "viaIR": false,
+    "outputSelection": {
+      "*": {
+        "C": [
+          "abi"
+        ]
+      }
+    }
+  }
+}
