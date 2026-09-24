@@ -521,6 +521,7 @@ pub const OptimizedEVMCodeTransform = struct {
                 if (deep_name.empty()) top_name else deep_name,
                 deficit,
                 message,
+                self.source_location,
             );
             try self.transform.assembly.markAsInvalid();
         }
@@ -561,7 +562,7 @@ pub const OptimizedEVMCodeTransform = struct {
                         .{ slot_description, deficit, stack_text },
                     );
                     defer self.transform.allocator.free(message);
-                    try self.transform.appendStackError(variable_name, deficit, message);
+                    try self.transform.appendStackError(variable_name, deficit, message, .{});
                     try self.transform.assembly.markAsInvalid();
                     try self.transform.assembly.appendConstant(0xCAFFEE);
                     return;
@@ -616,14 +617,17 @@ pub const OptimizedEVMCodeTransform = struct {
         variable: YulName,
         deficit: usize,
         message: []const u8,
+        location: SourceLocation,
     ) !void {
-        try self.stack_errors.append(self.allocator, try StackTooDeepError.initInFunction(
+        var stack_error = try StackTooDeepError.initInFunction(
             self.allocator,
             if (self.current_function_info) |info| info.function.name else .{},
             variable,
             @intCast(deficit),
             message,
-        ));
+        );
+        stack_error.location = location;
+        try stack_error.appendTo(self.allocator, &self.stack_errors);
     }
 };
 
@@ -702,4 +706,27 @@ fn signedDifference(positive: usize, negative: usize) !i32 {
     if (positive > std.math.maxInt(i32) or negative > std.math.maxInt(i32))
         return error.StackDifferenceOverflow;
     return @as(i32, @intCast(positive)) - @as(i32, @intCast(negative));
+}
+
+test "stack diagnostic optimized publication releases allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, variable: YulName) !void {
+            // Isolate diagnostic publication; it reads only these fields.
+            var transform: OptimizedEVMCodeTransform = undefined;
+            transform.allocator = allocator;
+            transform.current_function_info = null;
+            transform.stack_errors = .empty;
+            defer deinitStackErrors(allocator, &transform.stack_errors);
+            const location: SourceLocation = .{ .start = 4, .end = 9, .source_name = "C.sol" };
+            try transform.appendStackError(variable, 2, "optimized stack diagnostic", location);
+            try std.testing.expectEqual(@as(usize, 1), transform.stack_errors.items.len);
+            const diagnostic = transform.stack_errors.items[0];
+            try std.testing.expect(diagnostic.function_name.empty());
+            try std.testing.expectEqual(variable, diagnostic.variable);
+            try std.testing.expectEqual(@as(i32, 2), diagnostic.depth);
+            try std.testing.expectEqualStrings("optimized stack diagnostic", diagnostic.message);
+            try std.testing.expect(diagnostic.location.eql(location));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{try YulName.init("variable")});
 }

@@ -264,12 +264,13 @@ pub const CFG = struct {
         return variable;
     }
 
+    /// Takes the call's owned argument storage only on success. On failure
+    /// the caller still owns the complete value.
     pub fn ownGhostCall(self: *CFG, call_value: AST.FunctionCall) !*AST.FunctionCall {
+        try self.ghost_calls.ensureUnusedCapacity(self.allocator, 1);
         const call = try self.allocator.create(AST.FunctionCall);
-        errdefer self.allocator.destroy(call);
         call.* = call_value;
-        errdefer call.deinit(self.allocator);
-        try self.ghost_calls.append(self.allocator, call);
+        self.ghost_calls.appendAssumeCapacity(call);
         return call;
     }
 

@@ -205,6 +205,9 @@ pub const ControlFlowGraphBuilder = struct {
                 .variables = assignment_variables,
             } },
         });
+        assignment_variables = .empty;
+        assignment_input = .empty;
+        assignment_output = .empty;
         const equality_handle = self.dialect.equalityFunctionHandle() orelse return error.MissingEqualityBuiltin;
         const equality_builtin = try self.dialect.builtin(equality_handle);
         const after_switch = try self.graph.makeBlock(pre_switch_debug);
@@ -244,12 +247,13 @@ pub const ControlFlowGraphBuilder = struct {
             for (arguments.items) |*argument| argument.deinit(self.allocator);
             arguments.deinit(self.allocator);
         }
-        try arguments.append(self.allocator, .{ .literal = .{
+        try arguments.ensureTotalCapacityPrecise(self.allocator, 2);
+        arguments.appendAssumeCapacity(.{ .literal = .{
             .debug_data = literal.debug_data,
             .kind = literal.kind,
             .value = try literal.value.clone(self.allocator),
         } });
-        try arguments.append(self.allocator, .{ .identifier = .{
+        arguments.appendAssumeCapacity(.{ .identifier = .{
             .name = ghost_slot.variable.name,
         } });
         const ghost_call = try self.graph.ownGhostCall(.{
@@ -259,6 +263,7 @@ pub const ControlFlowGraphBuilder = struct {
             } },
             .arguments = arguments,
         });
+        arguments = .empty;
         var input: CFGModule.Stack = .empty;
         errdefer input.deinit(self.allocator);
         try input.append(self.allocator, .{ .variable = ghost_slot });
@@ -455,6 +460,8 @@ pub const ControlFlowGraphBuilder = struct {
             .output = output,
             .operation = operation,
         });
+        input = .empty;
+        output = .empty;
         const result = block.operations.items[block.operations.items.len - 1].output.items;
         if (!can_continue) {
             block.exit = .{ .terminated = .{} };
@@ -817,4 +824,46 @@ test "CFG lowering records function calls, loop backedges, and clean returns" {
     const function_info = graph.function_info.get(graph.functions.items[0]).?;
     try std.testing.expect(function_info.exits.items.len != 0);
     try std.testing.expect(function_info.exits.items[0].needs_clean_stack);
+}
+
+test "CFG lowering owns synthetic switch calls across allocation failures" {
+    const Parser = @import("../../asm_parser.zig").Parser;
+    const Analysis = @import("../../asm_analysis.zig");
+    const Diagnostics = @import("../../../liblangutil/diagnostics.zig");
+    const EVMDialect = @import("evm_dialect.zig").EVMDialect;
+    const Structure = @import("../../object.zig").Structure;
+    const Encoding = @import("../../ast_encoding.zig");
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialect.init(allocator, .current(), true);
+    defer dialect.deinit();
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(allocator,
+        \\{ function f(a) -> r {
+        \\    for {} a { a := sub(a, 1) } {
+        \\      switch a case 0x01 { r := a break } case 0x02 { continue }
+        \\        default { if eq(a, 3) { revert(0, 0) } r := add(r, a) }
+        \\    }
+        \\  }
+        \\  pop(f(3))
+        \\}
+    , "cfg-ownership.yul", &reporter, dialect.dialect(), .{})).?;
+    defer ast.deinit();
+    var structure = try Structure.init(allocator, "");
+    defer structure.deinit();
+    var analysis = try Analysis.analyzeStrictBlock(allocator, dialect.dialect(), ast.root(), &structure, Analysis.instructionValidatorForEVMDialect(&dialect));
+    defer analysis.deinit();
+    const original_hash = try Encoding.hashBlock(ast.root());
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, source: *const AST.AST, info: *const AsmAnalysisInfo) !void {
+            var graph = try ControlFlowGraphBuilder.build(failing, info, source.dialect().*, source.root());
+            defer graph.deinit();
+            try std.testing.expectEqual(@as(usize, 2), graph.ghost_calls.items.len);
+            try std.testing.expectEqual(@as(usize, 1), graph.functions.items.len);
+            try std.testing.expectEqualStrings("0x01", graph.ghost_calls.items[0].arguments.items[0].literal.value.string_value.?);
+            try std.testing.expectEqualStrings("0x02", graph.ghost_calls.items[1].arguments.items[0].literal.value.string_value.?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &ast, &analysis });
+    try std.testing.expectEqualDeep(original_hash, try Encoding.hashBlock(ast.root()));
 }
