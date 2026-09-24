@@ -8,7 +8,6 @@
 const std = @import("std");
 const ordered = @import("cxx_compat");
 const AST = @import("../ast.zig");
-const ASTCopier = @import("ast_copier.zig").ASTCopier;
 const EVMDialectModule = @import("../backends/evm/evm_dialect.zig");
 const NameCollector = @import("name_collector.zig");
 const NameDispenser = @import("name_dispenser.zig").NameDispenser;
@@ -133,13 +132,13 @@ pub const StackToMemoryMover = struct {
                     false,
                     assignment.debug_data,
                     assignment.variable_names.items,
-                    assignment.value,
+                    &assignment.value,
                 ),
                 .variable_declaration => |*declaration| try self.rewriteLeftHandSide(
                     true,
                     declaration.debug_data,
                     declaration.variables.items,
-                    declaration.value,
+                    &declaration.value,
                 ),
                 else => null,
             };
@@ -318,21 +317,16 @@ pub const StackToMemoryMover = struct {
 
         const return_variable = function.return_variables.items[0];
         const return_offset = (try self.memory_offset_tracker.offset(return_variable.name)).?;
-        const load = try self.generateMemoryLoad(function.debug_data, return_offset);
-        const load_pointer = try AST.createExpression(self.allocator, load);
-        var return_names: std.ArrayList(AST.Identifier) = .empty;
-        errdefer return_names.deinit(self.allocator);
-        try return_names.append(self.allocator, .{
+        var return_assignment: AST.Statement = .{ .assignment = .{ .debug_data = function.debug_data } };
+        errdefer return_assignment.deinit(self.allocator);
+        try return_assignment.assignment.variable_names.append(self.allocator, .{
             .debug_data = function.debug_data,
             .name = return_variable.name,
         });
-        var return_assignment: AST.Statement = .{ .assignment = .{
-            .debug_data = function.debug_data,
-            .variable_names = return_names,
-            .value = load_pointer,
-        } };
-        return_names = .empty;
-        errdefer return_assignment.deinit(self.allocator);
+        var load = try self.generateMemoryLoad(function.debug_data, return_offset);
+        errdefer load.deinit(self.allocator);
+        return_assignment.assignment.value = try AST.createExpression(self.allocator, load);
+        load = .{ .identifier = .{} };
 
         var wrapper_body: AST.Block = .{ .debug_data = function.debug_data };
         errdefer wrapper_body.deinit(self.allocator);
@@ -372,19 +366,20 @@ pub const StackToMemoryMover = struct {
         comptime is_declaration: bool,
         debug_data: @TypeOf(@as(AST.Assignment, undefined).debug_data),
         lhs_variables: if (is_declaration) []AST.NameWithDebugData else []AST.Identifier,
-        value: ?*AST.Expression,
+        value: *?*AST.Expression,
     ) !?std.ArrayList(AST.Statement) {
         if (lhs_variables.len == 1) {
             const offset = try self.memory_offset_tracker.offset(lhs_variables[0].name) orelse return null;
-            var expression = if (value) |rhs| blk: {
-                var copier = ASTCopier.init(self.allocator);
-                break :blk try copier.translateExpression(rhs);
+            const expression = if (value.*) |rhs| blk: {
+                const moved = rhs.*;
+                self.allocator.destroy(rhs);
+                value.* = null;
+                break :blk moved;
             } else AST.Expression{ .literal = .{
                 .debug_data = debug_data,
                 .kind = .Number,
                 .value = .{ .numeric_value = 0 },
             } };
-            errdefer expression.deinit(self.allocator);
             var result: std.ArrayList(AST.Statement) = .empty;
             errdefer deinitStatements(self.allocator, &result);
             try self.appendMemoryStore(&result, debug_data, offset, expression);
@@ -393,7 +388,7 @@ pub const StackToMemoryMover = struct {
 
         var rhs_memory_slots: std.ArrayList(?u256) = .empty;
         defer rhs_memory_slots.deinit(self.allocator);
-        if (value) |rhs| {
+        if (value.*) |rhs| {
             const call = switch (rhs.*) {
                 .function_call => |*function_call| function_call,
                 else => return error.MultiAssignmentRequiresFunctionCall,
@@ -421,15 +416,11 @@ pub const StackToMemoryMover = struct {
             self.memory_offset_tracker.contains(lhs.name);
         if (!any_rhs_memory and !any_lhs_memory) return null;
 
-        var copier = ASTCopier.init(self.allocator);
-        const copied_value = if (value) |rhs| try AST.createExpression(
-            self.allocator,
-            try copier.translateExpression(rhs),
-        ) else null;
         var temp_declaration: AST.VariableDeclaration = .{
             .debug_data = debug_data,
-            .value = copied_value,
+            .value = value.*,
         };
+        value.* = null;
         errdefer temp_declaration.deinit(self.allocator);
         var memory_assignments: std.ArrayList(AST.Statement) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         errdefer deinitStatements(self.allocator, &memory_assignments);
@@ -453,29 +444,26 @@ pub const StackToMemoryMover = struct {
             errdefer rhs.deinit(self.allocator);
 
             if (try self.memory_offset_tracker.offset(lhs.name)) |offset| {
-                try self.appendMemoryStore(&memory_assignments, debug_data, offset, rhs);
-            } else if (is_declaration) {
-                const rhs_pointer = try AST.createExpression(self.allocator, rhs);
-                var variables: std.ArrayList(AST.NameWithDebugData) = .empty;
-                errdefer variables.deinit(self.allocator);
-                try variables.append(self.allocator, lhs);
-                try variable_assignments.append(self.allocator, .{ .variable_declaration = .{
-                    .debug_data = debug_data,
-                    .variables = variables,
-                    .value = rhs_pointer,
-                } });
-                variables = .empty;
+                const moved = rhs;
+                rhs = .{ .identifier = .{} };
+                try self.appendMemoryStore(&memory_assignments, debug_data, offset, moved);
             } else {
-                const rhs_pointer = try AST.createExpression(self.allocator, rhs);
-                var variables: std.ArrayList(AST.Identifier) = .empty;
-                errdefer variables.deinit(self.allocator);
-                try variables.append(self.allocator, lhs);
-                try variable_assignments.append(self.allocator, .{ .assignment = .{
-                    .debug_data = debug_data,
-                    .variable_names = variables,
-                    .value = rhs_pointer,
-                } });
-                variables = .empty;
+                var statement: AST.Statement = if (is_declaration)
+                    .{ .variable_declaration = .{ .debug_data = debug_data } }
+                else
+                    .{ .assignment = .{ .debug_data = debug_data } };
+                errdefer statement.deinit(self.allocator);
+                const owned_value = try AST.createExpression(self.allocator, rhs);
+                rhs = .{ .identifier = .{} };
+                if (is_declaration) {
+                    statement.variable_declaration.value = owned_value;
+                    try statement.variable_declaration.variables.append(self.allocator, lhs);
+                } else {
+                    statement.assignment.value = owned_value;
+                    try statement.assignment.variable_names.append(self.allocator, lhs);
+                }
+                try variable_assignments.append(self.allocator, statement);
+                statement = emptyStatement();
             }
         }
 
@@ -513,6 +501,7 @@ pub const StackToMemoryMover = struct {
         return result;
     }
 
+    /// Consumes value on both success and failure.
     fn appendMemoryStore(
         self: *StackToMemoryMover,
         statements: *std.ArrayList(AST.Statement),
@@ -599,4 +588,64 @@ fn deinitStatements(allocator: std.mem.Allocator, statements: *std.ArrayList(AST
 fn deinitExpressions(allocator: std.mem.Allocator, expressions: *std.ArrayList(AST.Expression)) void {
     for (expressions.items) |*expression| expression.deinit(allocator);
     expressions.deinit(allocator);
+}
+
+test "stack limit evader spill rewrites move expressions and clean up every allocation failure" {
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Copier = @import("ast_copier.zig").ASTCopier;
+    const Analysis = @import("../asm_analysis.zig");
+    const Objects = @import("../object.zig");
+    const Finder = @import("function_call_finder.zig");
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialectModule.EVMDialect.init(allocator, .current(), true);
+    defer dialect.deinit();
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var source = (try Parser.parseSource(allocator,
+        \\{ function pair(a) -> r, s { r := a s := add(a, 1) }
+        \\  function one(p) -> q { q := add(p, 2) }
+        \\  let x := add(1, 2) x := add(x, 3)
+        \\  let u, v := pair(x) u, v := pair(u) let w := one(v) pop(w)
+        \\}
+    , "spills.yul", &reporter, dialect.dialect(), .{})).?;
+    defer source.deinit();
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, ast: *const AST.AST, evm: *const EVMDialectModule.EVMDialect) !void {
+            var copier = Copier.init(failing);
+            var result = try copier.translateBlock(ast.root());
+            defer result.deinit(failing);
+            const rhs_arguments = result.statements.items[2].variable_declaration.value.?.function_call.arguments.items.ptr;
+            var reserved: NameCollector.NameSet = .{};
+            defer reserved.deinit(failing);
+            var dispenser = try NameDispenser.initFromAst(failing, ast.dialect().*, &result, &reserved);
+            defer dispenser.deinit();
+            var context: OptimiserStepContext = .{
+                .dialect = ast.dialect().*,
+                .dispenser = &dispenser,
+                .reserved_identifiers = &reserved,
+            };
+            var slots: MemorySlotMap = .{};
+            defer slots.deinit(failing);
+            for ([_][]const u8{ "x", "u", "a", "r", "p", "q" }, 0..) |name, index|
+                _ = try slots.insert(failing, try YulName.init(name), @intCast(index));
+            try StackToMemoryMover.run(&context, 0x80, &slots, 6, &result);
+            var definitions = try NameCollector.allFunctionDefinitions(failing, &result);
+            defer definitions.deinit(failing);
+            try std.testing.expectEqual(@as(usize, 3), definitions.len());
+            var calls = try Finder.findFunctionCalls(failing, &result, .{ .builtin = ast.dialect().memoryStoreFunctionHandle().? });
+            defer calls.deinit(failing);
+            var retained = false;
+            for (calls.items) |call| {
+                const value = &call.arguments.items[1];
+                if (value.* == .function_call and value.function_call.arguments.items.ptr == rhs_arguments) retained = true;
+            }
+            try std.testing.expect(retained);
+            var structure = try Objects.Structure.init(failing, "");
+            defer structure.deinit();
+            var info = try Analysis.analyzeStrictBlock(failing, ast.dialect().*, &result, &structure, Analysis.instructionValidatorForEVMDialect(evm));
+            defer info.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &source, &dialect });
 }

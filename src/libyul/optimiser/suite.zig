@@ -260,6 +260,7 @@ pub const OptimiserSuite = struct {
                     defer self.context.dispenser.allocator.free(rendered);
                     std.debug.print("{s}\n", .{rendered});
                     copy.?.deinit(self.context.dispenser.allocator);
+                    copy = null;
                     var copier = ASTCopier.init(self.context.dispenser.allocator);
                     copy = try copier.translateBlock(ast);
                 }
@@ -381,19 +382,23 @@ pub const OptimiserSuite = struct {
         else
             NameCollector.NameSet{};
         defer reserved_identifiers.deinit(allocator);
+        var scratch_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer scratch_arena.deinit();
         var ast_root: AST.Block = undefined;
         {
             var probe = ProfilerModule.OptionalProbe.init(profiler, "Disambiguator");
             defer probe.deinit();
             var disambiguator = try Disambiguator.init(
-                allocator,
+                scratch_arena.allocator(),
                 dialect,
                 analysis_info,
                 &reserved_identifiers,
             );
             defer disambiguator.deinit();
-            ast_root = try disambiguator.translateBlock(code.root());
+            try disambiguator.run(&object.codeMut().?.root_block);
         }
+        OptimiserStepContext.resetScratchArena(&scratch_arena);
+        ast_root = try object.takeCodeRoot();
         var ast_root_owned = true;
         defer if (ast_root_owned) ast_root.deinit(allocator);
 
@@ -404,8 +409,6 @@ pub const OptimiserSuite = struct {
             &reserved_identifiers,
         );
         defer dispenser.deinit();
-        var scratch_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-        defer scratch_arena.deinit();
         var function_analysis_cache = FunctionAnalysisCache.init(std.heap.smp_allocator);
         defer function_analysis_cache.deinit();
         var context: OptimiserStepContext = .{
@@ -431,7 +434,6 @@ pub const OptimiserSuite = struct {
             object.replaceCode(AST.AST.init(allocator, dialect, ast_root), null);
             ast_root = .{};
             var compressed = try StackCompressor.run(
-                allocator,
                 object,
                 optimize_stack_allocation,
                 stack_compressor_max_iterations,
@@ -460,7 +462,6 @@ pub const OptimiserSuite = struct {
                     object.replaceCode(AST.AST.init(allocator, dialect, ast_root), null);
                     ast_root = .{};
                     var compressed = try StackCompressor.run(
-                        allocator,
                         object,
                         optimize_stack_allocation,
                         stack_compressor_max_iterations,
