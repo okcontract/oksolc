@@ -4028,6 +4028,7 @@ pub fn compileYulStandardJsonAlloc(
         }
 
         stack.optimize() catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
             const message = try std.fmt.allocPrint(arena, "Yul optimizer failed: {s}", .{@errorName(err)});
             try appendError(arena, errors_value, .YulException, message, message, null, null);
             return finishOutput(allocator, &output);
@@ -4043,6 +4044,7 @@ pub fn compileYulStandardJsonAlloc(
             settings.link.libraries.items,
             backend_cache,
         ) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
             const message = try std.fmt.allocPrint(arena, "Yul code generation failed: {s}", .{@errorName(err)});
             try appendError(arena, errors_value, .YulException, message, message, null, null);
             return finishOutput(allocator, &output);

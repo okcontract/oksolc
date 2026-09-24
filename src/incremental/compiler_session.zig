@@ -2213,7 +2213,7 @@ const CacheFailureStore = struct {
     }
 };
 
-test "compiler session falls back after cache allocation and disk-write failures" {
+test "compiler session propagates cache OOM and falls back after disk-write failures" {
     const input =
         \\{"language":"Yul","sources":{"A.yul":{"content":"object \"A\" { code { let x := add(1, 2) mstore(0, x) return(0, 32) } }"}},"settings":{"optimizer":{"enabled":true},"outputSelection":{"*":{"*":["evm.bytecode.object"]}}}}
     ;
@@ -2232,12 +2232,19 @@ test "compiler session falls back after cache allocation and disk-write failures
             failure_store.artifactStore(),
         );
         defer session.deinit();
-        var actual = try session.compiler().compile(
-            std.testing.allocator,
-            .{ .input = input },
-        );
-        defer actual.deinit();
-        try common.standard_json.compareExact(expected.bytes, actual.bytes);
+        if (mode == .allocation_read) {
+            try std.testing.expectError(error.OutOfMemory, session.compiler().compile(
+                std.testing.allocator,
+                .{ .input = input },
+            ));
+        } else {
+            var actual = try session.compiler().compile(
+                std.testing.allocator,
+                .{ .input = input },
+            );
+            defer actual.deinit();
+            try common.standard_json.compareExact(expected.bytes, actual.bytes);
+        }
         try std.testing.expect(session.statistics().store_failures != 0);
         try std.testing.expect(failure_store.reads.load(.monotonic) != 0);
         if (mode == .disk_write)

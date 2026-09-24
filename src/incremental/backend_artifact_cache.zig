@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Artifact = @import("backend_artifact.zig");
+const ASTEncoding = @import("../libyul/ast_encoding.zig");
 const ArtifactStoreModule = @import("artifact_store.zig");
 const AssemblyModule = @import("../libevmasm/assembly.zig");
 const KeyHasher = @import("key_hasher.zig").KeyHasher;
@@ -116,6 +117,10 @@ pub const BackendArtifactCache = struct {
     backing_store: ?ArtifactStore = null,
     memory_store: ?MemoryArtifactStore = null,
     memory_limits: ArtifactStoreModule.CacheLimits,
+    /// Configure before any workers borrow the cache. One-shot callers can
+    /// release serialized payloads before worker teardown; reusable sessions
+    /// keep the caller's allocation policy to avoid slower cache-hit decoding.
+    release_temporary_payloads: bool = false,
     memory_store_mutex: std.Io.Mutex = .init,
     flight_shards: [shard_count]FlightShard = [_]FlightShard{.{}} ** shard_count,
     blueprint_hit_count: std.atomic.Value(u64) = .init(0),
@@ -234,18 +239,25 @@ pub const BackendArtifactCache = struct {
         via_ssa_cfg: bool,
         source_indices: []const AssemblyModule.SourceIndex,
     ) !AssemblyResult {
+        // Output formatting is no longer part of the core key. Keep the
+        // unsupported ethdebug capability check ahead of all cache hits.
+        if (stack.debugInfoSelection().ethdebug) return error.EthdebugUnavailable;
         const allocator = stack.artifactAllocator();
-        const core_yul = try stack.printWithoutMetadata();
-        defer allocator.free(core_yul);
+        // Serialized cache payloads are temporary, even when the stack uses a
+        // worker arena. Keep them outside that arena so defer actually releases
+        // their storage before the next backend phase. Decoded objects retain
+        // the stack's allocator; stores copy payloads before returning.
+        const payload_allocator = self.payloadAllocator(allocator);
         const object = try stack.parserResult();
-        const metadata_payload = try Artifact.encodeMetadataAlloc(allocator, object);
-        defer allocator.free(metadata_payload);
+        const core_digest = try ASTEncoding.hashObjectWithoutMetadata(object);
+        const metadata_payload = try Artifact.encodeMetadataAlloc(payload_allocator, object);
+        defer payload_allocator.free(metadata_payload);
         const artifact_refs = self.makeReferences(
             stack,
             deploy_name,
             via_ssa_cfg,
             source_indices,
-            core_yul,
+            core_digest,
             metadata_payload,
         );
 
@@ -263,7 +275,6 @@ pub const BackendArtifactCache = struct {
             deploy_name,
             via_ssa_cfg,
             source_indices,
-            core_yul,
             artifact_refs,
         );
         defer assemblies.deinit();
@@ -307,7 +318,6 @@ pub const BackendArtifactCache = struct {
         deploy_name: ?[]const u8,
         via_ssa_cfg: bool,
         source_indices: []const AssemblyModule.SourceIndex,
-        core_yul: []const u8,
         references: References,
     ) !YulStackModule.AssemblyPair {
         var gate = try self.acquireGate(references.blueprint);
@@ -340,7 +350,7 @@ pub const BackendArtifactCache = struct {
             assemblies.creation.get() orelse return error.MissingAssembly,
         );
         const payload = Artifact.encodeBlueprintAlloc(
-            allocator,
+            self.payloadAllocator(allocator),
             &assemblies,
             source_indices,
             stack.evmVersion(),
@@ -348,8 +358,12 @@ pub const BackendArtifactCache = struct {
             _ = self.cache_failure_count.fetchAdd(1, .monotonic);
             return assemblies;
         };
-        defer allocator.free(payload);
-        self.storeArtifact(references.core, core_yul, &.{});
+        defer self.payloadAllocator(allocator).free(payload);
+        // Allocate the portable AST payload only after both machine and
+        // blueprint misses. Its lifetime is independent of worker arenas.
+        const core_ast = try ASTEncoding.encodeObjectWithoutMetadataAlloc(self.storageAllocator(), try stack.parserResult());
+        defer self.storageAllocator().free(core_ast);
+        self.storeArtifact(references.core, core_ast, &.{});
         self.storeArtifact(references.blueprint, payload, &.{references.core});
         return assemblies;
     }
@@ -407,12 +421,13 @@ pub const BackendArtifactCache = struct {
 
     fn storeMachinePair(
         self: *BackendArtifactCache,
-        allocator: std.mem.Allocator,
+        artifact_allocator: std.mem.Allocator,
         pair: *const YulStackModule.MachineAssemblyPair,
         source_indices: []const AssemblyModule.SourceIndex,
         references: References,
         evm_version: @import("../liblangutil/evm_version.zig").EVMVersion,
     ) void {
+        const allocator = self.payloadAllocator(artifact_allocator);
         const dependencies = [_]ArtifactRef{ references.blueprint, references.metadata };
         const creation = Artifact.encodeCreationAlloc(
             allocator,
@@ -482,11 +497,11 @@ pub const BackendArtifactCache = struct {
         }
         _ = self.link_miss_count.fetchAdd(1, .monotonic);
         try bytecode.link(allocator, libraries);
-        const encoded = Artifact.encodeLinkerObjectAlloc(allocator, bytecode) catch {
+        const encoded = Artifact.encodeLinkerObjectAlloc(self.payloadAllocator(allocator), bytecode) catch {
             _ = self.cache_failure_count.fetchAdd(1, .monotonic);
             return;
         };
-        defer allocator.free(encoded);
+        defer self.payloadAllocator(allocator).free(encoded);
         self.storeArtifact(reference, encoded, &.{machine_reference});
     }
 
@@ -496,14 +511,15 @@ pub const BackendArtifactCache = struct {
         deploy_name: ?[]const u8,
         via_ssa_cfg: bool,
         source_indices: []const AssemblyModule.SourceIndex,
-        core_yul: []const u8,
+        core_digest: H256,
         metadata_payload: []const u8,
     ) References {
         var core_builder = PhaseKey.PhaseKeyBuilder.init(
             .optimized_yul,
             self.compiler_fingerprint,
         );
-        core_builder.addInputBytes(core_yul);
+        core_builder.addInputBytes("yul-object-ast-v1");
+        core_builder.addInputDigest(core_digest);
         const core: ArtifactRef = .{ .kind = .optimized_yul, .key = core_builder.finish() };
 
         var blueprint_builder = PhaseKey.PhaseKeyBuilder.init(
@@ -564,9 +580,10 @@ pub const BackendArtifactCache = struct {
 
     fn loadArtifact(
         self: *BackendArtifactCache,
-        allocator: std.mem.Allocator,
+        artifact_allocator: std.mem.Allocator,
         reference: ArtifactRef,
     ) !?ArtifactStoreModule.Artifact {
+        const allocator = self.payloadAllocator(artifact_allocator);
         const memory = self.memoryStore();
         const memory_value = memory.getAlloc(allocator, reference) catch blk: {
             _ = self.cache_failure_count.fetchAdd(1, .monotonic);
@@ -606,6 +623,10 @@ pub const BackendArtifactCache = struct {
             backing.put(reference, payload, dependencies) catch {
                 _ = self.cache_failure_count.fetchAdd(1, .monotonic);
             };
+    }
+
+    fn payloadAllocator(self: *BackendArtifactCache, artifact_allocator: std.mem.Allocator) std.mem.Allocator {
+        return if (self.release_temporary_payloads) self.storageAllocator() else artifact_allocator;
     }
 
     fn memoryStore(self: *BackendArtifactCache) *MemoryArtifactStore {
@@ -881,6 +902,9 @@ test "backend cache splits metadata, machine, linking, and projection inputs" {
     defer third_stack.deinit();
     try std.testing.expect(try third_stack.parseAndAnalyze("A.yul", second_source));
     try third_stack.optimize();
+    third_stack.debug_info_selection.ethdebug = true;
+    try std.testing.expectError(error.EthdebugUnavailable, cache.assemble(&third_stack, "A_deployed", false, &sources));
+    third_stack.debug_info_selection.ethdebug = false;
     var third = try cache.assemble(
         &third_stack,
         "A_deployed",

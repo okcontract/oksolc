@@ -7,9 +7,7 @@
 const std = @import("std");
 const AST = @import("ast.zig");
 const AsmAnalysis = @import("asm_analysis.zig");
-const AsmParser = @import("asm_parser.zig");
 const AsmPrinter = @import("asm_printer.zig").AsmPrinter;
-const DebugInfoSelection = @import("../liblangutil/debug_info_selection.zig").DebugInfoSelection;
 const Diagnostics = @import("../liblangutil/diagnostics.zig");
 const EVMDialectModule = @import("backends/evm/evm_dialect.zig");
 const EVMMetrics = @import("backends/evm/evm_metrics.zig");
@@ -22,6 +20,9 @@ const ArtifactStoreModule = @import("../incremental/artifact_store.zig");
 const PhaseKey = @import("../incremental/phase_key.zig");
 const ObjectModule = @import("object.zig");
 const OptimiserSuite = @import("optimiser/suite.zig").OptimiserSuite;
+const ASTSnapshot = @import("ast_snapshot.zig").Snapshot;
+const ASTEncoding = @import("ast_encoding.zig");
+const SolidityDebugNormalizer = @import("solidity_debug_normalizer.zig");
 
 pub const Settings = struct {
     evm_version: EVMVersion,
@@ -30,6 +31,9 @@ pub const Settings = struct {
     yul_optimiser_cleanup_steps: []const u8,
     expected_executions_per_deployment: u64,
     profiler: ?*Profiler = null,
+    /// Typed Solidity source mappings are normalized in place after optimization.
+    /// Native Yul regenerates its canonical offsets at the YulStack boundary.
+    typed_solidity: bool = false,
 };
 
 const CacheKey = FixedHash.H256;
@@ -68,7 +72,7 @@ const CacheKeyContext = struct {
 
 const EntryState = union(enum) {
     loading,
-    ready: []u8,
+    ready: *ASTSnapshot,
     failed: anyerror,
 };
 
@@ -86,7 +90,7 @@ const CacheEntry = struct {
 
     fn deinit(self: *CacheEntry, allocator: std.mem.Allocator) void {
         switch (self.state) {
-            .ready => |bytes| allocator.free(bytes),
+            .ready => |snapshot| snapshot.destroy(allocator),
             .loading, .failed => {},
         }
         self.* = undefined;
@@ -258,6 +262,8 @@ pub const ObjectOptimizer = struct {
         settings: Settings,
     ) !void {
         if (!object.sub_id.empty()) return error.TopLevelObjectRequired;
+        if (settings.typed_solidity and !SolidityDebugNormalizer.hasSourceMappings(object))
+            return error.MissingSourceMappings;
         try self.optimizeRecursive(object, settings, true);
     }
 
@@ -295,22 +301,22 @@ pub const ObjectOptimizer = struct {
         var lease = try self.acquireEntry(cache_key);
         if (!lease.owner) {
             // The ready state is immutable, so release the single-flight gate
-            // while retaining the entry reference through parsing. Eviction
+            // while retaining the entry reference through materialization. Eviction
             // may remove the map reference concurrently, but cannot free the
             // payload until this lease is released.
             lease.unlockGate();
             defer lease.release();
             return switch (lease.entry.state) {
-                .ready => |optimized_yul| {
+                .ready => |snapshot| {
                     _ = self.memory_hit_count.fetchAdd(1, .monotonic);
-                    try overwriteWithOptimizedYul(object, optimized_yul, dialect.dialect());
+                    try replaceAnalyzedCode(object, try snapshot.materialize(object, dialect.dialect()), dialect.dialect());
                 },
                 .failed => |err| err,
                 .loading => unreachable,
             };
         }
 
-        const optimized_yul = self.populateEntry(
+        const populated = self.populateEntry(
             cache_key,
             object,
             settings,
@@ -323,11 +329,15 @@ pub const ObjectOptimizer = struct {
             lease.release();
             return err;
         };
-        lease.entry.state = .{ .ready = optimized_yul };
-        _ = self.resident_byte_count.fetchAdd(optimized_yul.len, .monotonic);
-        lease.entry.ready_size.store(@intCast(optimized_yul.len), .release);
+        lease.entry.state = populated;
+        const resident_bytes = switch (populated) {
+            .ready => |snapshot| snapshot.residentBytes(),
+            else => unreachable,
+        };
+        _ = self.resident_byte_count.fetchAdd(resident_bytes, .monotonic);
+        lease.entry.ready_size.store(@intCast(resident_bytes), .release);
         if (self.memory_limits.max_bytes == 0 or
-            optimized_yul.len > self.memory_limits.max_bytes or
+            resident_bytes > self.memory_limits.max_bytes or
             self.memory_limits.max_entries == 0)
         {
             _ = self.admission_rejection_count.fetchAdd(1, .monotonic);
@@ -345,40 +355,25 @@ pub const ObjectOptimizer = struct {
         is_creation: bool,
         dialect: AST.Dialect,
         meter: *EVMMetrics.GasMeter,
-    ) anyerror![]u8 {
+    ) anyerror!EntryState {
         const reference = self.artifactReference(cache_key);
         const allocator = self.storageAllocator();
         if (self.backing_store) |backing_store| {
-            var persisted = backing_store.getAlloc(allocator, reference) catch blk: {
+            var persisted = backing_store.getAlloc(allocator, reference) catch |err| blk: {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
                 _ = self.persistent_failure_count.fetchAdd(1, .monotonic);
                 break :blk null;
             };
             if (persisted) |*artifact| {
-                if (artifact.dependencies.len == 0 and
-                    std.unicode.utf8ValidateSlice(artifact.payload))
-                {
-                    overwriteWithOptimizedYul(
-                        object,
-                        artifact.payload,
-                        dialect,
-                    ) catch |err| switch (err) {
-                        error.OutOfMemory => {
-                            artifact.deinit();
-                            return error.OutOfMemory;
-                        },
-                        else => {
-                            _ = self.persistent_failure_count.fetchAdd(1, .monotonic);
-                            artifact.deinit();
-                            persisted = null;
-                        },
-                    };
-                    if (persisted != null) {
-                        _ = self.persistent_hit_count.fetchAdd(1, .monotonic);
-                        return artifact.takePayload();
-                    }
-                } else {
+                defer artifact.deinit();
+                const snapshot = self.loadSnapshot(object, artifact, dialect) catch |err| blk: {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
                     _ = self.persistent_failure_count.fetchAdd(1, .monotonic);
-                    artifact.deinit();
+                    break :blk null;
+                };
+                if (snapshot) |value| {
+                    _ = self.persistent_hit_count.fetchAdd(1, .monotonic);
+                    return .{ .ready = value };
                 }
             } else {
                 _ = self.persistent_miss_count.fetchAdd(1, .monotonic);
@@ -396,13 +391,27 @@ pub const ObjectOptimizer = struct {
             null,
             settings.profiler,
         );
-        const optimized_yul = try renderOptimizedYulAlloc(allocator, object, dialect);
-        errdefer allocator.free(optimized_yul);
-        if (self.backing_store) |backing_store|
-            backing_store.put(reference, optimized_yul, &.{}) catch {
+        // Freeze private names once. Memory hits copy the existing AST; only
+        // persistent storage serializes it, using the shared structural codec.
+        const snapshot = try ASTSnapshot.create(allocator, object.code().?.root(), object.debug_data.?.source_names != null);
+        errdefer snapshot.destroy(allocator);
+        if (self.backing_store) |backing_store| {
+            const encoded = try ASTEncoding.encodeStoredBlockAlloc(allocator, &snapshot.root);
+            defer allocator.free(encoded);
+            backing_store.put(reference, encoded, &.{}) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
                 _ = self.persistent_failure_count.fetchAdd(1, .monotonic);
             };
-        return optimized_yul;
+        }
+        return .{ .ready = snapshot };
+    }
+
+    fn loadSnapshot(self: *ObjectOptimizer, object: *ObjectModule.Object, artifact: *const ArtifactStoreModule.Artifact, dialect: AST.Dialect) !*ASTSnapshot {
+        if (artifact.dependencies.len != 0) return error.InvalidOptimizedYulCacheEntry;
+        const snapshot = try ASTSnapshot.decode(self.storageAllocator(), artifact.payload, dialect);
+        errdefer snapshot.destroy(self.storageAllocator());
+        try replaceAnalyzedCode(object, try snapshot.materialize(object, dialect), dialect);
+        return snapshot;
     }
 
     fn acquireEntry(
@@ -565,6 +574,7 @@ pub const ObjectOptimizer = struct {
             .optimized_yul,
             self.compiler_fingerprint,
         );
+        builder.addInputBytes("yul-ast-cache-v1");
         builder.addInputDigest(cache_key);
         return .{ .kind = .optimized_yul, .key = builder.finish() };
     }
@@ -574,34 +584,16 @@ pub const ObjectOptimizer = struct {
     }
 
     pub fn calculateCacheKey(
-        self: *ObjectOptimizer,
+        _: *ObjectOptimizer,
         ast: *const AST.Block,
         debug_data: *const ObjectModule.ObjectDebugData,
         settings: Settings,
         is_creation: bool,
     ) !CacheKey {
-        const dialect = try EVMDialectModule.strictAssemblyForEVMObjects(settings.evm_version);
-        const source_names = if (debug_data.source_names) |*names|
-            try names.printerEntriesAlloc(self.storageAllocator())
-        else
-            try self.storageAllocator().alloc(@import("asm_printer.zig").SourceIndexName, 0);
-        defer self.storageAllocator().free(source_names);
-        var printer = AsmPrinter.init(
-            self.storageAllocator(),
-            dialect.dialect(),
-            source_names,
-            DebugInfoSelection.allValue(true),
-            null,
-        );
-        const rendered_ast = try printer.renderBlock(ast);
-        defer self.storageAllocator().free(rendered_ast);
-        const use_src_comment = try debug_data.formatUseSrcCommentAlloc(self.storageAllocator());
-        defer self.storageAllocator().free(use_src_comment);
-
-        var raw_key: [194]u8 = undefined;
+        var raw_key: [195]u8 = undefined;
         var cursor: usize = 0;
-        appendHash(&raw_key, &cursor, Keccak.keccak256(rendered_ast));
-        appendHash(&raw_key, &cursor, Keccak.keccak256(use_src_comment));
+        appendHash(&raw_key, &cursor, try ASTEncoding.hashBlock(ast));
+        appendHash(&raw_key, &cursor, try ASTEncoding.hashSources(debug_data));
         raw_key[cursor] = @intFromBool(settings.optimize_stack_allocation);
         cursor += 1;
         var execution_count: [32]u8 = undefined;
@@ -618,6 +610,8 @@ pub const ObjectOptimizer = struct {
         appendHash(&raw_key, &cursor, Keccak.keccak256(settings.evm_version.name()));
         appendHash(&raw_key, &cursor, Keccak.keccak256(settings.yul_optimiser_steps));
         appendHash(&raw_key, &cursor, Keccak.keccak256(settings.yul_optimiser_cleanup_steps));
+        raw_key[cursor] = @intFromBool(settings.typed_solidity);
+        cursor += 1;
         std.debug.assert(cursor == raw_key.len);
         return Keccak.keccak256(&raw_key);
     }
@@ -628,54 +622,13 @@ fn shardIndex(cache_key: CacheKey) usize {
     return @intCast(prefix & (shard_count - 1));
 }
 
-fn renderOptimizedYulAlloc(
-    allocator: std.mem.Allocator,
-    object: *const ObjectModule.Object,
-    dialect: AST.Dialect,
-) ![]u8 {
-    const debug_data = if (object.debug_data) |*data| data else return error.MissingObjectDebugData;
-    const source_names = if (debug_data.source_names) |*names|
-        try names.printerEntriesAlloc(allocator)
-    else
-        try allocator.alloc(@import("asm_printer.zig").SourceIndexName, 0);
-    defer allocator.free(source_names);
-    var printer = AsmPrinter.init(
-        allocator,
-        dialect,
-        source_names,
-        DebugInfoSelection.allValue(true),
-        null,
-    );
-    return printer.renderBlock((object.code() orelse return error.MissingObjectCode).root());
-}
-
-fn overwriteWithOptimizedYul(
-    object: *ObjectModule.Object,
-    optimized_yul: []const u8,
-    dialect: AST.Dialect,
-) !void {
+/// Consumes the replacement even on failure; publish only after its analysis
+/// succeeds against the receiving object's current subobject structure.
+fn replaceAnalyzedCode(object: *ObjectModule.Object, replacement_input: AST.AST, dialect: AST.Dialect) !void {
+    var replacement = replacement_input;
+    errdefer replacement.deinit();
     const evm_dialect = EVMDialectModule.fromDialect(dialect) orelse
         return error.CachedEVMDialectRequired;
-    const debug_data = if (object.debug_data) |*data| data else return error.MissingObjectDebugData;
-    const source_names = if (debug_data.source_names) |*names|
-        try names.parserEntriesAlloc(object.allocator)
-    else
-        null;
-    defer if (source_names) |names| object.allocator.free(names);
-
-    var reporter = Diagnostics.ErrorReporter.init(object.allocator);
-    defer reporter.deinit();
-    var replacement = (try AsmParser.Parser.parseSource(
-        object.allocator,
-        optimized_yul,
-        object.name,
-        &reporter,
-        dialect,
-        .{ .source_names = source_names },
-    )) orelse return error.InvalidOptimizedYulCacheEntry;
-    errdefer replacement.deinit();
-    if (reporter.hasErrors()) return error.InvalidOptimizedYulCacheEntry;
-
     var structure = try object.summarizeStructure();
     defer structure.deinit();
     var analysis = try AsmAnalysis.analyzeStrictBlock(
@@ -686,10 +639,14 @@ fn overwriteWithOptimizedYul(
         AsmAnalysis.instructionValidatorForEVMDialect(evm_dialect),
     );
     errdefer analysis.deinit();
+    // Nested nodes keep their addresses; only the by-value root moves. Rekey
+    // its scope without allocating before publishing the validated replacement.
+    const root_scope = analysis.scopes.fetchRemove(replacement.root()) orelse return error.MissingAnalysisScope;
+    analysis.scopes.putAssumeCapacity(object.code().?.root(), root_scope.value);
     object.replaceCode(replacement, analysis);
 }
 
-fn appendHash(output: *[194]u8, cursor: *usize, hash: CacheKey) void {
+fn appendHash(output: *[195]u8, cursor: *usize, hash: CacheKey) void {
     @memcpy(output[cursor.*..][0..hash.storage.len], &hash.storage);
     cursor.* += hash.storage.len;
 }
@@ -749,7 +706,7 @@ test "object optimizer reuses portable optimized Yul and rebuilds analysis" {
     try std.testing.expectEqual(@as(usize, 1), optimizer.size());
     try optimizer.optimize(second, settings);
     try std.testing.expectEqual(@as(usize, 1), optimizer.size());
-    try std.testing.expect(second.analysis_info != null);
+    try std.testing.expect(second.analysis_info.?.getScope(second.code().?.root()) != null);
     const statistics = optimizer.statistics();
     try std.testing.expectEqual(@as(u64, 1), statistics.memory_hits);
     try std.testing.expectEqual(@as(u64, 1), statistics.memory_misses);
@@ -778,6 +735,56 @@ test "object optimizer reuses portable optimized Yul and rebuilds analysis" {
     try std.testing.expectEqual(@as(u64, 0), rejected_statistics.evictions);
     try std.testing.expectEqual(@as(u64, 0), rejected_statistics.bytes_evicted);
     try std.testing.expectEqual(@as(u64, 1), rejected_statistics.admission_rejections);
+    // Corrupt bytes and structurally valid but semantically invalid trees both
+    // fall back to the original analyzed input, then replace the bad entry.
+    var store = ArtifactStoreModule.MemoryArtifactStore.init(allocator);
+    defer store.deinit();
+    var malformed_reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer malformed_reporter.deinit();
+    var malformed = (try Parser.parseSource(allocator, "{ mstore(0, missing) }", "cache.yul", &malformed_reporter, dialect.dialect(), .{})).?;
+    defer malformed.deinit();
+    const malformed_bytes = try ASTEncoding.encodeStoredBlockAlloc(allocator, malformed.root());
+    defer allocator.free(malformed_bytes);
+    for ([_][]const u8{ "old text payload", malformed_bytes }) |invalid_payload| {
+        var cache = try ObjectOptimizer.initWithBackingStore(allocator, PhaseKey.CompilerFingerprint.init("corrupt-ast-cache-test"), store.artifactStore());
+        defer cache.deinit();
+        const input = try Helper.makeObject(allocator, dialect);
+        defer input.destroy();
+        const key = try cache.calculateCacheKey(input.code().?.root(), &input.debug_data.?, settings, true);
+        const reference = cache.artifactReference(key);
+        try store.put(reference, invalid_payload, &.{});
+        try cache.optimize(input, settings);
+        try std.testing.expectEqual(@as(u64, 1), cache.statistics().persistent_failures);
+        try std.testing.expectEqual(@as(u64, 1), cache.statistics().optimization_runs);
+        const actual = try AsmPrinter.formatDefault(allocator, input.code().?);
+        defer allocator.free(actual);
+        try std.testing.expectEqualStrings(first_text, actual);
+        var stored = (try store.getAlloc(allocator, reference)).?;
+        defer stored.deinit();
+        const checked = try ASTSnapshot.decode(allocator, stored.payload, dialect.dialect());
+        defer checked.destroy(allocator);
+    }
+
+    const FailingStore = struct {
+        fn contains(_: *anyopaque, _: ArtifactStoreModule.ArtifactRef) ArtifactStoreModule.StoreError!bool {
+            return true;
+        }
+        fn get(_: *anyopaque, _: std.mem.Allocator, _: ArtifactStoreModule.ArtifactRef) ArtifactStoreModule.StoreError!?ArtifactStoreModule.Artifact {
+            return error.OutOfMemory;
+        }
+        fn put(_: *anyopaque, _: ArtifactStoreModule.ArtifactRef, _: []const u8, _: []const ArtifactStoreModule.ArtifactRef) ArtifactStoreModule.StoreError!void {
+            return error.OutOfMemory;
+        }
+    };
+    var failing_cache = try ObjectOptimizer.initWithBackingStore(allocator, PhaseKey.CompilerFingerprint.init("oom-ast-cache-test"), .{ .context = &store, .contains_fn = FailingStore.contains, .get_alloc_fn = FailingStore.get, .put_fn = FailingStore.put });
+    defer failing_cache.deinit();
+    const input = try Helper.makeObject(allocator, dialect);
+    defer input.destroy();
+    const before = try ASTEncoding.hashBlock(input.code().?.root());
+    try std.testing.expectError(error.OutOfMemory, failing_cache.optimize(input, settings));
+    try std.testing.expect(before.eql(&try ASTEncoding.hashBlock(input.code().?.root())));
+    try std.testing.expectEqual(@as(u64, 0), failing_cache.statistics().optimization_runs);
+    try std.testing.expectEqual(@as(u64, 0), failing_cache.statistics().entries);
 }
 
 test "object optimizer single-flight gate suppresses a duplicate producer" {
@@ -795,7 +802,7 @@ test "object optimizer single-flight gate suppresses a duplicate producer" {
             defer lease.release();
             switch (lease.entry.state) {
                 .ready => |payload| self.acquired_ready.store(
-                    std.mem.eql(u8, payload, "optimized"),
+                    payload.root.debug_data.?.ast_id == 7,
                     .release,
                 ),
                 .loading, .failed => self.failed.store(true, .release),
@@ -811,7 +818,7 @@ test "object optimizer single-flight gate suppresses a duplicate producer" {
     const key = Keccak.keccak256("same optimizer input");
     var owner = try optimizer.acquireEntry(key);
     try std.testing.expect(owner.owner);
-    const payload = try optimizer.storageAllocator().dupe(u8, "optimized");
+    const payload = try ASTSnapshot.create(optimizer.storageAllocator(), &.{ .debug_data = .{ .ast_id = 7 } }, false);
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .limited(1),
@@ -825,8 +832,8 @@ test "object optimizer single-flight gate suppresses a duplicate producer" {
         std.atomic.spinLoopHint();
 
     owner.entry.state = .{ .ready = payload };
-    _ = optimizer.resident_byte_count.fetchAdd(payload.len, .monotonic);
-    owner.entry.ready_size.store(@intCast(payload.len), .release);
+    _ = optimizer.resident_byte_count.fetchAdd(payload.residentBytes(), .monotonic);
+    owner.entry.ready_size.store(@intCast(payload.residentBytes()), .release);
     owner.release();
     try group.await(io);
     try std.testing.expect(!waiter.failed.load(.acquire));
@@ -845,17 +852,17 @@ test "object optimizer evicts least recently used ready entries" {
             const allocator = optimizer.storageAllocator();
             const entry = try allocator.create(CacheEntry);
             errdefer allocator.destroy(entry);
-            const owned = try allocator.dupe(u8, payload);
-            errdefer allocator.free(owned);
+            const owned = try ASTSnapshot.create(allocator, &.{ .debug_data = .{ .origin_location = .{ .source_name = payload } } }, false);
+            errdefer owned.destroy(allocator);
             entry.* = .{ .state = .{ .ready = owned } };
-            entry.ready_size.store(@intCast(owned.len), .monotonic);
+            entry.ready_size.store(@intCast(owned.residentBytes()), .monotonic);
             entry.last_used_epoch.store(epoch, .monotonic);
             const shard = &optimizer.shards[shardIndex(key)];
             std.Io.Threaded.mutexLock(&shard.mutex);
             defer std.Io.Threaded.mutexUnlock(&shard.mutex);
             try shard.entries.put(allocator, key, entry);
             _ = optimizer.entry_count.fetchAdd(1, .monotonic);
-            _ = optimizer.resident_byte_count.fetchAdd(owned.len, .monotonic);
+            _ = optimizer.resident_byte_count.fetchAdd(owned.residentBytes(), .monotonic);
         }
 
         fn contains(optimizer: *ObjectOptimizer, key: CacheKey) bool {
@@ -869,7 +876,7 @@ test "object optimizer evicts least recently used ready entries" {
     var optimizer = ObjectOptimizer.initWithFingerprintAndLimits(
         std.testing.allocator,
         PhaseKey.CompilerFingerprint.init("optimizer-lru-test"),
-        .{ .max_entries = 2, .max_bytes = 6 },
+        .{ .max_entries = 2, .max_bytes = std.math.maxInt(u64) },
     );
     defer optimizer.deinit();
     const first = Keccak.keccak256("first");
@@ -878,6 +885,7 @@ test "object optimizer evicts least recently used ready entries" {
     try Helper.insertReady(&optimizer, first, "aaa", 3);
     try Helper.insertReady(&optimizer, second, "bbb", 2);
     try Helper.insertReady(&optimizer, third, "ccc", 4);
+    const before_bytes = optimizer.statistics().resident_bytes;
     optimizer.evictToLimits();
 
     try std.testing.expect(Helper.contains(&optimizer, first));
@@ -885,9 +893,9 @@ test "object optimizer evicts least recently used ready entries" {
     try std.testing.expect(Helper.contains(&optimizer, third));
     const statistics = optimizer.statistics();
     try std.testing.expectEqual(@as(u64, 2), statistics.entries);
-    try std.testing.expectEqual(@as(u64, 6), statistics.resident_bytes);
+    try std.testing.expectEqual(before_bytes * 2 / 3, statistics.resident_bytes);
     try std.testing.expectEqual(@as(u64, 1), statistics.evictions);
-    try std.testing.expectEqual(@as(u64, 3), statistics.bytes_evicted);
+    try std.testing.expectEqual(before_bytes / 3, statistics.bytes_evicted);
 }
 
 test "object optimizer eviction cannot retire a replacement entry" {
@@ -907,16 +915,16 @@ test "object optimizer eviction cannot retire a replacement entry" {
             const allocator = optimizer.storageAllocator();
             const entry = try allocator.create(CacheEntry);
             errdefer allocator.destroy(entry);
-            const owned = try allocator.dupe(u8, payload);
-            errdefer allocator.free(owned);
+            const owned = try ASTSnapshot.create(allocator, &.{ .debug_data = .{ .origin_location = .{ .source_name = payload } } }, false);
+            errdefer owned.destroy(allocator);
             entry.* = .{ .state = .{ .ready = owned } };
-            entry.ready_size.store(@intCast(owned.len), .monotonic);
+            entry.ready_size.store(@intCast(owned.residentBytes()), .monotonic);
             const shard = &optimizer.shards[shardIndex(key)];
             std.Io.Threaded.mutexLock(&shard.mutex);
             defer std.Io.Threaded.mutexUnlock(&shard.mutex);
             try shard.entries.put(allocator, key, entry);
             _ = optimizer.entry_count.fetchAdd(1, .monotonic);
-            _ = optimizer.resident_byte_count.fetchAdd(owned.len, .monotonic);
+            _ = optimizer.resident_byte_count.fetchAdd(owned.residentBytes(), .monotonic);
             return entry;
         }
 
@@ -936,10 +944,10 @@ test "object optimizer eviction cannot retire a replacement entry" {
     defer optimizer.deinit();
     const key = CacheKey.init();
     const original = try Helper.insertReady(&optimizer, key, "old");
-    const replacement_payload = try optimizer.storageAllocator().dupe(u8, "replacement");
+    const replacement_payload = try ASTSnapshot.create(optimizer.storageAllocator(), &.{}, false);
     var replacement_payload_owned = true;
     defer if (replacement_payload_owned)
-        optimizer.storageAllocator().free(replacement_payload);
+        replacement_payload.destroy(optimizer.storageAllocator());
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{
         .async_limit = .limited(1),
@@ -983,13 +991,13 @@ test "object optimizer eviction cannot retire a replacement entry" {
     try std.testing.expect(Helper.mappedEntry(&optimizer, key) == replacement.?.entry);
     replacement.?.entry.state = .{ .ready = replacement_payload };
     replacement_payload_owned = false;
-    _ = optimizer.resident_byte_count.fetchAdd(replacement_payload.len, .monotonic);
-    replacement.?.entry.ready_size.store(@intCast(replacement_payload.len), .release);
+    _ = optimizer.resident_byte_count.fetchAdd(replacement_payload.residentBytes(), .monotonic);
+    replacement.?.entry.ready_size.store(@intCast(replacement_payload.residentBytes()), .release);
     replacement.?.release();
     replacement = null;
 
     const statistics = optimizer.statistics();
     try std.testing.expectEqual(@as(u64, 1), statistics.entries);
-    try std.testing.expectEqual(@as(u64, replacement_payload.len), statistics.resident_bytes);
+    try std.testing.expectEqual(@as(u64, replacement_payload.residentBytes()), statistics.resident_bytes);
     try std.testing.expectEqual(@as(u64, 0), statistics.evictions);
 }

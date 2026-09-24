@@ -9,7 +9,6 @@
 //! stable name allocations owned by their corresponding child nodes.
 
 const std = @import("std");
-const StringUtils = @import("../libsolutil/string_utils.zig");
 const AST = @import("ast.zig");
 const AsmAnalysisInfo = @import("asm_analysis_info.zig").AsmAnalysisInfo;
 const AsmJsonConverterModule = @import("asm_json_converter.zig");
@@ -394,78 +393,6 @@ pub const Object = struct {
         solidity_source_provider: ?CharStreamProvider,
     ) ObjectError![]u8 {
         return self.formatAlloc(self.allocator, debug_info_selection, solidity_source_provider);
-    }
-
-    /// Renders the portable backend input without `.metadata` data nodes.
-    /// Metadata is auxiliary EVM data rather than an optimizer/assembly-lowering
-    /// input, so the incremental backend can key and persist the assembly tree
-    /// independently and apply the current metadata before bytecode assembly.
-    pub fn toStringWithoutMetadataAlloc(
-        self: *const Object,
-        debug_info_selection: DebugInfoSelection,
-        solidity_source_provider: ?CharStreamProvider,
-    ) ObjectError![]u8 {
-        return self.toStringFilteredAlloc(
-            debug_info_selection,
-            solidity_source_provider,
-            false,
-        );
-    }
-
-    fn toStringFilteredAlloc(
-        self: *const Object,
-        debug_info_selection: DebugInfoSelection,
-        solidity_source_provider: ?CharStreamProvider,
-        include_metadata: bool,
-    ) ObjectError![]u8 {
-        const code_value = self.code() orelse return error.MissingCode;
-        const debug_data = if (self.debug_data) |*value| value else return error.MissingDebugData;
-        const printer_entries = if (debug_data.source_names) |*source_names|
-            try source_names.printerEntriesAlloc(self.allocator)
-        else
-            try self.allocator.alloc(AsmPrinter.SourceIndexName, 0);
-        defer self.allocator.free(printer_entries);
-        const rendered_code = try AsmPrinter.AsmPrinter.format(
-            self.allocator,
-            code_value,
-            printer_entries,
-            debug_info_selection,
-            solidity_source_provider,
-        );
-        defer self.allocator.free(rendered_code);
-
-        var inner: std.ArrayList(u8) = .empty;
-        defer inner.deinit(self.allocator);
-        try inner.appendSlice(self.allocator, "code ");
-        try inner.appendSlice(self.allocator, rendered_code);
-        for (self.sub_objects.items) |*node| {
-            const rendered_node = switch (node.*) {
-                .object => |child| try child.toStringFilteredAlloc(
-                    debug_info_selection,
-                    solidity_source_provider,
-                    include_metadata,
-                ),
-                .data => |*data| data_node: {
-                    if (!include_metadata and std.mem.eql(u8, data.name, metadataName()))
-                        continue;
-                    break :data_node try data.toStringAlloc(self.allocator);
-                },
-            };
-            defer self.allocator.free(rendered_node);
-            try inner.append(self.allocator, '\n');
-            try inner.appendSlice(self.allocator, rendered_node);
-        }
-        const indented = try StringUtils.indentAlloc(self.allocator, inner.items, false);
-        defer self.allocator.free(indented);
-        const use_src = try debug_data.formatUseSrcCommentAlloc(self.allocator);
-        defer self.allocator.free(use_src);
-        const quoted_name = try CommonData.escapeAndQuoteStringAlloc(self.allocator, self.name);
-        defer self.allocator.free(quoted_name);
-        return std.fmt.allocPrint(
-            self.allocator,
-            "{s}object {s} {{\n{s}\n}}",
-            .{ use_src, quoted_name, indented },
-        );
     }
 
     /// Render into caller-owned output storage, including borrowed children.

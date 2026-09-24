@@ -1832,6 +1832,11 @@ fn compileAndWrite(
         cache_policy,
     );
     defer session.deinit();
+    // This entry point performs one compilation. Reclaim temporary cache
+    // payloads early when no persistent cache can serve incremental hits.
+    // Serve/watch and SQLite sessions retain their usual allocation policy.
+    if (session == .memory)
+        session.memory.backend_cache.release_temporary_payloads = true;
     session.setOptimizerProfiler(if (profile_path != null) &profiler else null);
     var output = try session.compiler().compile(init.gpa, .{
         .input = input,
