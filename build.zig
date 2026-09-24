@@ -1038,6 +1038,7 @@ pub fn build(b: *std.Build) void {
     };
     for (test_modules) |module| {
         const tests = b.addTest(.{ .root_module = module });
+        tests.stack_size = 32 * 1024 * 1024;
         check_step.dependOn(&tests.step);
         const identity_validation = addCompilerBuildIdentityValidation(
             b,
@@ -1058,6 +1059,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }) });
     b.step("test-evm", "Run shared EVM semantics tests").dependOn(&b.addRunArtifact(evm_tests).step);
+
+    const yul_construction_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/yul_construction_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options_module },
+                .{ .name = "big_int", .module = big_int_module },
+                .{ .name = "common", .module = common_module },
+                .{ .name = "cxx_compat", .module = cxx_compat_module },
+            },
+        }),
+        .filters = &.{"Yul AST"},
+    });
+    // Corrupt-cache tests exercise the decoder's 1,200-level recursion guard.
+    yul_construction_tests.stack_size = 32 * 1024 * 1024;
+    const run_yul_construction = b.addRunArtifact(yul_construction_tests);
+    b.step("test-yul-construction", "Test typed Yul construction independently of compiler integration").dependOn(&run_yul_construction.step);
+    check_step.dependOn(&yul_construction_tests.step);
+    test_step.dependOn(&run_yul_construction.step);
 
     const sqlite_tests = b.addTest(.{
         .name = "sqlite-store",

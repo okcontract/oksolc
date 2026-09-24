@@ -8,23 +8,14 @@ const std = @import("std");
 const common_data = @import("../libsolutil/common_data.zig");
 const ASTModule = @import("ast.zig");
 const Utilities = @import("utilities.zig");
+const CharStreams = @import("../liblangutil/char_stream.zig");
 const CharStreamProvider = @import("../liblangutil/char_stream_provider.zig").CharStreamProvider;
-const DebugData = @import("../liblangutil/debug_data.zig").DebugData;
 const DebugInfoSelection = @import("../liblangutil/debug_info_selection.zig").DebugInfoSelection;
 const SourceLocation = @import("../liblangutil/source_location.zig").SourceLocation;
 
-pub const SourceIndexName = struct {
-    index: u32,
-    name: []const u8,
-};
-
-pub const PrintError = std.mem.Allocator.Error || error{
-    InvalidAST,
-    InvalidYulStringHandle,
-    UnknownBuiltin,
-    UnknownSourceName,
-    SourceNameMismatch,
-};
+const Stream = @import("asm_stream.zig");
+pub const SourceIndexName = Stream.SourceIndexName;
+pub const PrintError = Stream.PrintError;
 
 pub const AsmPrinter = struct {
     allocator: std.mem.Allocator,
@@ -74,375 +65,82 @@ pub const AsmPrinter = struct {
         return format(allocator, ast, &.{}, DebugInfoSelection.defaultValue(), null);
     }
 
-    pub fn renderExpression(
-        self: *AsmPrinter,
-        expression: *const ASTModule.Expression,
-    ) PrintError![]u8 {
-        return switch (expression.*) {
-            .function_call => |*value| self.renderFunctionCall(value),
-            .identifier => |*value| self.renderIdentifier(value),
-            .literal => |*value| self.renderLiteral(value),
+    pub fn renderExpression(self: *AsmPrinter, value: *const ASTModule.Expression) PrintError![]u8 {
+        return self.render("expression", value);
+    }
+
+    pub fn renderStatement(self: *AsmPrinter, value: *const ASTModule.Statement) PrintError![]u8 {
+        return self.render("statement", value);
+    }
+
+    pub fn renderLiteral(self: *AsmPrinter, value: *const ASTModule.Literal) PrintError![]u8 {
+        return self.render("literal", value);
+    }
+
+    pub fn renderIdentifier(self: *AsmPrinter, value: *const ASTModule.Identifier) PrintError![]u8 {
+        return self.render("identifier", value);
+    }
+
+    pub fn renderBuiltinName(self: *AsmPrinter, value: *const ASTModule.BuiltinName) PrintError![]u8 {
+        return self.render("builtin", value);
+    }
+
+    pub fn renderExpressionStatement(self: *AsmPrinter, value: *const ASTModule.ExpressionStatement) PrintError![]u8 {
+        return self.render("expressionStatement", value);
+    }
+
+    pub fn renderAssignment(self: *AsmPrinter, value: *const ASTModule.Assignment) PrintError![]u8 {
+        return self.render("assignment", value);
+    }
+
+    pub fn renderVariableDeclaration(self: *AsmPrinter, value: *const ASTModule.VariableDeclaration) PrintError![]u8 {
+        return self.render("variable", value);
+    }
+
+    pub fn renderFunctionDefinition(self: *AsmPrinter, value: *const ASTModule.FunctionDefinition) PrintError![]u8 {
+        return self.render("function", value);
+    }
+
+    pub fn renderFunctionCall(self: *AsmPrinter, value: *const ASTModule.FunctionCall) PrintError![]u8 {
+        return self.render("functionCall", value);
+    }
+
+    pub fn renderIf(self: *AsmPrinter, value: *const ASTModule.If) PrintError![]u8 {
+        return self.render("branch", value);
+    }
+
+    pub fn renderSwitch(self: *AsmPrinter, value: *const ASTModule.Switch) PrintError![]u8 {
+        return self.render("selectionStatement", value);
+    }
+
+    pub fn renderForLoop(self: *AsmPrinter, value: *const ASTModule.ForLoop) PrintError![]u8 {
+        return self.render("loop", value);
+    }
+
+    pub fn renderBlock(self: *AsmPrinter, value: *const ASTModule.Block) PrintError![]u8 {
+        return self.render("block", value);
+    }
+
+    fn render(self: *AsmPrinter, comptime method: []const u8, value: anytype) PrintError![]u8 {
+        var bytes = std.Io.Writer.Allocating.init(self.allocator);
+        defer bytes.deinit();
+        var output: Stream.Output = .{ .writer = &bytes.writer };
+        var renderer: Stream.Renderer = .{
+            .output = &output,
+            .dialect = self.dialect,
+            .sources = self.source_index_to_name,
+            .selection = self.debug_info_selection,
+            .provider = self.solidity_source_provider,
+            .last_location = self.last_location,
         };
-    }
-
-    pub fn renderStatement(
-        self: *AsmPrinter,
-        statement: *const ASTModule.Statement,
-    ) PrintError![]u8 {
-        return switch (statement.*) {
-            .expression_statement => |*value| self.renderExpressionStatement(value),
-            .assignment => |*value| self.renderAssignment(value),
-            .variable_declaration => |*value| self.renderVariableDeclaration(value),
-            .function_definition => |*value| self.renderFunctionDefinition(value),
-            .if_statement => |*value| self.renderIf(value),
-            .switch_statement => |*value| self.renderSwitch(value),
-            .for_loop => |*value| self.renderForLoop(value),
-            .break_statement => |*value| self.renderKeyword(value.debug_data, "break"),
-            .continue_statement => |*value| self.renderKeyword(value.debug_data, "continue"),
-            .leave_statement => |*value| self.renderKeyword(value.debug_data, "leave"),
-            .block => |*value| self.renderBlock(value),
+        defer self.last_location = renderer.last_location;
+        @call(.auto, @field(Stream.Renderer, method), .{ &renderer, value }) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            error.LayoutLimit => unreachable, // Only private probes have a limit.
+            error.MissingCode, error.MissingDebugData => return error.InvalidAST,
+            else => |remaining| return remaining,
         };
-    }
-
-    pub fn renderLiteral(
-        self: *AsmPrinter,
-        literal: *const ASTModule.Literal,
-    ) PrintError![]u8 {
-        if (!Utilities.validLiteral(literal)) return error.InvalidAST;
-        const debug = try self.formatDebugDataAlloc(literal.debug_data, false);
-        defer self.allocator.free(debug);
-        const formatted = Utilities.formatLiteralAlloc(self.allocator, literal, true) catch |err| switch (err) {
-            error.InvalidLiteral, error.InvalidNumberLiteral, error.UnexpectedBoolLiteral => return error.InvalidAST,
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-        defer self.allocator.free(formatted);
-        if (literal.kind != .String)
-            return concatAlloc(self.allocator, &.{ debug, formatted });
-        const quoted = try common_data.escapeAndQuoteStringAlloc(self.allocator, formatted);
-        defer self.allocator.free(quoted);
-        return concatAlloc(self.allocator, &.{ debug, quoted });
-    }
-
-    pub fn renderIdentifier(
-        self: *AsmPrinter,
-        identifier: *const ASTModule.Identifier,
-    ) PrintError![]u8 {
-        if (identifier.name.empty()) return error.InvalidAST;
-        const debug = try self.formatDebugDataAlloc(identifier.debug_data, false);
-        defer self.allocator.free(debug);
-        const name = identifier.name.str() catch return error.InvalidYulStringHandle;
-        return concatAlloc(self.allocator, &.{ debug, name });
-    }
-
-    pub fn renderBuiltinName(
-        self: *AsmPrinter,
-        builtin_name: *const ASTModule.BuiltinName,
-    ) PrintError![]u8 {
-        const debug = try self.formatDebugDataAlloc(builtin_name.debug_data, false);
-        defer self.allocator.free(debug);
-        const builtin = self.dialect.builtin(builtin_name.handle) catch return error.UnknownBuiltin;
-        return concatAlloc(self.allocator, &.{ debug, builtin.name });
-    }
-
-    fn renderFunctionName(
-        self: *AsmPrinter,
-        function_name: *const ASTModule.FunctionName,
-    ) PrintError![]u8 {
-        return switch (function_name.*) {
-            .identifier => |*value| self.renderIdentifier(value),
-            .builtin => |*value| self.renderBuiltinName(value),
-        };
-    }
-
-    pub fn renderExpressionStatement(
-        self: *AsmPrinter,
-        statement: *const ASTModule.ExpressionStatement,
-    ) PrintError![]u8 {
-        const debug = try self.formatDebugDataAlloc(statement.debug_data, true);
-        defer self.allocator.free(debug);
-        const expression = try self.renderExpression(&statement.expression);
-        defer self.allocator.free(expression);
-        return concatAlloc(self.allocator, &.{ debug, expression });
-    }
-
-    pub fn renderAssignment(
-        self: *AsmPrinter,
-        assignment: *const ASTModule.Assignment,
-    ) PrintError![]u8 {
-        if (assignment.variable_names.items.len == 0 or assignment.value == null)
-            return error.InvalidAST;
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        const debug = try self.formatDebugDataAlloc(assignment.debug_data, true);
-        defer self.allocator.free(debug);
-        try output.appendSlice(self.allocator, debug);
-        for (assignment.variable_names.items, 0..) |*variable, index| {
-            if (index != 0) try output.appendSlice(self.allocator, ", ");
-            const rendered = try self.renderIdentifier(variable);
-            defer self.allocator.free(rendered);
-            try output.appendSlice(self.allocator, rendered);
-        }
-        try output.appendSlice(self.allocator, " := ");
-        const value = try self.renderExpression(assignment.value.?);
-        defer self.allocator.free(value);
-        try output.appendSlice(self.allocator, value);
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    pub fn renderVariableDeclaration(
-        self: *AsmPrinter,
-        declaration: *const ASTModule.VariableDeclaration,
-    ) PrintError![]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        const debug = try self.formatDebugDataAlloc(declaration.debug_data, true);
-        defer self.allocator.free(debug);
-        try output.appendSlice(self.allocator, debug);
-        try output.appendSlice(self.allocator, "let ");
-        for (declaration.variables.items, 0..) |variable, index| {
-            if (index != 0) try output.appendSlice(self.allocator, ", ");
-            const rendered = try self.formatNameWithDebugDataAlloc(variable);
-            defer self.allocator.free(rendered);
-            try output.appendSlice(self.allocator, rendered);
-        }
-        if (declaration.value) |value| {
-            try output.appendSlice(self.allocator, " := ");
-            const rendered = try self.renderExpression(value);
-            defer self.allocator.free(rendered);
-            try output.appendSlice(self.allocator, rendered);
-        }
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    pub fn renderFunctionDefinition(
-        self: *AsmPrinter,
-        definition: *const ASTModule.FunctionDefinition,
-    ) PrintError![]u8 {
-        if (definition.name.empty()) return error.InvalidAST;
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        const debug = try self.formatDebugDataAlloc(definition.debug_data, true);
-        defer self.allocator.free(debug);
-        const name = definition.name.str() catch return error.InvalidYulStringHandle;
-        try output.appendSlice(self.allocator, debug);
-        try output.appendSlice(self.allocator, "function ");
-        try output.appendSlice(self.allocator, name);
-        try output.append(self.allocator, '(');
-        try self.appendNames(&output, definition.parameters.items);
-        try output.append(self.allocator, ')');
-        if (definition.return_variables.items.len != 0) {
-            try output.appendSlice(self.allocator, " -> ");
-            try self.appendNames(&output, definition.return_variables.items);
-        }
-        try output.append(self.allocator, '\n');
-        const body = try self.renderBlock(&definition.body);
-        defer self.allocator.free(body);
-        try output.appendSlice(self.allocator, body);
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    pub fn renderFunctionCall(
-        self: *AsmPrinter,
-        call: *const ASTModule.FunctionCall,
-    ) PrintError![]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        const debug = try self.formatDebugDataAlloc(call.debug_data, false);
-        defer self.allocator.free(debug);
-        try output.appendSlice(self.allocator, debug);
-        const name = try self.renderFunctionName(&call.function_name);
-        defer self.allocator.free(name);
-        try output.appendSlice(self.allocator, name);
-        try output.append(self.allocator, '(');
-        for (call.arguments.items, 0..) |*argument, index| {
-            if (index != 0) try output.appendSlice(self.allocator, ", ");
-            const rendered = try self.renderExpression(argument);
-            defer self.allocator.free(rendered);
-            try output.appendSlice(self.allocator, rendered);
-        }
-        try output.append(self.allocator, ')');
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    pub fn renderIf(self: *AsmPrinter, if_statement: *const ASTModule.If) PrintError![]u8 {
-        const condition = if_statement.condition orelse return error.InvalidAST;
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        const debug = try self.formatDebugDataAlloc(if_statement.debug_data, true);
-        defer self.allocator.free(debug);
-        try output.appendSlice(self.allocator, debug);
-        try output.appendSlice(self.allocator, "if ");
-        const rendered_condition = try self.renderExpression(condition);
-        defer self.allocator.free(rendered_condition);
-        try output.appendSlice(self.allocator, rendered_condition);
-        const body = try self.renderBlock(&if_statement.body);
-        defer self.allocator.free(body);
-        try output.append(self.allocator, if (std.mem.findScalar(u8, body, '\n') == null) ' ' else '\n');
-        try output.appendSlice(self.allocator, body);
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    pub fn renderSwitch(self: *AsmPrinter, switch_statement: *const ASTModule.Switch) PrintError![]u8 {
-        const expression = switch_statement.expression orelse return error.InvalidAST;
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        const debug = try self.formatDebugDataAlloc(switch_statement.debug_data, true);
-        defer self.allocator.free(debug);
-        try output.appendSlice(self.allocator, debug);
-        try output.appendSlice(self.allocator, "switch ");
-        const rendered_expression = try self.renderExpression(expression);
-        defer self.allocator.free(rendered_expression);
-        try output.appendSlice(self.allocator, rendered_expression);
-        for (switch_statement.cases.items) |*case_value| {
-            if (case_value.value) |literal| {
-                try output.appendSlice(self.allocator, "\ncase ");
-                const rendered_literal = try self.renderLiteral(literal);
-                defer self.allocator.free(rendered_literal);
-                try output.appendSlice(self.allocator, rendered_literal);
-                try output.append(self.allocator, ' ');
-            } else {
-                try output.appendSlice(self.allocator, "\ndefault ");
-            }
-            const body = try self.renderBlock(&case_value.body);
-            defer self.allocator.free(body);
-            try output.appendSlice(self.allocator, body);
-        }
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    pub fn renderForLoop(self: *AsmPrinter, loop: *const ASTModule.ForLoop) PrintError![]u8 {
-        const condition = loop.condition orelse return error.InvalidAST;
-        const debug = try self.formatDebugDataAlloc(loop.debug_data, true);
-        defer self.allocator.free(debug);
-        const pre = try self.renderBlock(&loop.pre);
-        defer self.allocator.free(pre);
-        const rendered_condition = try self.renderExpression(condition);
-        defer self.allocator.free(rendered_condition);
-        const post = try self.renderBlock(&loop.post);
-        defer self.allocator.free(post);
-        const delimiter: u8 = if (pre.len + rendered_condition.len + post.len < 60 and
-            std.mem.findScalar(u8, pre, '\n') == null and
-            std.mem.findScalar(u8, post, '\n') == null) ' ' else '\n';
-        const body = try self.renderBlock(&loop.body);
-        defer self.allocator.free(body);
-
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        try output.appendSlice(self.allocator, debug);
-        try output.appendSlice(self.allocator, "for ");
-        try output.appendSlice(self.allocator, pre);
-        try output.append(self.allocator, delimiter);
-        try output.appendSlice(self.allocator, rendered_condition);
-        try output.append(self.allocator, delimiter);
-        try output.appendSlice(self.allocator, post);
-        try output.append(self.allocator, '\n');
-        try output.appendSlice(self.allocator, body);
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    fn renderKeyword(
-        self: *AsmPrinter,
-        debug_data: ?DebugData,
-        keyword: []const u8,
-    ) PrintError![]u8 {
-        const debug = try self.formatDebugDataAlloc(debug_data, true);
-        defer self.allocator.free(debug);
-        return concatAlloc(self.allocator, &.{ debug, keyword });
-    }
-
-    pub fn renderBlock(self: *AsmPrinter, block: *const ASTModule.Block) PrintError![]u8 {
-        const debug = try self.formatDebugDataAlloc(block.debug_data, true);
-        defer self.allocator.free(debug);
-        if (block.statements.items.len == 0)
-            return concatAlloc(self.allocator, &.{ debug, "{ }" });
-
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-        for (block.statements.items, 0..) |*statement, index| {
-            if (index != 0) try body.append(self.allocator, '\n');
-            const rendered = try self.renderStatement(statement);
-            defer self.allocator.free(rendered);
-            try body.appendSlice(self.allocator, rendered);
-        }
-        if (body.items.len < 30 and std.mem.findScalar(u8, body.items, '\n') == null)
-            return concatAlloc(self.allocator, &.{ debug, "{ ", body.items, " }" });
-
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        try output.appendSlice(self.allocator, debug);
-        try output.appendSlice(self.allocator, "{\n    ");
-        for (body.items) |character| {
-            try output.append(self.allocator, character);
-            if (character == '\n') try output.appendSlice(self.allocator, "    ");
-        }
-        try output.appendSlice(self.allocator, "\n}");
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    fn appendNames(
-        self: *AsmPrinter,
-        output: *std.ArrayList(u8),
-        names: []const ASTModule.NameWithDebugData,
-    ) PrintError!void {
-        for (names, 0..) |name, index| {
-            if (index != 0) try output.appendSlice(self.allocator, ", ");
-            const rendered = try self.formatNameWithDebugDataAlloc(name);
-            defer self.allocator.free(rendered);
-            try output.appendSlice(self.allocator, rendered);
-        }
-    }
-
-    fn formatNameWithDebugDataAlloc(
-        self: *AsmPrinter,
-        variable: ASTModule.NameWithDebugData,
-    ) PrintError![]u8 {
-        if (variable.name.empty()) return error.InvalidAST;
-        const debug = try self.formatDebugDataAlloc(variable.debug_data, true);
-        defer self.allocator.free(debug);
-        const name = variable.name.str() catch return error.InvalidYulStringHandle;
-        return concatAlloc(self.allocator, &.{ debug, name });
-    }
-
-    fn formatDebugDataAlloc(
-        self: *AsmPrinter,
-        debug_data: ?DebugData,
-        statement: bool,
-    ) PrintError![]u8 {
-        const data = debug_data orelse return self.allocator.alloc(u8, 0);
-        if (self.debug_info_selection.none()) return self.allocator.alloc(u8, 0);
-
-        var items: [2][]u8 = undefined;
-        var item_count: usize = 0;
-        defer for (items[0..item_count]) |item| self.allocator.free(item);
-        if (data.ast_id) |ast_id| {
-            if (self.debug_info_selection.ast_id) {
-                items[item_count] = try std.fmt.allocPrint(self.allocator, "@ast-id {d}", .{ast_id});
-                item_count += 1;
-            }
-        }
-        if (!self.last_location.eql(data.origin_location) and self.source_index_to_name.len != 0) {
-            self.last_location = data.origin_location;
-            items[item_count] = try formatSourceLocation(
-                self.allocator,
-                data.origin_location,
-                self.source_index_to_name,
-                self.debug_info_selection,
-                self.solidity_source_provider,
-            );
-            item_count += 1;
-        }
-        if (item_count == 0) return self.allocator.alloc(u8, 0);
-
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-        for (items[0..item_count], 0..) |item, index| {
-            if (index != 0) try body.append(self.allocator, ' ');
-            try body.appendSlice(self.allocator, item);
-        }
-        return if (statement)
-            std.fmt.allocPrint(self.allocator, "/// {s}\n", .{body.items})
-        else
-            std.fmt.allocPrint(self.allocator, "/** {s} */ ", .{body.items});
+        return bytes.toOwnedSlice();
     }
 };
 
@@ -453,13 +151,30 @@ pub fn formatSourceLocation(
     debug_info_selection: DebugInfoSelection,
     solidity_source_provider: ?CharStreamProvider,
 ) PrintError![]u8 {
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    writeSourceLocation(&output.writer, location, source_index_to_name, debug_info_selection, solidity_source_provider) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |remaining| return remaining,
+    };
+    return output.toOwnedSlice();
+}
+
+/// Stream annotation text into either an output buffer or the layout counter.
+/// Source bytes are borrowed only during this call. Only the writer can allocate.
+pub fn writeSourceLocation(
+    writer: anytype,
+    location: SourceLocation,
+    source_index_to_name: []const SourceIndexName,
+    debug_info_selection: DebugInfoSelection,
+    solidity_source_provider: ?CharStreamProvider,
+) !void {
     if (source_index_to_name.len == 0) return error.UnknownSourceName;
     if (debug_info_selection.snippet and !debug_info_selection.location) return error.InvalidAST;
-    if (debug_info_selection.none()) return allocator.alloc(u8, 0);
+    if (debug_info_selection.none()) return;
 
     var source_index: ?u32 = null;
-    var snippet: ?[]u8 = null;
-    defer if (snippet) |owned| allocator.free(owned);
+    var snippet: ?CharStreams.SingleLineSnippet = null;
     if (location.source_name) |source_name| {
         for (source_index_to_name) |entry| {
             if (std.mem.eql(u8, source_name, entry.name)) {
@@ -471,53 +186,53 @@ pub fn formatSourceLocation(
         if (debug_info_selection.snippet) {
             if (solidity_source_provider) |provider| {
                 const stream = provider.charStream(source_name) catch return error.SourceNameMismatch;
-                if (!stream.isImportedFromAST()) {
-                    const raw = try stream.singleLineSnippetAlloc(allocator, location);
-                    defer allocator.free(raw);
-                    const quoted = try common_data.escapeAndQuoteStringAlloc(allocator, raw);
-                    defer allocator.free(quoted);
-                    snippet = try escapeCommentTerminatorAlloc(allocator, quoted);
-                }
+                if (!stream.isImportedFromAST()) snippet = stream.singleLineSnippet(location);
             }
         }
     }
 
+    var buffer: [64]u8 = undefined;
     const prefix = if (source_index) |index|
-        try std.fmt.allocPrint(allocator, "@src {d}:{d}:{d}", .{ index, location.start, location.end })
+        std.fmt.bufPrint(&buffer, "@src {d}:{d}:{d}", .{ index, location.start, location.end }) catch unreachable // zlinter-disable-current-line no_swallow_error - 64 bytes fit the source index and both signed 32-bit offsets
     else
-        try std.fmt.allocPrint(allocator, "@src -1:{d}:{d}", .{ location.start, location.end });
-    defer allocator.free(prefix);
-    if (snippet) |quoted| return concatAlloc(allocator, &.{ prefix, "  ", quoted });
-    return allocator.dupe(u8, prefix);
-}
-
-fn escapeCommentTerminatorAlloc(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-) std.mem.Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    var index: usize = 0;
-    while (index < input.len) {
-        if (index + 1 < input.len and input[index] == '*' and input[index + 1] == '/') {
-            try output.appendSlice(allocator, "*\\/");
-            index += 2;
-        } else {
-            try output.append(allocator, input[index]);
-            index += 1;
-        }
+        std.fmt.bufPrint(&buffer, "@src -1:{d}:{d}", .{ location.start, location.end }) catch unreachable; // zlinter-disable-current-line no_swallow_error - 64 bytes fit the source index and both signed 32-bit offsets
+    try writer.writeAll(prefix);
+    if (snippet) |view| {
+        try writer.writeAll("  \"");
+        var comment: CommentWriter(@TypeOf(writer)) = .{ .writer = writer };
+        try common_data.writeEscapedStringContent(&comment, view.prefix);
+        if (view.truncated) try comment.writeAll("...");
+        try comment.writeByte('"');
     }
-    return output.toOwnedSlice(allocator);
 }
 
-fn concatAlloc(
-    allocator: std.mem.Allocator,
-    parts: []const []const u8,
-) std.mem.Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    for (parts) |part| try output.appendSlice(allocator, part);
-    return output.toOwnedSlice(allocator);
+/// Escapes comment terminators across both byte and slice writes. The adapter
+/// borrows its writer synchronously and is discarded if a write fails.
+fn CommentWriter(comptime Writer: type) type {
+    return struct {
+        const Self = @This();
+        writer: Writer,
+        previous_star: bool = false,
+
+        pub fn writeByte(self: *Self, byte: u8) !void {
+            if (byte == '/' and self.previous_star) try self.writer.writeByte('\\');
+            try self.writer.writeByte(byte);
+            self.previous_star = byte == '*';
+        }
+
+        pub fn writeAll(self: *Self, bytes: []const u8) !void {
+            var start: usize = 0;
+            for (bytes, 0..) |byte, index| {
+                if (byte == '/' and self.previous_star) {
+                    try self.writer.writeAll(bytes[start..index]);
+                    try self.writer.writeAll("\\/");
+                    start = index + 1;
+                }
+                self.previous_star = byte == '*';
+            }
+            try self.writer.writeAll(bytes[start..]);
+        }
+    };
 }
 
 test "source locations include escaped snippets and stable source indices" {
@@ -535,6 +250,111 @@ test "source locations include escaped snippets and stable source indices" {
     );
     defer std.testing.allocator.free(rendered);
     try std.testing.expectEqualStrings("@src 7:0:14  \"alpha *\\/ omega\"", rendered);
+}
+
+test "source locations preserve snippet bounds and byte escaping" {
+    const CharStream = @import("../liblangutil/char_stream.zig").CharStream;
+    const Provider = @import("../liblangutil/char_stream_provider.zig").SingletonCharStreamProvider;
+    const allocator = std.testing.allocator;
+    const Case = struct { source: []const u8 = "alpha */ omega\r\nnext", start: i32, end: i32, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .start = 0, .end = 100, .expected = "\"alpha *\\/ omega...\"" },
+        .{ .start = 0, .end = 14, .expected = "\"alpha *\\/ omega\"" },
+        .{ .start = 6, .end = 8, .expected = "\"*\\/\"" },
+        .{ .start = 7, .end = 9, .expected = "\"/ \"" },
+        .{ .start = 5, .end = 5, .expected = "\"\"" },
+        .{ .start = 14, .end = 16, .expected = "\"...\"" },
+        .{ .start = 16, .end = 100, .expected = "\"next\"" },
+        .{ .start = 20, .end = 25, .expected = "\"\"" },
+        .{ .start = 3, .end = 2, .expected = "\"\"" },
+        .{ .start = -1, .end = 4, .expected = "\"\"" },
+        .{ .start = 0, .end = -1, .expected = "\"\"" },
+        .{ .source = "x\\\"\t\x01\x7f\xc3\xa9 */ \nnext", .start = 0, .end = 100, .expected = "\"x\\\\\\\"\\t\\x01\\x7f\\xc3\\xa9 *\\/ ...\"" },
+        .{ .source = "a" ** 63 ++ "*/ tail", .start = 0, .end = 100, .expected = "\"" ++ "a" ** 63 ++ "*\\/ tail\"" },
+        .{ .source = "", .start = 0, .end = 1, .expected = "\"\"" },
+    };
+    for (cases) |case| {
+        const stream = CharStream.initBorrowed(case.source, "source.sol");
+        const singleton = Provider.init(&stream);
+        const location: SourceLocation = .{ .start = case.start, .end = case.end, .source_name = "source.sol" };
+        const rendered = try formatSourceLocation(allocator, location, &.{.{ .index = 7, .name = "source.sol" }}, .{ .location = true, .snippet = true }, singleton.provider());
+        defer allocator.free(rendered);
+        var expected_buffer: [256]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buffer, "@src 7:{d}:{d}  {s}", .{ case.start, case.end, case.expected });
+        try std.testing.expectEqualStrings(expected, rendered);
+    }
+}
+
+test "source locations validate providers before output and omit unavailable snippets" {
+    const CharStream = @import("../liblangutil/char_stream.zig").CharStream;
+    const Provider = @import("../liblangutil/char_stream_provider.zig").SingletonCharStreamProvider;
+    var stream = CharStream.initBorrowed("source", "source.sol");
+    const singleton = Provider.init(&stream);
+    const names = &[_]SourceIndexName{.{ .index = 7, .name = "source.sol" }};
+    const location: SourceLocation = .{ .start = 0, .end = 6, .source_name = "source.sol" };
+    const selection: DebugInfoSelection = .{ .location = true, .snippet = true };
+    var buffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeSourceLocation(&writer, location, names, selection, null);
+    try std.testing.expectEqualStrings("@src 7:0:6", writer.buffered());
+    writer.end = 0;
+    stream.imported_from_ast = true;
+    try writeSourceLocation(&writer, location, names, selection, singleton.provider());
+    try std.testing.expectEqualStrings("@src 7:0:6", writer.buffered());
+    writer.end = 0;
+    try writeSourceLocation(&writer, .{}, names, selection, singleton.provider());
+    try std.testing.expectEqualStrings("@src -1:-1:-1", writer.buffered());
+    writer.end = 0;
+    try std.testing.expectError(error.UnknownSourceName, writeSourceLocation(&writer, location, &.{}, selection, singleton.provider()));
+    try std.testing.expectError(error.UnknownSourceName, writeSourceLocation(&writer, .{ .source_name = "other.sol" }, names, selection, singleton.provider()));
+    try std.testing.expectError(error.InvalidAST, writeSourceLocation(&writer, location, names, .{ .snippet = true }, singleton.provider()));
+    stream.name_bytes = "other.sol";
+    try std.testing.expectError(error.SourceNameMismatch, writeSourceLocation(&writer, location, names, selection, singleton.provider()));
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    try writeSourceLocation(&writer, location, names, .{}, singleton.provider());
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+}
+
+test "source locations stream snippets into bounded writers and layout counters" {
+    const Provider = @import("../liblangutil/char_stream_provider.zig").SingletonCharStreamProvider;
+    const stream = CharStreams.CharStream.initBorrowed("ab */ \\\"\t\xff\r\nmore", "source.sol");
+    const singleton = Provider.init(&stream);
+    const names = &[_]SourceIndexName{.{ .index = 7, .name = "source.sol" }};
+    const location: SourceLocation = .{ .start = 0, .end = 100, .source_name = "source.sol" };
+    const selection: DebugInfoSelection = .{ .location = true, .snippet = true };
+    const expected = "@src 7:0:100  \"ab *\\/ \\\\\\\"\\t\\xff...\"";
+    var buffer: [128]u8 = undefined;
+    for (0..expected.len + 1) |capacity| {
+        var writer = std.Io.Writer.fixed(buffer[0..capacity]);
+        if (capacity < expected.len) {
+            try std.testing.expectError(error.WriteFailed, writeSourceLocation(&writer, location, names, selection, singleton.provider()));
+            try std.testing.expect(std.mem.startsWith(u8, expected, writer.buffered()));
+        } else {
+            try writeSourceLocation(&writer, location, names, selection, singleton.provider());
+            try std.testing.expectEqualStrings(expected, writer.buffered());
+        }
+    }
+    var counter: Stream.Output = .{};
+    try writeSourceLocation(&counter, location, names, selection, singleton.provider());
+    try std.testing.expectEqual(expected.len, counter.count);
+    for (0..expected.len + 2) |limit| {
+        counter = .{ .limit = limit };
+        if (limit <= expected.len) {
+            try std.testing.expectError(error.LayoutLimit, writeSourceLocation(&counter, location, names, selection, singleton.provider()));
+        } else {
+            try writeSourceLocation(&counter, location, names, selection, singleton.provider());
+            try std.testing.expectEqual(expected.len, counter.count);
+        }
+    }
+
+    var writer = std.Io.Writer.fixed(&buffer);
+    var comment: CommentWriter(*std.Io.Writer) = .{ .writer = &writer };
+    try comment.writeAll("**");
+    try comment.writeByte('/');
+    try comment.writeByte('*');
+    try comment.writeAll("/");
+    try comment.writeAll("**/ / */");
+    try std.testing.expectEqualStrings("**\\/*\\/**\\/ / *\\/", writer.buffered());
 }
 
 test "printer renders compact and multiline blocks with recursive ownership" {

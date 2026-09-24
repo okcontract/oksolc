@@ -9,6 +9,7 @@
 //! stable name allocations owned by their corresponding child nodes.
 
 const std = @import("std");
+const StringUtils = @import("../libsolutil/string_utils.zig");
 const AST = @import("ast.zig");
 const AsmAnalysisInfo = @import("asm_analysis_info.zig").AsmAnalysisInfo;
 const AsmJsonConverterModule = @import("asm_json_converter.zig");
@@ -18,7 +19,6 @@ const CharStreamProvider = @import("../liblangutil/char_stream_provider.zig").Ch
 const CommonData = @import("../libsolutil/common_data.zig");
 const DebugInfoSelection = @import("../liblangutil/debug_info_selection.zig").DebugInfoSelection;
 const JSON = @import("../libsolutil/json.zig");
-const StringUtils = @import("../libsolutil/string_utils.zig");
 const SubAssemblyID = @import("../libevmasm/sub_assembly_id.zig").SubAssemblyID;
 
 pub const ObjectError = AsmPrinter.PrintError || std.mem.Allocator.Error || error{
@@ -104,20 +104,24 @@ pub const ObjectDebugData = struct {
         self: *const ObjectDebugData,
         allocator: std.mem.Allocator,
     ) std.mem.Allocator.Error![]u8 {
-        const source_names = self.source_names orelse return allocator.alloc(u8, 0);
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(allocator);
-        try output.appendSlice(allocator, "/// @use-src ");
+        var output = std.Io.Writer.Allocating.init(allocator);
+        defer output.deinit();
+        self.writeUseSrcComment(&output.writer) catch return error.OutOfMemory;
+        return output.toOwnedSlice();
+    }
+
+    pub fn writeUseSrcComment(self: *const ObjectDebugData, writer: anytype) !void {
+        const source_names = self.source_names orelse return;
+        try writer.writeAll("/// @use-src ");
         for (source_names.entries.items, 0..) |entry, index| {
-            if (index != 0) try output.appendSlice(allocator, ", ");
-            const quoted = try CommonData.escapeAndQuoteStringAlloc(allocator, entry.name);
-            defer allocator.free(quoted);
-            const formatted = try std.fmt.allocPrint(allocator, "{d}:{s}", .{ entry.index, quoted });
-            defer allocator.free(formatted);
-            try output.appendSlice(allocator, formatted);
+            if (index != 0) try writer.writeAll(", ");
+            var buffer: [10]u8 = undefined;
+            const number = std.fmt.bufPrint(&buffer, "{d}", .{entry.index}) catch unreachable; // zlinter-disable-current-line no_swallow_error - 10 bytes fit every u32 source index
+            try writer.writeAll(number);
+            try writer.writeByte(':');
+            try CommonData.writeEscapedQuoted(writer, entry.name);
         }
-        try output.append(allocator, '\n');
-        return output.toOwnedSlice(allocator);
+        try writer.writeByte('\n');
     }
 };
 
@@ -148,15 +152,22 @@ pub const Data = struct {
         self.* = undefined;
     }
 
-    pub fn toStringAlloc(
-        self: *const Data,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
-        const quoted_name = try CommonData.escapeAndQuoteStringAlloc(allocator, self.name);
-        defer allocator.free(quoted_name);
-        const hex_data = try CommonData.toHexAlloc(allocator, self.data, .dont_add, .lower);
-        defer allocator.free(hex_data);
-        return std.fmt.allocPrint(allocator, "data {s} hex\"{s}\"", .{ quoted_name, hex_data });
+    pub fn toStringAlloc(self: *const Data, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        var output = std.Io.Writer.Allocating.init(allocator);
+        defer output.deinit();
+        self.writeTo(&output.writer) catch return error.OutOfMemory;
+        return output.toOwnedSlice();
+    }
+
+    pub fn writeTo(self: *const Data, writer: anytype) !void {
+        try writer.writeAll("data ");
+        try CommonData.writeEscapedQuoted(writer, self.name);
+        try writer.writeAll(" hex\"");
+        for (self.data) |byte| {
+            const encoded = std.fmt.bytesToHex([_]u8{byte}, .lower);
+            try writer.writeAll(&encoded);
+        }
+        try writer.writeByte('"');
     }
 };
 
@@ -186,7 +197,7 @@ pub const ObjectNode = union(enum) {
         solidity_source_provider: ?CharStreamProvider,
     ) ObjectError![]u8 {
         return switch (self.*) {
-            .object => |object| object.toStringAlloc(debug_info_selection, solidity_source_provider),
+            .object => |object| object.formatAlloc(allocator, debug_info_selection, solidity_source_provider),
             .data => |*data| data.toStringAlloc(allocator),
         };
     }
@@ -327,6 +338,20 @@ pub const Object = struct {
         return if (self.code_value != null) &self.code_value.? else null;
     }
 
+    /// Transfers the mutable root without copying nodes or their storage.
+    /// Discard address-based analysis before moving the root. Keep an empty AST
+    /// shell so object/dialect queries still work during the consuming pass.
+    /// The caller owns the returned block with this allocator; debug source
+    /// names continue to borrow this object and must not outlive it.
+    pub fn takeCodeRoot(self: *Object) !AST.Block {
+        const ast = self.codeMut() orelse return error.MissingObjectCode;
+        if (self.analysis_info) |*info| info.deinit();
+        self.analysis_info = null;
+        const result = ast.root_block;
+        ast.root_block = .{};
+        return result;
+    }
+
     pub fn setCode(self: *Object, code_value: AST.AST, analysis_info: ?AsmAnalysisInfo) void {
         std.debug.assert(self.code_value == null);
         std.debug.assert(self.analysis_info == null);
@@ -368,11 +393,7 @@ pub const Object = struct {
         debug_info_selection: DebugInfoSelection,
         solidity_source_provider: ?CharStreamProvider,
     ) ObjectError![]u8 {
-        return self.toStringFilteredAlloc(
-            debug_info_selection,
-            solidity_source_provider,
-            true,
-        );
+        return self.formatAlloc(self.allocator, debug_info_selection, solidity_source_provider);
     }
 
     /// Renders the portable backend input without `.metadata` data nodes.
@@ -445,6 +466,65 @@ pub const Object = struct {
             "{s}object {s} {{\n{s}\n}}",
             .{ use_src, quoted_name, indented },
         );
+    }
+
+    /// Render into caller-owned output storage, including borrowed children.
+    pub fn formatAlloc(
+        self: *const Object,
+        allocator: std.mem.Allocator,
+        debug_info_selection: DebugInfoSelection,
+        solidity_source_provider: ?CharStreamProvider,
+    ) ObjectError![]u8 {
+        var bytes = std.Io.Writer.Allocating.init(allocator);
+        defer bytes.deinit();
+        self.writeTo(&bytes.writer, debug_info_selection, solidity_source_provider) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |remaining| return remaining,
+        };
+        return bytes.toOwnedSlice();
+    }
+
+    /// Writes borrowed object/source data without retaining it or allocating
+    /// renderer storage. The caller owns the writer and its output storage.
+    /// Input owners must remain alive and unchanged until this call returns.
+    pub fn writeTo(
+        self: *const Object,
+        writer: *std.Io.Writer,
+        debug_info_selection: DebugInfoSelection,
+        solidity_source_provider: ?CharStreamProvider,
+    ) (ObjectError || std.Io.Writer.Error)!void {
+        const Stream = @import("asm_stream.zig");
+        var output: Stream.Output = .{ .writer = writer };
+        var renderer: Stream.Renderer = .{
+            .output = &output,
+            .dialect = .{},
+            .selection = debug_info_selection,
+            .provider = solidity_source_provider,
+        };
+        renderer.object(self) catch |err| switch (err) {
+            error.LayoutLimit => unreachable, // No limit on the output adapter.
+            else => |remaining| return remaining,
+        };
+    }
+
+    /// Returns final IR owned by output_allocator, including its optional
+    /// ethdebug header and trailing newline. No scratch or object data escapes.
+    pub fn formatIRAlloc(
+        self: *const Object,
+        output_allocator: std.mem.Allocator,
+        selection: DebugInfoSelection,
+        source_provider: ?CharStreamProvider,
+    ) ObjectError![]u8 {
+        var bytes = std.Io.Writer.Allocating.init(output_allocator);
+        defer bytes.deinit();
+        if (selection.ethdebug)
+            bytes.writer.writeAll("/// ethdebug: enabled\n") catch return error.OutOfMemory;
+        self.writeTo(&bytes.writer, selection, source_provider) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |remaining| return remaining,
+        };
+        bytes.writer.writeByte('\n') catch return error.OutOfMemory;
+        return bytes.toOwnedSlice();
     }
 
     pub fn toJsonAlloc(
@@ -626,6 +706,24 @@ fn dataToJsonValue(
     const value = try CommonData.toHexAlloc(allocator, data.data, .dont_add, .lower);
     try result.object.put(allocator, "value", .{ .string = value });
     return result;
+}
+
+test "object code transfer invalidates analysis and preserves storage and dialect" {
+    const allocator = std.testing.allocator;
+    const object = try Object.create(allocator, "Root");
+    defer object.destroy();
+    try std.testing.expectError(error.MissingObjectCode, object.takeCodeRoot());
+    var root: AST.Block = .{};
+    try root.statements.append(allocator, .{ .leave_statement = .{} });
+    object.setCode(AST.AST.init(allocator, .{}, root), AsmAnalysisInfo.init(allocator));
+    _ = try object.analysis_info.?.getOrCreateScope(object.code().?.root());
+    const dialect = object.dialect().?;
+    var moved = try object.takeCodeRoot();
+    defer moved.deinit(allocator);
+    try std.testing.expectEqual(root.statements.items.ptr, moved.statements.items.ptr);
+    try std.testing.expect(object.analysis_info == null);
+    try std.testing.expectEqual(@as(usize, 0), object.code().?.root().statements.items.len);
+    try std.testing.expectEqual(dialect, object.dialect().?);
 }
 
 test "object structure and subassembly paths preserve object/data distinctions" {
