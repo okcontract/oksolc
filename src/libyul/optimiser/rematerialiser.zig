@@ -27,8 +27,9 @@ pub const Rematerialiser = struct {
     pub const name = "Rematerialiser";
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
-        try apply(
+        try applyWithScratch(
             context.dispenser.allocator,
+            context.scratchAllocator(),
             context.dialect,
             ast,
             null,
@@ -36,21 +37,32 @@ pub const Rematerialiser = struct {
         );
     }
 
-    pub fn apply(
+    pub inline fn apply(
         allocator: std.mem.Allocator,
         dialect: AST.Dialect,
         ast: *AST.Block,
         vars_to_always_rematerialize: ?*const NameCollector.NameSet,
         only_selected_variables: bool,
     ) anyerror!void {
+        return applyWithScratch(allocator, allocator, dialect, ast, vars_to_always_rematerialize, only_selected_variables);
+    }
+
+    fn applyWithScratch(
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        dialect: AST.Dialect,
+        ast: *AST.Block,
+        vars_to_always_rematerialize: ?*const NameCollector.NameSet,
+        only_selected_variables: bool,
+    ) anyerror!void {
         var reference_counts = try NameCollector.VariableReferencesCounter.countReferencesBlock(
-            allocator,
+            scratch_allocator,
             ast,
         );
-        errdefer reference_counts.deinit(allocator);
+        errdefer reference_counts.deinit(scratch_allocator);
         var rematerialiser: Rematerialiser = .{
             .allocator = allocator,
-            .analyzer = Analyzer.init(allocator, dialect, null),
+            .analyzer = Analyzer.init(scratch_allocator, dialect, null),
             .reference_counts = reference_counts,
             .vars_to_always_rematerialize = vars_to_always_rematerialize,
             .only_selected_variables = only_selected_variables,
@@ -61,8 +73,8 @@ pub const Rematerialiser = struct {
     }
 
     fn deinit(self: *Rematerialiser) void {
+        self.reference_counts.deinit(self.analyzer.allocator);
         self.analyzer.deinit();
-        self.reference_counts.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -80,7 +92,7 @@ pub const Rematerialiser = struct {
         const assigned_expression = assigned.value orelse return error.InvalidAssignedValue;
         const references = if (self.reference_counts.get(variable)) |count| count.* else 0;
         const cost = try Metrics.CodeCost.codeCost(
-            self.allocator,
+            analyzer.allocator,
             analyzer.dialect,
             assigned_expression,
         );
@@ -104,15 +116,15 @@ pub const Rematerialiser = struct {
         if (count.* == 0) return error.InvalidReferenceCount;
         count.* -= 1;
         var nested_references = try NameCollector.VariableReferencesCounter.countReferencesExpression(
-            self.allocator,
+            analyzer.allocator,
             assigned_expression,
         );
-        defer nested_references.deinit(self.allocator);
+        defer nested_references.deinit(analyzer.allocator);
         for (nested_references.items()) |entry| {
             if (self.reference_counts.getPtr(entry.key)) |existing|
                 existing.* += entry.value
             else
-                _ = try self.reference_counts.insert(self.allocator, entry.key, entry.value);
+                _ = try self.reference_counts.insert(analyzer.allocator, entry.key, entry.value);
         }
 
         var copier = ASTCopier.init(self.allocator);
@@ -135,17 +147,26 @@ pub const LiteralRematerialiser = struct {
     pub const name = "LiteralRematerialiser";
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
-        try apply(context.dispenser.allocator, context.dialect, ast);
+        try applyWithScratch(context.dispenser.allocator, context.scratchAllocator(), context.dialect, ast);
     }
 
-    pub fn apply(
+    pub inline fn apply(
         allocator: std.mem.Allocator,
+        dialect: AST.Dialect,
+        ast: *AST.Block,
+    ) anyerror!void {
+        return applyWithScratch(allocator, allocator, dialect, ast);
+    }
+
+    fn applyWithScratch(
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
         dialect: AST.Dialect,
         ast: *AST.Block,
     ) anyerror!void {
         var rematerialiser: LiteralRematerialiser = .{
             .allocator = allocator,
-            .analyzer = Analyzer.init(allocator, dialect, null),
+            .analyzer = Analyzer.init(scratch_allocator, dialect, null),
         };
         defer rematerialiser.analyzer.deinit();
         try rematerialiser.analyzer.run(&rematerialiser, ast);

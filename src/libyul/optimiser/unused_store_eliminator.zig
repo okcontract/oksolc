@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const AST = @import("../ast.zig");
-const CallGraph = @import("call_graph_generator.zig");
 const ControlFlowCollector = @import("../control_flow_side_effects_collector.zig").ControlFlowSideEffectsCollector;
 const ControlFlowSideEffects = @import("../control_flow_side_effects.zig").ControlFlowSideEffects;
 const EVMDialectModule = @import("../backends/evm/evm_dialect.zig");
@@ -72,23 +71,18 @@ pub const UnusedStoreEliminator = struct {
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
         const allocator = context.dispenser.allocator;
-        var graph = try CallGraph.CallGraphGenerator.callGraph(allocator, ast);
-        defer graph.deinit();
-        var function_side_effects = try Semantics.SideEffectsPropagator.sideEffects(
-            allocator,
-            context.dialect,
-            &graph,
-        );
-        defer function_side_effects.deinit(allocator);
+        const scratch_allocator = context.scratchAllocator();
+        var function_analysis = try context.functionAnalysis(ast);
+        defer function_analysis.deinit();
 
-        var tracker = SSAValueTrackerModule.SSAValueTracker.init(allocator);
+        var tracker = SSAValueTrackerModule.SSAValueTracker.init(scratch_allocator);
         defer tracker.deinit();
         try tracker.run(ast);
 
         const ignore_memory = try Semantics.MSizeFinder.containsMSize(context.dialect, ast);
-        var control_collector = try ControlFlowCollector.init(allocator, context.dialect, ast);
+        var control_collector = try ControlFlowCollector.init(scratch_allocator, context.dialect, ast);
         defer control_collector.deinit();
-        var control_effects = try control_collector.functionSideEffectsNamed(allocator);
+        var control_effects = try control_collector.functionSideEffectsNamed(scratch_allocator);
         defer control_effects.deinit();
 
         const provider: KnowledgeBaseModule.ValueProvider = .{
@@ -96,15 +90,15 @@ pub const UnusedStoreEliminator = struct {
             .get_value = valueProvider,
         };
         var eliminator: UnusedStoreEliminator = .{
-            .allocator = allocator,
-            .base = Base.init(allocator, context.dialect),
+            .allocator = scratch_allocator,
+            .base = Base.init(context.scratchBackingAllocator(), context.dialect),
             .ignore_memory = ignore_memory,
-            .function_side_effects = &function_side_effects,
+            .function_side_effects = function_analysis.sideEffects(),
             .control_flow_side_effects = &control_effects,
             .ssa_values = tracker.values(),
-            .store_operations = StoreOperationMap.init(allocator),
+            .store_operations = StoreOperationMap.init(scratch_allocator),
             .knowledge_base = KnowledgeBaseModule.KnowledgeBase.init(
-                allocator,
+                scratch_allocator,
                 provider,
                 context.dialect,
                 true,

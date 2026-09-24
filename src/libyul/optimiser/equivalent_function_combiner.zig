@@ -15,7 +15,7 @@ pub const EquivalentFunctionCombiner = struct {
     pub const name = "EquivalentFunctionCombiner";
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
-        const allocator = context.dispenser.allocator;
+        const allocator = context.scratchAllocator();
         var duplicates = try Detector.EquivalentFunctionDetector.run(allocator, ast);
         defer duplicates.deinit();
         var combiner: EquivalentFunctionCombiner = .{ .duplicates = &duplicates };

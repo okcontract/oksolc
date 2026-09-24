@@ -17,16 +17,16 @@ pub const CircularReferencesPruner = struct {
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
         var graph = try CallGraphModule.CallGraphGenerator.callGraph(
-            context.dispenser.allocator,
+            context.scratchAllocator(),
             ast,
         );
         defer graph.deinit();
         var keep = try functionsCalledFromOutermostContext(
-            context.dispenser.allocator,
+            context.scratchAllocator(),
             &graph,
             context.reserved_identifiers,
         );
-        defer keep.deinit(context.dispenser.allocator);
+        defer keep.deinit(context.scratchAllocator());
         for (ast.statements.items) |*statement| {
             if (statement.* != .function_definition or keep.contains(statement.function_definition.name))
                 continue;

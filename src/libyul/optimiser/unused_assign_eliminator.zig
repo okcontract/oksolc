@@ -27,7 +27,7 @@ pub const UnusedAssignEliminator = struct {
     pub const name = "UnusedAssignEliminator";
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
-        const allocator = context.dispenser.allocator;
+        const allocator = context.scratchAllocator();
         var collector = try ControlFlowCollector.init(allocator, context.dialect, ast);
         defer collector.deinit();
         var named = try collector.functionSideEffectsNamed(allocator);
@@ -35,7 +35,7 @@ pub const UnusedAssignEliminator = struct {
 
         var eliminator: UnusedAssignEliminator = .{
             .allocator = allocator,
-            .base = Base.init(allocator, context.dialect),
+            .base = Base.init(context.scratchBackingAllocator(), context.dialect),
             .control_flow_side_effects = &named,
         };
         defer eliminator.deinit();
@@ -56,7 +56,7 @@ pub const UnusedAssignEliminator = struct {
         try eliminator.base.addCurrentUnusedStoresToRemoval();
         var to_remove = try eliminator.base.removalSet();
         defer to_remove.deinit();
-        try OptimizerUtilities.StatementRemover.run(allocator, ast, &to_remove);
+        try OptimizerUtilities.StatementRemover.run(context.dispenser.allocator, ast, &to_remove);
     }
 
     fn deinit(self: *UnusedAssignEliminator) void {

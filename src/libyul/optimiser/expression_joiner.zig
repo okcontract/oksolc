@@ -20,14 +20,15 @@ pub const ExpressionJoiner = struct {
     pub const name = "ExpressionJoiner";
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
+        const scratch_allocator = context.scratchAllocator();
         var joiner: ExpressionJoiner = .{
             .allocator = context.dispenser.allocator,
             .references = try NameCollectorModule.VariableReferencesCounter.countReferencesBlock(
-                context.dispenser.allocator,
+                scratch_allocator,
                 ast,
             ),
         };
-        defer joiner.references.deinit(joiner.allocator);
+        defer joiner.references.deinit(scratch_allocator);
         try joiner.visitBlock(ast);
         try FunctionGrouper.run(context, ast);
     }

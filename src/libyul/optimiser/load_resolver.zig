@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const AST = @import("../ast.zig");
-const CallGraph = @import("call_graph_generator.zig");
 const DataFlow = @import("data_flow_analyzer.zig");
 const EVMDialect = @import("../backends/evm/evm_dialect.zig").EVMDialect;
 const EVMMetrics = @import("../backends/evm/evm_metrics.zig");
@@ -30,21 +29,16 @@ pub const LoadResolver = struct {
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
         const allocator = context.dispenser.allocator;
+        const scratch_allocator = context.scratchAllocator();
         const contains_msize = try Semantics.MSizeFinder.containsMSize(context.dialect, ast);
-        var graph = try CallGraph.CallGraphGenerator.callGraph(allocator, ast);
-        defer graph.deinit();
-        var function_side_effects = try Semantics.SideEffectsPropagator.sideEffects(
-            allocator,
-            context.dialect,
-            &graph,
-        );
-        defer function_side_effects.deinit(allocator);
+        var function_analysis = try context.functionAnalysis(ast);
+        defer function_analysis.deinit();
         var resolver: LoadResolver = .{
             .allocator = allocator,
             .analyzer = Analyzer.init(
-                allocator,
+                scratch_allocator,
                 context.dialect,
-                &function_side_effects,
+                function_analysis.sideEffects(),
             ),
             .contains_msize = contains_msize,
             .expected_executions_per_deployment = context.expected_executions_per_deployment,

@@ -40,6 +40,7 @@ pub const CallGraph = struct {
         self.* = undefined;
     }
 
+    /// The returned set is owned by the caller and uses this graph's allocator.
     pub fn recursiveFunctions(self: *const CallGraph) anyerror!FunctionHandleSet {
         var handles: std.ArrayList(AST.FunctionHandle) = .empty;
         defer handles.deinit(self.allocator);

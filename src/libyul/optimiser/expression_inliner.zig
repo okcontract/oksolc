@@ -15,6 +15,7 @@ const SubstitutionModule = @import("substitution.zig");
 
 pub const ExpressionInliner = struct {
     allocator: std.mem.Allocator,
+    scratch_allocator: std.mem.Allocator,
     dialect: AST.Dialect,
     inlinable_functions: *const NameCollector.FunctionDefinitionMap,
 
@@ -22,11 +23,12 @@ pub const ExpressionInliner = struct {
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
         const allocator = context.dispenser.allocator;
-        var finder = FinderModule.InlinableExpressionFunctionFinder.init(allocator);
+        var finder = FinderModule.InlinableExpressionFunctionFinder.init(context.scratchAllocator());
         defer finder.deinit();
         try finder.run(ast);
         var inliner: ExpressionInliner = .{
             .allocator = allocator,
+            .scratch_allocator = context.scratchAllocator(),
             .dialect = context.dialect,
             .inlinable_functions = finder.inlinableFunctions(),
         };
@@ -83,11 +85,11 @@ pub const ExpressionInliner = struct {
         if (call.arguments.items.len != function.parameters.items.len) return error.InvalidCallArity;
 
         var references = try NameCollector.ReferencesCounter.countReferencesBlock(
-            self.allocator,
+            self.scratch_allocator,
             &function.body,
         );
-        defer references.deinit(self.allocator);
-        var substitutions = SubstitutionModule.SubstitutionMap.init(self.allocator);
+        defer references.deinit(self.scratch_allocator);
+        var substitutions = SubstitutionModule.SubstitutionMap.init(self.scratch_allocator);
         defer substitutions.deinit();
         for (call.arguments.items, function.parameters.items) |*argument, parameter| {
             const effects = try Semantics.SideEffectsCollector.collectExpression(
@@ -100,7 +102,7 @@ pub const ExpressionInliner = struct {
                 count.*
             else
                 0;
-            const cost = try Metrics.CodeCost.codeCost(self.allocator, self.dialect, argument);
+            const cost = try Metrics.CodeCost.codeCost(self.scratch_allocator, self.dialect, argument);
             if (reference_count > 1 and cost > 1) return;
             try substitutions.put(parameter.name, argument);
         }
