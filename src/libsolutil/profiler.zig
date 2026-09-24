@@ -36,6 +36,9 @@ pub const Profiler = struct {
     metrics: std.array_hash_map.String(Metrics) = .empty,
     counters: std.array_hash_map.String(CounterMetrics) = .empty,
     mutex: std.Io.Mutex = .init,
+    /// Protected by mutex. Deferred recording cannot return an error, so both
+    /// report boundaries reject an incomplete profile after the first failure.
+    recording_failure: ?std.mem.Allocator.Error = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Self {
         return .{ .allocator = allocator, .io = io };
@@ -77,26 +80,27 @@ pub const Profiler = struct {
     ) void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const result = self.metrics.getOrPut(self.allocator, scope_name) catch @panic("profiler allocation failed");
-        if (!result.found_existing) {
-            result.key_ptr.* = self.allocator.dupe(u8, scope_name) catch @panic("profiler allocation failed");
-            result.value_ptr.* = .{};
-        }
+        const metrics = self.entry(Metrics, &self.metrics, scope_name) catch |err| {
+            self.recording_failure = err;
+            return;
+        };
         const elapsed = observation.duration_microseconds;
         const elapsed_cpu = observation.cpu_duration_microseconds;
-        result.value_ptr.duration_microseconds +|= elapsed;
-        result.value_ptr.maximum_duration_microseconds = @max(
-            result.value_ptr.maximum_duration_microseconds,
+        metrics.duration_microseconds +|= elapsed;
+        metrics.maximum_duration_microseconds = @max(
+            metrics.maximum_duration_microseconds,
             elapsed,
         );
-        result.value_ptr.cpu_duration_microseconds +|= elapsed_cpu;
-        result.value_ptr.maximum_cpu_duration_microseconds = @max(
-            result.value_ptr.maximum_cpu_duration_microseconds,
+        metrics.cpu_duration_microseconds +|= elapsed_cpu;
+        metrics.maximum_cpu_duration_microseconds = @max(
+            metrics.maximum_cpu_duration_microseconds,
             elapsed_cpu,
         );
-        result.value_ptr.call_count +|= 1;
+        metrics.call_count +|= 1;
     }
 
+    /// Individual observations remain inspectable after failure; only a
+    /// successful report establishes that recording remained complete.
     pub fn metricsFor(self: *Self, name: []const u8) ?Metrics {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -107,27 +111,46 @@ pub const Profiler = struct {
     /// accumulate locally and call this once per pass invocation rather than
     /// taking the profiler lock in inner loops.
     pub fn recordCounter(self: *Self, name: []const u8, value: u64) void {
-        self.tryRecordCounter(name, value) catch @panic("profiler allocation failed");
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        self.addCounter(name, value) catch |err| {
+            self.recording_failure = err;
+        };
     }
 
     /// Fallible publication for optional telemetry. A failed insertion leaves
     /// the profiler valid and does not retain a borrowed or partially owned key.
+    /// The caller handles this error and may retry; unlike void recording, this
+    /// call does not latch its own insertion failure. A prior latched error is
+    /// still returned without publishing another observation.
     pub fn tryRecordCounter(self: *Self, name: []const u8, value: u64) std.mem.Allocator.Error!void {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const counter = self.counters.getPtr(name) orelse insert: {
-            const owned_name = try self.allocator.dupe(u8, name);
-            errdefer self.allocator.free(owned_name);
-            const result = try self.counters.getOrPut(self.allocator, owned_name);
-            std.debug.assert(!result.found_existing);
-            result.value_ptr.* = .{};
-            break :insert result.value_ptr;
-        };
+        try self.addCounter(name, value);
+    }
+
+    // Callers hold mutex across publication and any failure-state update.
+    fn addCounter(self: *Self, name: []const u8, value: u64) std.mem.Allocator.Error!void {
+        const counter = try self.entry(CounterMetrics, &self.counters, name);
         counter.total +|= value;
         counter.maximum = @max(counter.maximum, value);
         counter.sample_count +|= 1;
     }
 
+    /// Own a key before publishing it. Existing names need no allocation;
+    /// failed growth frees the unpublished key and preserves all prior entries.
+    fn entry(self: *Self, comptime T: type, entries: *std.array_hash_map.String(T), name: []const u8) std.mem.Allocator.Error!*T {
+        if (self.recording_failure) |err| return err;
+        if (entries.getPtr(name)) |value| return value;
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        const result = try entries.getOrPut(self.allocator, owned_name);
+        std.debug.assert(!result.found_existing);
+        result.value_ptr.* = .{};
+        return result.value_ptr;
+    }
+
+    /// Individual counter snapshot; report methods also check completeness.
     pub fn counterFor(self: *Self, name: []const u8) ?CounterMetrics {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -137,13 +160,15 @@ pub const Profiler = struct {
     pub fn reportAlloc(self: *Self, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (self.recording_failure) |err| return err;
         const indices = try allocator.alloc(usize, self.metrics.count());
         defer allocator.free(indices);
         for (indices, 0..) |*index, value| index.* = value;
         // Stable insertion sort by duration, matching the ascending C++ report.
-        for (1..indices.len) |index| {
-            const selected = indices[index];
-            var position = index;
+        var sort_index: usize = 1;
+        while (sort_index < indices.len) : (sort_index += 1) {
+            const selected = indices[sort_index];
+            var position = sort_index;
             while (position != 0 and
                 self.metrics.values()[selected].duration_microseconds <
                     self.metrics.values()[indices[position - 1]].duration_microseconds)
@@ -162,11 +187,12 @@ pub const Profiler = struct {
             total_cpu_duration +|= metrics.cpu_duration_microseconds;
             total_calls +|= metrics.call_count;
         }
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(allocator);
-        try output.appendSlice(allocator, "PERFORMANCE METRICS FOR PROFILED SCOPES\n\n" ++
+        var output = std.Io.Writer.Allocating.init(allocator);
+        defer output.deinit();
+        const writer = &output.writer;
+        writer.writeAll("PERFORMANCE METRICS FOR PROFILED SCOPES\n\n" ++
             "| Wall % | Wall       | CPU        | Calls   | Scope                          |\n" ++
-            "|-------:|-----------:|-----------:|--------:|--------------------------------|\n");
+            "|-------:|-----------:|-----------:|--------:|--------------------------------|\n") catch return error.OutOfMemory;
         for (indices) |index| {
             const metrics = self.metrics.values()[index];
             const percentage = if (total_duration == 0)
@@ -174,8 +200,7 @@ pub const Profiler = struct {
             else
                 100.0 * @as(f64, @floatFromInt(metrics.duration_microseconds)) /
                     @as(f64, @floatFromInt(total_duration));
-            const row = try std.fmt.allocPrint(
-                allocator,
+            writer.print(
                 "| {d:5.1}% | {d:8.3} s | {d:8.3} s | {d:7} | {s} |\n",
                 .{
                     percentage,
@@ -184,12 +209,9 @@ pub const Profiler = struct {
                     metrics.call_count,
                     self.metrics.keys()[index],
                 },
-            );
-            defer allocator.free(row);
-            try output.appendSlice(allocator, row);
+            ) catch return error.OutOfMemory;
         }
-        const total_row = try std.fmt.allocPrint(
-            allocator,
+        writer.print(
             "| {d:5.1}% | {d:8.3} s | {d:8.3} s | {d:7} | **TOTAL** |\n",
             .{
                 100.0,
@@ -197,27 +219,21 @@ pub const Profiler = struct {
                 @as(f64, @floatFromInt(total_cpu_duration)) / 1_000_000.0,
                 total_calls,
             },
-        );
-        defer allocator.free(total_row);
-        try output.appendSlice(allocator, total_row);
+        ) catch return error.OutOfMemory;
         if (self.counters.count() != 0) {
-            try output.appendSlice(
-                allocator,
+            writer.writeAll(
                 "\nWORKLOAD COUNTERS\n\n" ++
                     "| Total               | Maximum             | Samples | Counter |\n" ++
                     "|--------------------:|--------------------:|--------:|---------|\n",
-            );
+            ) catch return error.OutOfMemory;
             for (self.counters.keys(), self.counters.values()) |name, counter| {
-                const row = try std.fmt.allocPrint(
-                    allocator,
+                writer.print(
                     "| {d:19} | {d:19} | {d:7} | {s} |\n",
                     .{ counter.total, counter.maximum, counter.sample_count, name },
-                );
-                defer allocator.free(row);
-                try output.appendSlice(allocator, row);
+                ) catch return error.OutOfMemory;
             }
         }
-        return output.toOwnedSlice(allocator);
+        return output.toOwnedSlice();
     }
 
     /// Returns a stable machine-readable report. Scope rows are sorted by name
@@ -225,6 +241,7 @@ pub const Profiler = struct {
     pub fn reportJsonAlloc(self: *Self, allocator: std.mem.Allocator) ![]u8 {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (self.recording_failure) |err| return err;
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -356,8 +373,10 @@ pub const Profiler = struct {
             _ = self.finish();
         }
 
-        /// Ends and records the probe, returning the exact observation added
-        /// to the profiler. A dismissed probe returns null.
+        /// Ends the probe and attempts publication. Returns the measured
+        /// observation even if recording fails; report methods return that
+        /// failure instead of publishing partial data. A dismissed probe
+        /// returns null. The borrowed scope name must remain live until here.
         pub fn finish(self: *@This()) ?ScopeObservation {
             const observation: ?ScopeObservation = if (self.armed) measured: {
                 const end = std.Io.Clock.Timestamp.now(self.profiler.io, .awake);
@@ -414,7 +433,7 @@ pub const OptionalProbe = struct {
     }
 };
 
-test "probes aggregate calls and produce a deterministic report" {
+test "profiler probes aggregate calls and produce a deterministic report" {
     var profiler = Profiler.init(std.testing.allocator, std.testing.io);
     defer profiler.deinit();
     {
@@ -473,7 +492,7 @@ test "probes aggregate calls and produce a deterministic report" {
     try std.testing.expect(profiler.metricsFor("disabled") == null);
 }
 
-test "JSON reports retain canonical name order for empty and large reversed inventories" {
+test "profiler JSON reports retain canonical name order for empty and large reversed inventories" {
     for ([_]usize{ 0, 1, 513 }) |count| {
         var forward = Profiler.init(std.testing.allocator, std.testing.io);
         defer forward.deinit();
@@ -514,19 +533,246 @@ fn recordReportFixture(profiler: *Profiler, index: usize) !void {
     profiler.recordCounter(name, index + 2);
 }
 
-test "JSON report allocation failures preserve the profiler owner" {
+test "profiler report allocation failures preserve the owner" {
     var profiler = Profiler.init(std.testing.allocator, std.testing.io);
     defer profiler.deinit();
     for (0..4) |index| try recordReportFixture(&profiler, 3 - index);
     const before = try profiler.reportJsonAlloc(std.testing.allocator);
     defer std.testing.allocator.free(before);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseReportAllocation, .{&profiler});
+    const before_text = try profiler.reportAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(before_text);
+    for ([_]bool{ false, true }) |json|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseReportAllocation, .{ &profiler, json });
+    const after_text = try profiler.reportAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(after_text);
+    try std.testing.expectEqualStrings(before_text, after_text);
+    try std.testing.expect(profiler.recording_failure == null);
     const after = try profiler.reportJsonAlloc(std.testing.allocator);
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings(before, after);
 }
 
-fn exerciseReportAllocation(allocator: std.mem.Allocator, profiler: *Profiler) !void {
-    const report = try profiler.reportJsonAlloc(allocator);
+fn exerciseReportAllocation(allocator: std.mem.Allocator, profiler: *Profiler, json: bool) !void {
+    const report = if (json) try profiler.reportJsonAlloc(allocator) else try profiler.reportAlloc(allocator);
     defer allocator.free(report);
+}
+
+test "profiler deferred recording failures reject partial reports" {
+    for (std.enums.values(RecordingKind)) |kind|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseRecordingAllocation, .{kind});
+}
+
+const RecordingKind = enum { scope, counter, probe, deferred_probe };
+
+fn exerciseRecordingAllocation(allocator: std.mem.Allocator, kind: RecordingKind) !void {
+    var profiler = Profiler.init(allocator, std.testing.io);
+    defer profiler.deinit();
+    for (0..32) |index| {
+        var buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "item-{d:0>5}", .{index});
+        switch (kind) {
+            .scope => profiler.recordObservation(name, .{ .duration_microseconds = index, .cpu_duration_microseconds = index * 2 }),
+            .counter => profiler.recordCounter(name, index + 1),
+            .probe => {
+                var probe = profiler.probe(name);
+                try std.testing.expect(probe.finish() != null);
+            },
+            .deferred_probe => {
+                var probe = OptionalProbe.init(&profiler, name);
+                defer probe.deinit();
+            },
+        }
+        if (profiler.recording_failure) |err| {
+            try std.testing.expectEqual(index, profiler.metrics.count() + profiler.counters.count());
+            try std.testing.expect(profiler.metricsFor(name) == null);
+            try std.testing.expect(profiler.counterFor(name) == null);
+            profiler.recordCounter("after failure", 1);
+            profiler.recordObservation("after failure", .{ .duration_microseconds = 1, .cpu_duration_microseconds = 1 });
+            try std.testing.expectError(err, profiler.tryRecordCounter("after failure", 1));
+            try std.testing.expectEqual(index, profiler.metrics.count() + profiler.counters.count());
+            try expectIncompleteProfile(&profiler);
+            return err;
+        }
+        // Every name must already be owned before this stack buffer is reused.
+        @memset(&buffer, '#');
+    }
+    for (0..32) |index| {
+        var buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "item-{d:0>5}", .{index});
+        switch (kind) {
+            .scope, .probe, .deferred_probe => try std.testing.expectEqual(@as(usize, 1), profiler.metricsFor(name).?.call_count),
+            .counter => try std.testing.expectEqual(@as(u64, index + 1), profiler.counterFor(name).?.total),
+        }
+    }
+    const report = try profiler.reportJsonAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(report);
+}
+
+fn expectIncompleteProfile(profiler: *Profiler) !void {
+    try std.testing.expectError(error.OutOfMemory, profiler.reportAlloc(std.testing.allocator));
+    try std.testing.expectError(error.OutOfMemory, profiler.reportJsonAlloc(std.testing.allocator));
+}
+
+test "profiler fallible counter insertion is transactional and retryable" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseCounterAllocation, .{});
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var profiler = Profiler.init(failing.allocator(), std.testing.io);
+    defer profiler.deinit();
+    try std.testing.expectError(error.OutOfMemory, profiler.tryRecordCounter("retry", 3));
+    failing.fail_index = std.math.maxInt(usize);
+    try profiler.tryRecordCounter("retry", 7);
+    try std.testing.expectEqual(@as(u64, 7), profiler.counterFor("retry").?.total);
+    try std.testing.expect(profiler.recording_failure == null);
+    const report = try profiler.reportJsonAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(report);
+}
+
+fn exerciseCounterAllocation(allocator: std.mem.Allocator) !void {
+    var profiler = Profiler.init(allocator, std.testing.io);
+    defer profiler.deinit();
+    for (0..32) |index| {
+        var buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "counter-{d}", .{index});
+        profiler.tryRecordCounter(name, index + 1) catch |err| {
+            try std.testing.expectEqual(index, profiler.counters.count());
+            try std.testing.expect(profiler.counterFor(name) == null);
+            try std.testing.expect(profiler.recording_failure == null);
+            for (0..index) |prior| {
+                const prior_name = try std.fmt.bufPrint(&buffer, "counter-{d}", .{prior});
+                try std.testing.expectEqual(@as(u64, prior + 1), profiler.counterFor(prior_name).?.total);
+                try std.testing.expectEqual(@as(usize, 1), profiler.counterFor(prior_name).?.sample_count);
+            }
+            return err;
+        };
+    }
+}
+
+test "profiler existing keys update without allocation and totals saturate" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var profiler = Profiler.init(failing.allocator(), std.testing.io);
+    defer profiler.deinit();
+    var name = [_]u8{ 'o', 'w', 'n', 'e', 'd' };
+    profiler.recordObservation(&name, .{ .duration_microseconds = std.math.maxInt(u64), .cpu_duration_microseconds = std.math.maxInt(u64) });
+    profiler.recordCounter(&name, std.math.maxInt(u64));
+    @memset(&name, '#');
+    profiler.metrics.getPtr("owned").?.call_count = std.math.maxInt(usize);
+    profiler.counters.getPtr("owned").?.sample_count = std.math.maxInt(usize);
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    profiler.recordObservation("owned", .{ .duration_microseconds = 7, .cpu_duration_microseconds = 9 });
+    profiler.recordCounter("owned", 11);
+    try profiler.tryRecordCounter("owned", 13);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualDeep(Metrics{
+        .duration_microseconds = std.math.maxInt(u64),
+        .maximum_duration_microseconds = std.math.maxInt(u64),
+        .cpu_duration_microseconds = std.math.maxInt(u64),
+        .maximum_cpu_duration_microseconds = std.math.maxInt(u64),
+        .call_count = std.math.maxInt(usize),
+    }, profiler.metricsFor("owned").?);
+    try std.testing.expectEqualDeep(CounterMetrics{
+        .total = std.math.maxInt(u64),
+        .maximum = std.math.maxInt(u64),
+        .sample_count = std.math.maxInt(usize),
+    }, profiler.counterFor("owned").?);
+    const report = try profiler.reportJsonAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(report);
+}
+
+test "profiler concurrent publication preserves owned entries and failure state" {
+    const Worker = struct {
+        fn run(profiler: *Profiler, worker: usize) void {
+            var buffer: [32]u8 = undefined;
+            const name = std.fmt.bufPrint(&buffer, "worker-{d}", .{worker}) catch unreachable;
+            for (0..50) |_| {
+                profiler.recordObservation("shared", .{ .duration_microseconds = 1, .cpu_duration_microseconds = 2 });
+                profiler.recordCounter("shared", 1);
+                profiler.recordObservation(name, .{ .duration_microseconds = 3, .cpu_duration_microseconds = 4 });
+                profiler.recordCounter(name, 5);
+            }
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .limited(4) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    for ([_]bool{ false, true }) |fail| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = if (fail) 2 else std.math.maxInt(usize),
+        });
+        var profiler = Profiler.init(failing.allocator(), io);
+        defer profiler.deinit();
+        var group: std.Io.Group = .init;
+        defer group.cancel(io);
+        for (0..4) |index| try group.concurrent(io, Worker.run, .{ &profiler, index });
+        try group.await(io);
+        if (fail) {
+            try std.testing.expect(failing.has_induced_failure);
+            try expectIncompleteProfile(&profiler);
+        } else {
+            var sequential = Profiler.init(std.testing.allocator, io);
+            defer sequential.deinit();
+            for (0..4) |index| Worker.run(&sequential, index);
+            const expected = try sequential.reportJsonAlloc(std.testing.allocator);
+            defer std.testing.allocator.free(expected);
+            const actual = try profiler.reportJsonAlloc(std.testing.allocator);
+            defer std.testing.allocator.free(actual);
+            try std.testing.expectEqualStrings(expected, actual);
+        }
+    }
+}
+
+test "profiler text reports retain duration ties and counter insertion order" {
+    var profiler = Profiler.init(std.testing.allocator, std.testing.io);
+    defer profiler.deinit();
+    profiler.recordObservation("last", .{ .duration_microseconds = 2_000_000, .cpu_duration_microseconds = 3_000_000 });
+    profiler.recordObservation("first tie", .{ .duration_microseconds = 1_000_000, .cpu_duration_microseconds = 2_000_000 });
+    profiler.recordObservation("second tie", .{ .duration_microseconds = 1_000_000, .cpu_duration_microseconds = 1_000_000 });
+    profiler.recordCounter("z-counter", 3);
+    profiler.recordCounter("a-counter", 9);
+    profiler.recordCounter("z-counter", 5);
+    const report = try profiler.reportAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(report);
+    try std.testing.expectEqualStrings(
+        "PERFORMANCE METRICS FOR PROFILED SCOPES\n\n" ++
+            "| Wall % | Wall       | CPU        | Calls   | Scope                          |\n" ++
+            "|-------:|-----------:|-----------:|--------:|--------------------------------|\n" ++
+            "|  25.0% |    1.000 s |    2.000 s |       1 | first tie |\n" ++
+            "|  25.0% |    1.000 s |    1.000 s |       1 | second tie |\n" ++
+            "|  50.0% |    2.000 s |    3.000 s |       1 | last |\n" ++
+            "| 100.0% |    4.000 s |    6.000 s |       3 | **TOTAL** |\n" ++
+            "\nWORKLOAD COUNTERS\n\n" ++
+            "| Total               | Maximum             | Samples | Counter |\n" ++
+            "|--------------------:|--------------------:|--------:|---------|\n" ++
+            "|                   8 |                   5 |       2 | z-counter |\n" ++
+            "|                   9 |                   9 |       1 | a-counter |\n",
+        report,
+    );
+}
+
+test "profiler text reports support empty and counter-only inventories" {
+    var profiler = Profiler.init(std.testing.allocator, std.testing.io);
+    defer profiler.deinit();
+    const empty = try profiler.reportAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(empty);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseReportAllocation, .{ &profiler, false });
+    try std.testing.expectEqualStrings(
+        "PERFORMANCE METRICS FOR PROFILED SCOPES\n\n" ++
+            "| Wall % | Wall       | CPU        | Calls   | Scope                          |\n" ++
+            "|-------:|-----------:|-----------:|--------:|--------------------------------|\n" ++
+            "| 100.0% |    0.000 s |    0.000 s |       0 | **TOTAL** |\n",
+        empty,
+    );
+    profiler.recordCounter("only counter", 7);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseReportAllocation, .{ &profiler, false });
+    const counter_only = try profiler.reportAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(counter_only);
+    const expected = try std.mem.concat(std.testing.allocator, u8, &.{
+        empty,
+        "\nWORKLOAD COUNTERS\n\n" ++
+            "| Total               | Maximum             | Samples | Counter |\n" ++
+            "|--------------------:|--------------------:|--------:|---------|\n" ++
+            "|                   7 |                   7 |       1 | only counter |\n",
+    });
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, counter_only);
 }
