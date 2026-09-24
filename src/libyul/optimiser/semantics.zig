@@ -211,7 +211,7 @@ pub const SideEffectsPropagator = struct {
         for (0..graph.functions_with_loops.len()) |index|
             try markPossiblyLooping(allocator, &result, .{ .user = graph.functions_with_loops.at(index) });
         var recursive = try graph.recursiveFunctions();
-        defer recursive.deinit(allocator);
+        defer recursive.deinit(graph.allocator);
         for (0..recursive.len()) |index|
             try markPossiblyLooping(allocator, &result, recursive.at(index));
 
