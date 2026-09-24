@@ -53,110 +53,96 @@ const IntroduceSSA = struct {
     variables_to_replace: *const NameCollector.NameSet,
 
     fn visitBlock(self: *IntroduceSSA, block: *AST.Block) anyerror!void {
-        var index: usize = 0;
-        while (index < block.statements.items.len) {
-            if (try self.replacementFor(&block.statements.items[index])) |replacement_value| {
-                var replacement = replacement_value;
-                defer deinitStatements(self.allocator, &replacement);
-                std.debug.assert(replacement.items.len != 0);
-                try block.statements.ensureUnusedCapacity(self.allocator, replacement.items.len - 1);
-
-                switch (block.statements.items[index]) {
-                    .variable_declaration => |*declaration| {
-                        replacement.items[0].variable_declaration.value = declaration.value;
-                        declaration.value = null;
-                        declaration.variables.deinit(self.allocator);
-                        declaration.variables = .empty;
-                    },
-                    .assignment => |*assignment| {
-                        replacement.items[0].variable_declaration.value = assignment.value;
-                        assignment.value = null;
-                        assignment.variable_names.deinit(self.allocator);
-                        assignment.variable_names = .empty;
-                    },
-                    else => unreachable,
-                }
-
-                block.statements.items[index] = replacement.items[0];
-                if (replacement.items.len > 1) block.statements.insertSliceAssumeCapacity(
-                    index + 1,
-                    replacement.items[1..],
-                );
-                const inserted = replacement.items.len;
-                replacement.clearRetainingCapacity();
-                index += inserted;
-            } else {
-                try self.visitStatement(&block.statements.items[index]);
-                index += 1;
-            }
+        const old_len = block.statements.items.len;
+        var expanded_len = old_len;
+        // Cache the first 64 original decisions in one word, without allocating
+        // width metadata or modifying annotations. Larger indices use the set.
+        var replacements: std.StaticBitSet(64) = .empty;
+        for (block.statements.items, 0..) |*statement, source_index| {
+            const extra = self.additionalStatements(statement, null);
+            expanded_len = std.math.add(usize, expanded_len, extra) catch return error.OutOfMemory;
+            if (extra != 0 and source_index < replacements.capacity()) replacements.set(source_index);
         }
+
+        if (expanded_len != old_len) {
+            try block.statements.ensureTotalCapacityPrecise(self.allocator, expanded_len);
+            block.statements.items.len = expanded_len;
+            var source_index = old_len;
+            var destination_index = expanded_len;
+            // Destinations are at or after their sources. Complete the backwards
+            // move without fallible work, leaving valid empty blocks in every gap.
+            while (source_index != 0) {
+                source_index -= 1;
+                const statement = block.statements.items[source_index];
+                const extra = self.additionalStatements(&statement, if (source_index < replacements.capacity()) replacements.isSet(source_index) else null);
+                block.statements.items[source_index] = .{ .block = .{} };
+                destination_index -= extra + 1;
+                block.statements.items[destination_index] = statement;
+                @memset(block.statements.items[destination_index + 1 ..][0..extra], .{ .block = .{} });
+            }
+            std.debug.assert(destination_index == 0);
+        }
+
+        // Name generation and recursive visits retain their original lexical
+        // order. Only complete statements replace live gaps, so OOM anywhere
+        // leaves every retained owner destructible by the block allocator.
+        var index: usize = 0;
+        for (0..old_len) |source_index| {
+            const extra = self.additionalStatements(&block.statements.items[index], if (source_index < replacements.capacity()) replacements.isSet(source_index) else null);
+            const slots = block.statements.items[index..][0 .. extra + 1];
+            switch (slots[0]) {
+                .variable_declaration => |*declaration| if (extra != 0) {
+                    for (declaration.variables.items, slots[1..]) |*variable, *destination| {
+                        const new_name = try self.name_dispenser.newName(variable.name);
+                        const copy = try variableCopyDeclaration(self.allocator, declaration.debug_data, variable.name, new_name);
+                        destination.* = copy;
+                        variable.* = .{ .debug_data = declaration.debug_data, .name = new_name };
+                    }
+                },
+                .assignment => try self.replaceAssignment(slots),
+                else => try self.visitStatement(&slots[0]),
+            }
+            index += slots.len;
+        }
+        std.debug.assert(index == expanded_len);
     }
 
-    fn replacementFor(
-        self: *IntroduceSSA,
-        statement: *AST.Statement,
-    ) anyerror!?std.ArrayList(AST.Statement) {
-        switch (statement.*) {
-            .variable_declaration => |*declaration| {
-                var replace = false;
-                for (declaration.variables.items) |variable| {
-                    if (self.variables_to_replace.contains(variable.name)) {
-                        replace = true;
-                        break;
-                    }
-                }
-                if (!replace) return null;
-
-                var result: std.ArrayList(AST.Statement) = .empty;
-                errdefer deinitStatements(self.allocator, &result);
-                try result.append(self.allocator, .{ .variable_declaration = .{
-                    .debug_data = declaration.debug_data,
-                } });
-                for (declaration.variables.items) |variable| {
-                    const new_name = try self.name_dispenser.newName(variable.name);
-                    try result.items[0].variable_declaration.variables.append(
-                        self.allocator,
-                        .{ .debug_data = declaration.debug_data, .name = new_name },
-                    );
-                    var old_declaration = try variableCopyDeclaration(
-                        self.allocator,
-                        declaration.debug_data,
-                        variable.name,
-                        new_name,
-                    );
-                    errdefer old_declaration.deinit(self.allocator);
-                    try result.append(self.allocator, old_declaration);
-                }
-                return result;
+    fn additionalStatements(self: *const IntroduceSSA, statement: *const AST.Statement, known_replacement: ?bool) usize {
+        return switch (statement.*) {
+            .variable_declaration => |*declaration| blk: {
+                if (known_replacement) |replace| break :blk if (replace) declaration.variables.items.len else 0;
+                for (declaration.variables.items) |variable|
+                    if (self.variables_to_replace.contains(variable.name)) break :blk declaration.variables.items.len;
+                break :blk 0;
             },
-            .assignment => |*assignment| {
-                for (assignment.variable_names.items) |variable|
-                    if (!self.variables_to_replace.contains(variable.name)) return error.InvalidAst;
+            .assignment => |*assignment| assignment.variable_names.items.len,
+            else => 0,
+        };
+    }
 
-                var result: std.ArrayList(AST.Statement) = .empty;
-                errdefer deinitStatements(self.allocator, &result);
-                try result.append(self.allocator, .{ .variable_declaration = .{
-                    .debug_data = assignment.debug_data,
-                } });
-                for (assignment.variable_names.items) |variable| {
-                    const new_name = try self.name_dispenser.newName(variable.name);
-                    try result.items[0].variable_declaration.variables.append(
-                        self.allocator,
-                        .{ .debug_data = assignment.debug_data, .name = new_name },
-                    );
-                    var old_assignment = try variableCopyAssignment(
-                        self.allocator,
-                        assignment.debug_data,
-                        variable.name,
-                        new_name,
-                    );
-                    errdefer old_assignment.deinit(self.allocator);
-                    try result.append(self.allocator, old_assignment);
-                }
-                return result;
-            },
-            else => return null,
+    fn replaceAssignment(self: *IntroduceSSA, slots: []AST.Statement) !void {
+        const assignment = &slots[0].assignment;
+        for (assignment.variable_names.items) |variable|
+            if (!self.variables_to_replace.contains(variable.name)) return error.InvalidAst;
+
+        var declaration: AST.VariableDeclaration = .{
+            .debug_data = assignment.debug_data,
+            .variables = try .initCapacity(self.allocator, assignment.variable_names.items.len),
+        };
+        errdefer declaration.deinit(self.allocator);
+        for (assignment.variable_names.items, slots[1..]) |variable, *destination| {
+            const new_name = try self.name_dispenser.newName(variable.name);
+            declaration.variables.appendAssumeCapacity(.{ .debug_data = assignment.debug_data, .name = new_name });
+            const copy = try variableCopyAssignment(self.allocator, assignment.debug_data, variable.name, new_name);
+            destination.* = copy;
         }
+        // The expression stays with its old owner until all fallible work ends.
+        // Identifier and NameWithDebugData arrays have different element types.
+        declaration.value = assignment.value;
+        assignment.value = null;
+        assignment.variable_names.deinit(self.allocator);
+        assignment.variable_names = .empty;
+        slots[0] = .{ .variable_declaration = declaration };
     }
 
     fn visitStatement(self: *IntroduceSSA, statement: *AST.Statement) anyerror!void {
@@ -290,20 +276,29 @@ const IntroduceControlFlowSSA = struct {
 
         var index: usize = 0;
         while (index < block.statements.items.len) {
-            var to_prepend: std.ArrayList(AST.Statement) = .empty;
-            defer deinitStatements(self.allocator, &to_prepend);
-            const debug_data = debugDataOfStatement(&block.statements.items[index]);
-            for (self.variables_to_reassign.items.items) |variable| {
-                const new_name = try self.name_dispenser.newName(variable);
-                var declaration = try variableCopyDeclaration(
-                    self.allocator,
-                    debug_data,
-                    new_name,
-                    variable,
-                );
-                errdefer declaration.deinit(self.allocator);
-                try to_prepend.append(self.allocator, declaration);
-                try assigned_variables.append(self.scratch_allocator, variable);
+            const count = self.variables_to_reassign.items.items.len;
+            if (count != 0) {
+                const debug_data = debugDataOfStatement(&block.statements.items[index]);
+                const slots = try block.statements.addManyAt(self.allocator, index, count);
+                // addManyAt checks growth and moves the suffix. Initialize every
+                // gap before fallible construction so the block always owns
+                // valid statements, including after a partial failure.
+                @memset(slots, .{ .block = .{} });
+                for (self.variables_to_reassign.items.items, slots) |variable, *destination| {
+                    const new_name = try self.name_dispenser.newName(variable);
+                    var declaration = try variableCopyDeclaration(
+                        self.allocator,
+                        debug_data,
+                        new_name,
+                        variable,
+                    );
+                    errdefer declaration.deinit(self.allocator);
+                    try assigned_variables.append(self.scratch_allocator, variable);
+                    destination.* = declaration;
+                }
+                // Skip generated declarations and reacquire the original node
+                // after growth. Recursive visits retain their original order.
+                index += count;
             }
             self.variables_to_reassign.clearRetainingCapacity();
 
@@ -321,12 +316,6 @@ const IntroduceControlFlowSSA = struct {
                 else => try self.visitStatement(&block.statements.items[index]),
             }
 
-            if (to_prepend.items.len != 0) {
-                const count = to_prepend.items.len;
-                try block.statements.insertSlice(self.allocator, index, to_prepend.items);
-                to_prepend.clearRetainingCapacity();
-                index += count;
-            }
             index += 1;
         }
 
@@ -486,9 +475,12 @@ fn variableCopyDeclaration(
     declared_name: YulName,
     value_name: YulName,
 ) !AST.Statement {
-    var declaration: AST.VariableDeclaration = .{ .debug_data = debug_data };
+    var declaration: AST.VariableDeclaration = .{
+        .debug_data = debug_data,
+        .variables = try .initCapacity(allocator, 1),
+    };
     errdefer declaration.deinit(allocator);
-    try declaration.variables.append(allocator, .{ .debug_data = debug_data, .name = declared_name });
+    declaration.variables.appendAssumeCapacity(.{ .debug_data = debug_data, .name = declared_name });
     declaration.value = try AST.createExpression(allocator, .{ .identifier = .{
         .debug_data = debug_data,
         .name = value_name,
@@ -502,9 +494,12 @@ fn variableCopyAssignment(
     assigned_name: YulName,
     value_name: YulName,
 ) !AST.Statement {
-    var assignment: AST.Assignment = .{ .debug_data = debug_data };
+    var assignment: AST.Assignment = .{
+        .debug_data = debug_data,
+        .variable_names = try .initCapacity(allocator, 1),
+    };
     errdefer assignment.deinit(allocator);
-    try assignment.variable_names.append(allocator, .{
+    assignment.variable_names.appendAssumeCapacity(.{
         .debug_data = debug_data,
         .name = assigned_name,
     });
@@ -517,11 +512,6 @@ fn variableCopyAssignment(
 
 fn debugDataOfStatement(statement: *const AST.Statement) ?DebugData {
     return if (statement.debugData()) |debug_data| debug_data.* else null;
-}
-
-fn deinitStatements(allocator: std.mem.Allocator, statements: *std.ArrayList(AST.Statement)) void {
-    for (statements.items) |*statement| statement.deinit(allocator);
-    statements.deinit(allocator);
 }
 
 test "SSA transform introduces and propagates assignment values" {
@@ -555,4 +545,344 @@ test "SSA transform introduces and propagates assignment values" {
     try std.testing.expect(std.mem.find(u8, rendered, "let x_1 := 1") != null);
     try std.testing.expect(std.mem.find(u8, rendered, "pop(x_1)") != null);
     try std.testing.expect(std.mem.find(u8, rendered, "pop(x_2)") != null);
+}
+
+test "SSA transform reuses declaration storage and expression owners" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const allocator = std.testing.allocator;
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(allocator, "{ let x, y := pair() pop(y) x := 1 pop(x) function pair() -> a, b { a := 2 b := 3 } }", "ssa-move.yul", &reporter, .{}, .{})).?;
+    defer ast.deinit();
+    const original = ast.root().statements.items;
+    const names = original[0].variable_declaration.variables.items.ptr;
+    const declaration_value = original[0].variable_declaration.value.?;
+    const assignment_value = original[2].assignment.value.?;
+    var reserved: NameCollector.NameSet = .{};
+    defer reserved.deinit(allocator);
+    var dispenser = try NameDispenser.initFromAst(allocator, .{}, ast.root(), &reserved);
+    defer dispenser.deinit();
+    var context: OptimiserStepContext = .{ .dialect = .{}, .dispenser = &dispenser, .reserved_identifiers = &reserved };
+    try SSATransform.run(&context, &ast.root_block);
+    const after = ast.root().statements.items;
+    try std.testing.expect(names == after[0].variable_declaration.variables.items.ptr);
+    try std.testing.expect(declaration_value == after[0].variable_declaration.value.?);
+    try std.testing.expect(assignment_value == after[4].variable_declaration.value.?);
+    try std.testing.expectEqualStrings("x_1", try after[0].variable_declaration.variables.items[0].name.str());
+    try std.testing.expectEqualStrings("y_2", try after[0].variable_declaration.variables.items[1].name.str());
+    try std.testing.expectEqualStrings("x", try after[1].variable_declaration.variables.items[0].name.str());
+    try std.testing.expectEqualStrings("y", try after[2].variable_declaration.variables.items[0].name.str());
+}
+
+test "SSA transform preserves first-phase tuple order and all annotations" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Converter = @import("../asm_json_converter.zig").AsmJsonConverter;
+    const JSON = @import("../../libsolutil/json.zig");
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ "wide", "{ let x, y := pair() " ++ "x, y := pair() " ** 32 ++ "pop(x) pop(y) function pair() -> a, b { a := 1 b := 2 } }", "85a90ee29f0f905de511c249775c28c3cb4155c230dcf59fb25337bfbaf012e7" },
+        .{ "nested", "{ let x, y := pair() let z let stable := 0 x, y := pair() if x { z := 1 x := 2 } switch y case 0 { y := 3 } default { x := 4 } for { let i := 0 } lt(i, 3) { i := add(i, 1) x := add(x, 1) } { y := add(y, 1) } { let nested := 0 nested := 1 } function pair() -> a, b { a := 1 b := 2 } }", "f08b6f8aa6a72f1f358494c2434523ce3631baaaecc6992783e0fd163efb28fa" },
+    };
+    inline for (cases) |case| {
+        var reporter = Diagnostics.ErrorReporter.init(allocator);
+        defer reporter.deinit();
+        var ast = (try Parser.parseSource(allocator, case[1], "ssa-storage.yul", &reporter, .{}, .{})).?;
+        defer ast.deinit();
+        const original_declaration = &ast.root_block.statements.items[0].variable_declaration;
+        original_declaration.debug_data.?.ast_id = 42;
+        original_declaration.variables.items[0].debug_data = null;
+        const declaration_debug = original_declaration.debug_data;
+        const original_expression = original_declaration.value.?;
+        original_expression.function_call.debug_data.?.ast_id = 73;
+        const expression_debug = original_expression.debugData().?.*;
+        const original_assignment = for (ast.root().statements.items) |*statement| {
+            if (statement.* == .assignment) break &statement.assignment;
+        } else unreachable;
+        original_assignment.debug_data.?.ast_id = 54;
+        const assignment_debug = original_assignment.debug_data;
+        const assignment_expression = original_assignment.value.?;
+        assignment_expression.function_call.debug_data.?.ast_id = 91;
+        const assignment_expression_debug = assignment_expression.debugData().?.*;
+        var reserved: NameCollector.NameSet = .{};
+        defer reserved.deinit(allocator);
+        var dispenser = try NameDispenser.initFromAst(allocator, .{}, ast.root(), &reserved);
+        defer dispenser.deinit();
+        var assigned = try NameCollector.assignedVariableNames(allocator, ast.root());
+        defer assigned.deinit(allocator);
+        var pass: IntroduceSSA = .{ .allocator = allocator, .name_dispenser = &dispenser, .variables_to_replace = &assigned };
+        try pass.visitBlock(&ast.root_block);
+        const retained = &ast.root().statements.items[0].variable_declaration;
+        try std.testing.expect(retained.value.? == original_expression);
+        try std.testing.expectEqualDeep(expression_debug, retained.value.?.debugData().?.*);
+        // Exported AST JSON omits AST IDs. Check the full annotation on the
+        // retained declaration, renamed variables and both generated copies.
+        for (ast.root().statements.items[0..3], 0..) |*statement, index| {
+            const declaration = &statement.variable_declaration;
+            try std.testing.expectEqualDeep(declaration_debug, declaration.debug_data);
+            for (declaration.variables.items) |variable|
+                try std.testing.expectEqualDeep(declaration_debug, variable.debug_data);
+            if (index != 0)
+                try std.testing.expectEqualDeep(declaration_debug, declaration.value.?.identifier.debug_data);
+        }
+        const assignment_index = for (ast.root().statements.items, 0..) |*statement, index| {
+            if (statement.* == .variable_declaration and statement.variable_declaration.value == assignment_expression) break index;
+        } else return error.MissingAssignmentExpressionOwner;
+        const replacement = &ast.root().statements.items[assignment_index].variable_declaration;
+        try std.testing.expectEqualDeep(assignment_debug, replacement.debug_data);
+        try std.testing.expectEqualDeep(assignment_expression_debug, replacement.value.?.debugData().?.*);
+        for (replacement.variables.items) |variable|
+            try std.testing.expectEqualDeep(assignment_debug, variable.debug_data);
+        for (ast.root().statements.items[assignment_index + 1 ..][0..2]) |*statement| {
+            const assignment = &statement.assignment;
+            try std.testing.expectEqualDeep(assignment_debug, assignment.debug_data);
+            for (assignment.variable_names.items) |variable|
+                try std.testing.expectEqualDeep(assignment_debug, variable.debug_data);
+            try std.testing.expectEqualDeep(assignment_debug, assignment.value.?.identifier.debug_data);
+        }
+        var json = try Converter.convertAlloc(allocator, &ast, 7);
+        defer json.deinit();
+        const bytes = try JSON.jsonCompactPrintAlloc(allocator, &json.value);
+        defer allocator.free(bytes);
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+        const encoded = std.fmt.bytesToHex(hash, .lower);
+        try std.testing.expectEqualStrings(case[2], &encoded);
+    }
+}
+
+test "SSA transform preserves unchanged blocks and leaves reserve failure untouched" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Encoding = @import("../ast_encoding.zig");
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ "{ let stable := 1 pop(stable) { let inner := 2 pop(inner) } }", false },
+        .{ "{ let x := 1 x := 2 }", true },
+    };
+    inline for (cases) |case| {
+        var reporter = Diagnostics.ErrorReporter.init(allocator);
+        defer reporter.deinit();
+        var ast = (try Parser.parseSource(allocator, case[0], "ssa-reserve.yul", &reporter, .{}, .{})).?;
+        defer ast.deinit();
+        // Remove parser spare capacity before testing the first reserve failure.
+        const items = try ast.root_block.statements.toOwnedSlice(allocator);
+        ast.root_block.statements = .{ .items = items, .capacity = items.len };
+        const hash = try Encoding.hashBlock(ast.root());
+        var reserved: NameCollector.NameSet = .{};
+        defer reserved.deinit(allocator);
+        var dispenser = try NameDispenser.initFromAst(allocator, .{}, ast.root(), &reserved);
+        defer dispenser.deinit();
+        var assigned = try NameCollector.assignedVariableNames(allocator, ast.root());
+        defer assigned.deinit(allocator);
+        var rejecting = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        var pass: IntroduceSSA = .{ .allocator = rejecting.allocator(), .name_dispenser = &dispenser, .variables_to_replace = &assigned };
+        if (case[1]) {
+            try std.testing.expectError(error.OutOfMemory, pass.visitBlock(&ast.root_block));
+            try std.testing.expect(rejecting.has_induced_failure);
+        } else {
+            try pass.visitBlock(&ast.root_block);
+            try std.testing.expect(!rejecting.has_induced_failure);
+        }
+        try std.testing.expect(items.ptr == ast.root().statements.items.ptr);
+        try std.testing.expectEqual(items.len, ast.root().statements.items.len);
+        try std.testing.expectEqualDeep(hash, try Encoding.hashBlock(ast.root()));
+    }
+}
+
+test "SSA transform first phase retains zero-arity assignment values" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const allocator = std.testing.allocator;
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(allocator, "{ x := 1 }", "ssa-empty.yul", &reporter, .{}, .{})).?;
+    defer ast.deinit();
+    const assignment = &ast.root_block.statements.items[0].assignment;
+    const value = assignment.value.?;
+    const debug = assignment.debug_data;
+    // A synthetic private-phase boundary: zero extra slots still replaces the
+    // assignment with a declaration and transfers its original expression.
+    assignment.variable_names.clearRetainingCapacity();
+    var reserved: NameCollector.NameSet = .{};
+    defer reserved.deinit(allocator);
+    var dispenser = try NameDispenser.initFromAst(allocator, .{}, ast.root(), &reserved);
+    defer dispenser.deinit();
+    const assigned: NameCollector.NameSet = .{};
+    var rejecting = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var pass: IntroduceSSA = .{ .allocator = rejecting.allocator(), .name_dispenser = &dispenser, .variables_to_replace = &assigned };
+    try pass.visitBlock(&ast.root_block);
+    try std.testing.expect(!rejecting.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), ast.root().statements.items.len);
+    const declaration = &ast.root().statements.items[0].variable_declaration;
+    try std.testing.expect(declaration.value.? == value);
+    try std.testing.expectEqual(@as(usize, 0), declaration.variables.items.len);
+    try std.testing.expectEqualDeep(debug, declaration.debug_data);
+}
+
+test "SSA transform preserves original statement decisions across cache boundaries" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Converter = @import("../asm_json_converter.zig").AsmJsonConverter;
+    const JSON = @import("../../libsolutil/json.zig");
+    const Encoding = @import("../ast_encoding.zig");
+    const cases = .{
+        .{ 63, "4cce5ff729f4d0e2d0efefaa2b701aca9be18c99531ba3fd3aed68dd61eefdf5", "7e68529b470c6ffb27030d0f942464185199af3ce9d3388f3ae568e57c9605f0" },
+        .{ 64, "7697affeecb3c8f9bc0f82df9ad3e7866aacc3b501e2470a799db2705309d0a7", "036149a21f22d8d946d5f717747c2b15bc025521fc684be0097145ea2f8aba4d" },
+        .{ 65, "db4ac6008821d2a916c349d173cf4544c51ed54da991b1c1d2116352c4202faf", "ef19dee1eaadd5f829e94d9087a520c4938b7a94ddba3fabdb951995a872d396" },
+        .{ 66, "77bc1ea40c15791862647bf42d84a42907deb6cd3588f2e13f1a2e86aa3a0bb6", "287f2fa7b61749eface141491c0fdfa3f1f3cfe59b3c449596d2b2fe41563229" },
+        .{ 130, "0ba03a69727803206aab7d1dbfefe0443a58072157ae990325315b7dd1cb170d", "39c11e8505f899c1e598008735734aaefe0656195ab587840ca171f67b40d2d5" },
+    };
+    inline for (cases) |case| {
+        var source = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer source.deinit();
+        try source.writer.writeAll("{ ");
+        for (0..case[0]) |index| {
+            if (index == 63) {
+                try source.writer.writeAll("let v_63, stable_63 := pair() ");
+            } else {
+                try source.writer.print("let v_{d} := {d} ", .{ index, index });
+            }
+        }
+        for (0..case[0]) |index| {
+            if (index % 3 != 1) try source.writer.print("v_{d} := {d} ", .{ index, index + 1000 });
+        }
+        try source.writer.writeAll("{ let nested := 0 nested := 1 } function pair() -> first, second { first := 1 second := 2 } }");
+        const allocator = std.testing.allocator;
+        var reporter = Diagnostics.ErrorReporter.init(allocator);
+        defer reporter.deinit();
+        var ast = (try Parser.parseSource(allocator, source.writer.buffered(), "ssa-width.yul", &reporter, .{}, .{})).?;
+        defer ast.deinit();
+        // Canonical encoding covers AST IDs; exported JSON separately covers
+        // native positions. Include distinct IDs around the cached boundary.
+        for (ast.root_block.statements.items[0..case[0]], 0..) |*statement, index| {
+            statement.variable_declaration.debug_data.?.ast_id = @intCast(index + 50);
+            if (index % 2 == 0) statement.variable_declaration.variables.items[0].debug_data = null;
+        }
+        var reserved: NameCollector.NameSet = .{};
+        defer reserved.deinit(allocator);
+        var dispenser = try NameDispenser.initFromAst(allocator, .{}, ast.root(), &reserved);
+        defer dispenser.deinit();
+        var assigned = try NameCollector.assignedVariableNames(allocator, ast.root());
+        defer assigned.deinit(allocator);
+        var pass: IntroduceSSA = .{ .allocator = allocator, .name_dispenser = &dispenser, .variables_to_replace = &assigned };
+        try pass.visitBlock(&ast.root_block);
+        var json = try Converter.convertAlloc(allocator, &ast, 7);
+        defer json.deinit();
+        const bytes = try JSON.jsonCompactPrintAlloc(allocator, &json.value);
+        defer allocator.free(bytes);
+        var json_hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &json_hash, .{});
+        const encoded = std.fmt.bytesToHex(json_hash, .lower);
+        const canonical = (try Encoding.hashBlock(ast.root())).hex();
+        try std.testing.expectEqualStrings(case[1], &encoded);
+        try std.testing.expectEqualStrings(case[2], &canonical);
+    }
+}
+
+test "SSA transform preserves control-flow order and complete annotations" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Converter = @import("../asm_json_converter.zig").AsmJsonConverter;
+    const Encoding = @import("../ast_encoding.zig");
+    const JSON = @import("../../libsolutil/json.zig");
+    const allocator = std.testing.allocator;
+    const source =
+        \\{ let x := 1 let y := 2
+        \\  if x { y := 3 { x := 4 } }
+        \\  switch y case 0 { x := 5 } default { y := 6 }
+        \\  for {} lt(x, 10) { x := add(x, 1) } {
+        \\    if y { y := add(y, 1) continue } break
+        \\  }
+        \\  pop(f(x, y))
+        \\  function f(a, b) -> r {
+        \\    a := add(a, b)
+        \\    switch b case 0 { b := a } default { a := b }
+        \\    { if a { b := 2 } a := add(a, b) }
+        \\    r := a
+        \\  }
+        \\}
+    ;
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(allocator, source, "control-ssa.yul", &reporter, .{}, .{})).?;
+    defer ast.deinit();
+    const original_expression = ast.root().statements.items[0].variable_declaration.value.?;
+    const statements = ast.root_block.statements.items;
+    statements[2].if_statement.debug_data.?.ast_id = 113;
+    statements[2].if_statement.body.statements.items[0].assignment.debug_data.?.ast_id = 199;
+    statements[3].switch_statement.debug_data = null;
+    statements[4].for_loop.debug_data.?.ast_id = 217;
+    statements[4].for_loop.post.statements.items[0].assignment.debug_data.?.ast_id = 233;
+    statements[6].function_definition.debug_data.?.ast_id = 313;
+    statements[6].function_definition.parameters.items[0].debug_data = null;
+    statements[6].function_definition.body.statements.items[0].assignment.debug_data.?.ast_id = 337;
+    var reserved: NameCollector.NameSet = .{};
+    defer reserved.deinit(allocator);
+    var dispenser = try NameDispenser.initFromAst(allocator, .{}, ast.root(), &reserved);
+    defer dispenser.deinit();
+    var assigned = try NameCollector.assignedVariableNames(allocator, ast.root());
+    defer assigned.deinit(allocator);
+    var first: IntroduceSSA = .{ .allocator = allocator, .name_dispenser = &dispenser, .variables_to_replace = &assigned };
+    try first.visitBlock(&ast.root_block);
+    var control: IntroduceControlFlowSSA = .{ .allocator = allocator, .scratch_allocator = allocator, .name_dispenser = &dispenser, .variables_to_replace = &assigned };
+    defer control.deinit();
+    try control.visitBlock(&ast.root_block);
+    try std.testing.expect(original_expression == ast.root().statements.items[0].variable_declaration.value.?);
+    var json = try Converter.convertAlloc(allocator, &ast, 7);
+    defer json.deinit();
+    const bytes = try JSON.jsonCompactPrintAlloc(allocator, &json.value);
+    defer allocator.free(bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const encoded = std.fmt.bytesToHex(digest, .lower);
+    const canonical = (try Encoding.hashBlock(ast.root())).hex();
+    try std.testing.expectEqualStrings("34bce9bdaf02bfd87e614a23467c8fbc3db93c4a8917d63a67a239df21a7fe92", &encoded);
+    try std.testing.expectEqualStrings("ddd350892ff8981b7cc2bb2aa18e80e55378a97afa060edc0eec394be8a1b16f", &canonical);
+}
+
+test "SSA transform control-flow insertion skips empty work and preserves reserve failures" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Encoding = @import("../ast_encoding.zig");
+    const allocator = std.testing.allocator;
+    const cases = .{ .{ "{ pop(0) { pop(1) } }", false }, .{ "{ pop(x) }", true } };
+    inline for (cases) |case| {
+        var reporter = Diagnostics.ErrorReporter.init(allocator);
+        defer reporter.deinit();
+        var ast = (try Parser.parseSource(allocator, case[0], "control-reserve.yul", &reporter, .{}, .{})).?;
+        defer ast.deinit();
+        const items = try ast.root_block.statements.toOwnedSlice(allocator);
+        ast.root_block.statements = .{ .items = items, .capacity = items.len };
+        const hash = try Encoding.hashBlock(ast.root());
+        var reserved: NameCollector.NameSet = .{};
+        defer reserved.deinit(allocator);
+        var dispenser = try NameDispenser.initFromAst(allocator, .{}, ast.root(), &reserved);
+        defer dispenser.deinit();
+        var assigned: NameCollector.NameSet = .{};
+        defer assigned.deinit(allocator);
+        var rejecting = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+        var pass: IntroduceControlFlowSSA = .{
+            .allocator = rejecting.allocator(),
+            .scratch_allocator = if (case[1]) allocator else rejecting.allocator(),
+            .name_dispenser = &dispenser,
+            .variables_to_replace = &assigned,
+        };
+        defer pass.deinit();
+        if (case[1]) {
+            // A pending function parameter exists in the surrounding scope.
+            const name = try YulName.init("x");
+            _ = try assigned.insert(allocator, name);
+            _ = try pass.variables_in_scope.insert(allocator, name);
+            try pass.variables_to_reassign.append(allocator, name);
+            try std.testing.expectError(error.OutOfMemory, pass.visitBlock(&ast.root_block));
+        } else {
+            try pass.visitBlock(&ast.root_block);
+            try std.testing.expect(!rejecting.has_induced_failure);
+        }
+        try std.testing.expect(items.ptr == ast.root().statements.items.ptr);
+        try std.testing.expectEqual(items.len, ast.root().statements.items.len);
+        try std.testing.expectEqualDeep(hash, try Encoding.hashBlock(ast.root()));
+    }
 }
