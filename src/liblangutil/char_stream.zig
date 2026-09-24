@@ -220,6 +220,12 @@ pub const CharStream = struct {
     ) std.mem.Allocator.Error![]u8 {
         return singleLineSnippetFromTextAlloc(allocator, self.source_bytes, location);
     }
+
+    /// Borrows source bytes until this stream is deinitialized or its source is
+    /// replaced. Snippet bounds deliberately remain more permissive than text().
+    pub fn singleLineSnippet(self: *const CharStream, location: SourceLocation) SingleLineSnippet {
+        return singleLineSnippetFromText(self.source_bytes, location);
+    }
 };
 
 pub fn translateLineColumnToPositionInText(
@@ -253,8 +259,27 @@ pub fn singleLineSnippetFromTextAlloc(
     source_code: []const u8,
     location: SourceLocation,
 ) std.mem.Allocator.Error![]u8 {
+    const snippet = singleLineSnippetFromText(source_code, location);
+    if (!snippet.truncated) return allocator.dupe(u8, snippet.prefix);
+    return std.fmt.allocPrint(allocator, "{s}...", .{snippet.prefix});
+}
+
+/// A borrowed source prefix and its presentation-only truncation marker.
+pub const SingleLineSnippet = struct {
+    prefix: []const u8 = "",
+    truncated: bool = false,
+
+    pub fn writeTo(self: SingleLineSnippet, writer: anytype) !void {
+        try writer.writeAll(self.prefix);
+        if (self.truncated) try writer.writeAll("...");
+    }
+};
+
+/// The returned prefix borrows source_code. No name equality check is performed;
+/// ends are clamped and invalid/no-text ranges produce an empty snippet.
+pub fn singleLineSnippetFromText(source_code: []const u8, location: SourceLocation) SingleLineSnippet {
     if (!location.hasText() or @as(usize, @intCast(location.start)) >= source_code.len) {
-        return allocator.alloc(u8, 0);
+        return .{};
     }
     const start: usize = @intCast(location.start);
     const requested_end = @as(i64, location.end);
@@ -264,8 +289,8 @@ pub fn singleLineSnippetFromTextAlloc(
         @min(source_code.len, @as(usize, @intCast(requested_end)));
     const cut = source_code[start..end];
     const newline = std.mem.findAny(u8, cut, "\n\r") orelse
-        return allocator.dupe(u8, cut);
-    return std.fmt.allocPrint(allocator, "{s}...", .{cut[0..newline]});
+        return .{ .prefix = cut };
+    return .{ .prefix = cut[0..newline], .truncated = true };
 }
 
 test "character stream movement and position translation" {
@@ -296,4 +321,27 @@ test "owned character stream releases source and name" {
     defer stream.deinit();
     try std.testing.expectEqualStrings("contract C {}", stream.source());
     try std.testing.expectEqualStrings("C.sol", stream.name());
+}
+
+test "source snippets borrow bytes and retain permissive bounds" {
+    var source = "abCDE\r\nrest".*;
+    const stream = CharStream.initBorrowed(&source, "source.sol");
+    const location: SourceLocation = .{ .start = 2, .end = 100, .source_name = "different.sol" };
+    const view = stream.singleLineSnippet(location);
+    try std.testing.expectEqual(source[2..].ptr, view.prefix.ptr);
+    try std.testing.expectEqualStrings("CDE", view.prefix);
+    try std.testing.expect(view.truncated);
+    source[2] = 'X';
+    var buffer: [16]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try view.writeTo(&writer);
+    try std.testing.expectEqualStrings("XDE...", writer.buffered());
+    const owned = try singleLineSnippetFromTextAlloc(std.testing.allocator, &source, location);
+    defer std.testing.allocator.free(owned);
+    try std.testing.expectEqualStrings(writer.buffered(), owned);
+    const no_text = stream.singleLineSnippet(.{ .start = 0, .end = 2 });
+    try std.testing.expectEqualStrings("", no_text.prefix);
+    try std.testing.expect(!no_text.truncated);
+    var short = std.Io.Writer.fixed(buffer[0..4]);
+    try std.testing.expectError(error.WriteFailed, view.writeTo(&short));
 }
