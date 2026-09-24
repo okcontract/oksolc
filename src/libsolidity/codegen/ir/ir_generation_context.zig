@@ -89,7 +89,8 @@ pub const IRGenerationContext = struct {
     evm_version: EVMVersion,
     execution_context: ExecutionContext,
     revert_strings: DebugSettings.RevertStrings,
-    source_index_to_name: []AsmPrinter.SourceIndexName,
+    // Owned immutable inventory; used_source_names borrows its name buffers.
+    source_index_to_name: []const AsmPrinter.SourceIndexName,
     debug_info_selection: DebugInfoSelection,
     solidity_source_provider: ?CharStreamProvider,
     used_source_names: std.StringHashMapUnmanaged(void) = .empty,
@@ -149,11 +150,9 @@ pub const IRGenerationContext = struct {
     }
 
     pub fn deinit(self: *IRGenerationContext) void {
+        self.used_source_names.deinit(self.allocator);
         for (self.source_index_to_name) |entry| self.allocator.free(entry.name);
         self.allocator.free(self.source_index_to_name);
-        var used_iterator = self.used_source_names.keyIterator();
-        while (used_iterator.next()) |name| self.allocator.free(name.*);
-        self.used_source_names.deinit(self.allocator);
         self.resetLocalVariables();
         self.local_variables.deinit(self.allocator);
         self.immutable_variables.deinit(self.allocator);
@@ -455,17 +454,12 @@ pub const IRGenerationContext = struct {
         name: []const u8,
     ) (std.mem.Allocator.Error || error{InvalidAst})!void {
         if (self.used_source_names.contains(name)) return;
-        var known = false;
         for (self.source_index_to_name) |entry| {
-            if (std.mem.eql(u8, name, entry.name)) {
-                known = true;
-                break;
-            }
+            // Borrow the context's stable owner, never the caller's buffer.
+            if (std.mem.eql(u8, name, entry.name))
+                return self.used_source_names.put(self.allocator, entry.name, {});
         }
-        if (!known) return error.InvalidAst;
-        const owned = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(owned);
-        try self.used_source_names.put(self.allocator, owned, {});
+        return error.InvalidAst;
     }
 
     pub fn sourceUsed(self: *const IRGenerationContext, name: []const u8) bool {
@@ -650,4 +644,97 @@ test "creation context reserves immutable memory once" {
     try std.testing.expectEqual(@as(usize, 32), try context.reservedMemorySize());
     try std.testing.expectEqual(@as(usize, 32), try context.reservedMemory());
     try std.testing.expectError(error.ReservedMemoryConsumed, context.reservedMemory());
+}
+
+test "IR source inventory survives caller buffers and rejects unknown names" {
+    const allocator = std.testing.allocator;
+    var type_provider = try TypeProviderModule.TypeProvider.init(allocator);
+    defer type_provider.deinit();
+    var source_name = "C.sol".*;
+    var context = try IRGenerationContext.init(
+        allocator,
+        &type_provider,
+        CompatibilityIdResolver.legacyNodeIds(),
+        .current(),
+        .Creation,
+        .Default,
+        &.{ .{ .index = 19, .name = &source_name }, .{ .index = 1000, .name = "D.sol" }, .{ .index = 0, .name = "" } },
+        .{},
+        null,
+    );
+    defer context.deinit();
+    @memset(&source_name, '?');
+    {
+        const incoming = try allocator.dupe(u8, "C.sol");
+        defer allocator.free(incoming);
+        try context.markSourceUsed(incoming);
+        @memset(incoming, '!');
+    }
+    try std.testing.expect(context.sourceUsed("C.sol"));
+    try std.testing.expect(!context.sourceUsed("D.sol"));
+    try std.testing.expectError(error.InvalidAst, context.markSourceUsed("unknown.sol"));
+    try context.markSourceUsed("");
+    try context.markSourceUsed("C.sol");
+    try std.testing.expectEqual(@as(u32, 2), context.used_source_names.count());
+    try std.testing.expectEqual(@as(usize, 19), context.source_index_to_name[0].index);
+}
+
+test "IR source inventory and map growth clean up every allocation failure" {
+    var type_provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
+    defer type_provider.deinit();
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, provider: *TypeProviderModule.TypeProvider) !void {
+            var context = try IRGenerationContext.init(
+                allocator,
+                provider,
+                CompatibilityIdResolver.legacyNodeIds(),
+                .current(),
+                .Deployed,
+                .Default,
+                &.{ .{ .index = 0, .name = "a" }, .{ .index = 7, .name = "b" }, .{ .index = 12, .name = "c" }, .{ .index = 15, .name = "d" }, .{ .index = 100, .name = "e" }, .{ .index = 101, .name = "f" }, .{ .index = 300, .name = "g" }, .{ .index = 500, .name = "h" }, .{ .index = 900, .name = "i" } },
+                .{},
+                null,
+            );
+            defer context.deinit();
+            for (context.source_index_to_name, 0..) |entry, index| {
+                context.markSourceUsed(entry.name) catch |err| {
+                    try std.testing.expectEqual(index, context.used_source_names.count());
+                    for (context.source_index_to_name[0..index]) |previous|
+                        try std.testing.expect(context.sourceUsed(previous.name));
+                    return err;
+                };
+                try std.testing.expect(context.sourceUsed(entry.name));
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{&type_provider});
+}
+
+test "IR source use borrows inventory keys without per-name allocation" {
+    var provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
+    defer provider.deinit();
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = counting.allocator();
+    var context = try IRGenerationContext.init(
+        allocator,
+        &provider,
+        CompatibilityIdResolver.legacyNodeIds(),
+        .current(),
+        .Creation,
+        .Default,
+        &.{ .{ .index = 0, .name = "contracts/A.sol" }, .{ .index = 9, .name = "contracts/B.sol" }, .{ .index = 31, .name = "lib/C.sol" } },
+        .{},
+        null,
+    );
+    defer context.deinit();
+    try context.used_source_names.ensureTotalCapacity(allocator, 3);
+    counting.fail_index = counting.alloc_index;
+    counting.resize_fail_index = counting.resize_index;
+    for (context.source_index_to_name) |source| {
+        try context.markSourceUsed(source.name);
+        try context.markSourceUsed(source.name);
+        try std.testing.expect(context.used_source_names.getKey(source.name).?.ptr == source.name.ptr);
+    }
+    try std.testing.expectError(error.InvalidAst, context.markSourceUsed("missing.sol"));
+    try std.testing.expect(!counting.has_induced_failure);
 }

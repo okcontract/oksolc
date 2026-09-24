@@ -22,8 +22,6 @@ const EVMVersion = @import("../../../liblangutil/evm_version.zig").EVMVersion;
 const CharStreamProvider = @import("../../../liblangutil/char_stream_provider.zig").CharStreamProvider;
 const DebugInfoSelection = @import("../../../liblangutil/debug_info_selection.zig").DebugInfoSelection;
 const AsmPrinter = @import("../../../libyul/asm_printer.zig");
-const YulUtilities = @import("../../../libyul/utilities.zig");
-const CommonData = @import("../../../libsolutil/common_data.zig");
 const FunctionSelector = @import("../../../libsolutil/function_selector.zig");
 const DebugSettings = @import("../../interface/debug_settings.zig");
 const OptimiserSettings = @import("../../interface/optimiser_settings.zig").OptimiserSettings;
@@ -34,7 +32,16 @@ const Common = @import("common.zig");
 const IRVariableModule = @import("ir_variable.zig");
 const StatementGeneratorModule = @import("ir_generator_for_statements.zig");
 
-pub const OtherYulSources = std.AutoHashMapUnmanaged(*const AST.Node, []u8);
+const Yul = @import("../../../libyul/ast.zig");
+const Builder = @import("../../../libyul/ast_builder.zig").Builder;
+const Generated = @import("../../../libyul/generated_code.zig");
+const SourceLocation = @import("../../../liblangutil/source_location.zig").SourceLocation;
+
+const Objects = @import("../../../libyul/object.zig");
+const EVMDialect = @import("../../../libyul/backends/evm/evm_dialect.zig");
+const DebugNormalizer = @import("../../../libyul/solidity_debug_normalizer.zig");
+pub const GeneratedObject = @import("../../../libyul/generated_object.zig").GeneratedObject;
+pub const OtherYulObjects = std.AutoHashMapUnmanaged(*const AST.Node, *GeneratedObject);
 
 pub const GeneratorError = ContractLevelChecker.CheckError ||
     ContextModule.ContextError ||
@@ -55,7 +62,7 @@ pub const GeneratorError = ContractLevelChecker.CheckError ||
         MissingFunctionBody,
         FunctionQueueNotEmpty,
         FunctionCollectorNotEmpty,
-        MissingSubObjectSource,
+        MissingSubObject,
     };
 
 const InterfaceFunction = struct {
@@ -76,24 +83,15 @@ const ConstructorParameterMap = std.AutoHashMapUnmanaged(
 
 const ModifierPlaceholderContext = struct {
     next_function: []const u8,
-    return_values: []const u8,
-    arguments: []const u8,
+    return_values: []const []const u8,
+    arguments: []const []const u8,
 
-    fn generate(
-        raw: *anyopaque,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
+    fn generate(raw: *anyopaque, builder: @import("../../../libyul/ast_builder.zig").Builder) StatementGeneratorModule.GeneratorError!@import("../../../libyul/ast.zig").Block {
         const self: *ModifierPlaceholderContext = @ptrCast(@alignCast(raw));
-        return std.fmt.allocPrint(
-            allocator,
-            "{s}{s}{s}({s})\n",
-            .{
-                self.return_values,
-                if (self.return_values.len == 0) "" else " := ",
-                self.next_function,
-                self.arguments,
-            },
-        );
+        return if (self.return_values.len == 0)
+            builder.statements("@0(@1)", .{ self.next_function, self.arguments })
+        else
+            builder.statements("@0 := @1(@2)", .{ self.return_values, self.next_function, self.arguments });
     }
 };
 
@@ -108,6 +106,7 @@ pub const IRGenerator = struct {
     solidity_source_provider: ?CharStreamProvider,
     optimiser_settings: OptimiserSettings,
     context: ContextModule.IRGenerationContext,
+    output_arena: ?*std.heap.ArenaAllocator = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -149,26 +148,61 @@ pub const IRGenerator = struct {
         self.* = undefined;
     }
 
+    fn builder(self: *IRGenerator) GeneratorError!Builder {
+        return self.context.functionCollector().generator(self.evm_version);
+    }
+
+    fn sourceOrigin(self: *IRGenerator, node: *const AST.Node) GeneratorError!SourceLocation {
+        if (!node.location.isValid()) return .{};
+        try self.context.locationCommentContext().markSourceUsed(node.location.source_name orelse return error.InvalidAst);
+        return if (self.debug_info_selection.none()) .{} else node.location;
+    }
+
+    fn sourceBuilder(self: *IRGenerator, node: *const AST.Node) GeneratorError!Builder {
+        const origin = try self.sourceOrigin(node);
+        return (try self.builder()).withDebug(if (origin.isValid()) .{ .origin_location = origin } else null);
+    }
+
+    fn collectFunction(self: *IRGenerator, generator: Builder, name: []const u8, parameters: anytype, returns: anytype, body: Yul.Block, ast_id: ?i64, reset_origin: bool) GeneratorError!void {
+        var definition = try generator.functionDefinition("function @0(@1) -> @2 {}", .{ name, parameters, returns });
+        definition.body = body;
+        definition.body.debug_data = generator.debug_data;
+        if (ast_id) |id| {
+            if (definition.debug_data == null) definition.debug_data = .{};
+            definition.debug_data.?.ast_id = id;
+        }
+        try self.context.functionCollector().finishGeneratedFunction(name, definition);
+        if (reset_origin) self.context.functionCollector().function_origin = try self.sourceOrigin(try self.context.mostDerivedContract());
+    }
+
+    fn astId(self: *IRGenerator, node: *const AST.Node) GeneratorError!?i64 {
+        return if (self.debug_info_selection.ast_id) try self.compatibilityId(node) else null;
+    }
+
     fn compatibilityId(self: *const IRGenerator, node: *const AST.Node) GeneratorError!i64 {
         return self.compatibility_ids.id(node) orelse error.InvalidAst;
     }
 
-    /// Returns allocator-owned, reindented, unoptimized Yul IR.
+    /// Publish one immutable object graph. Dependencies and Solidity source
+    /// names are borrowed for the request lifetime; code and object storage
+    /// belong to the stable returned owner, not either generation context.
     pub fn run(
         self: *IRGenerator,
         tree: *AST.Tree,
         contract: *AST.Node,
         cbor_metadata: []const u8,
-        other_yul_sources: *const OtherYulSources,
-    ) GeneratorError![]u8 {
-        const raw = try self.generate(
-            tree,
-            contract,
-            cbor_metadata,
-            other_yul_sources,
-        );
-        defer self.allocator.free(raw);
-        return YulUtilities.reindent(self.allocator, raw);
+        other_yul_objects: *const OtherYulObjects,
+    ) GeneratorError!*GeneratedObject {
+        const result = try GeneratedObject.create(self.allocator);
+        errdefer result.destroy(self.allocator);
+        std.debug.assert(self.output_arena == null);
+        self.output_arena = &result.arena;
+        defer {
+            self.output_arena = null;
+            self.context.functionCollector().output_arena = null;
+        }
+        result.root = try self.generate(tree, contract, cbor_metadata, other_yul_objects);
+        return result;
     }
 
     fn generate(
@@ -176,8 +210,8 @@ pub const IRGenerator = struct {
         tree: *AST.Tree,
         contract: *AST.Node,
         cbor_metadata: []const u8,
-        other_yul_sources: *const OtherYulSources,
-    ) GeneratorError![]u8 {
+        other_yul_objects: *const OtherYulObjects,
+    ) GeneratorError!*Objects.Object {
         try validateContractBoundary(contract);
         const is_library = contract.payload.contract_definition.contract_kind == .Library;
         const creation_name = try Common.creationObjectAlloc(
@@ -192,33 +226,24 @@ pub const IRGenerator = struct {
             contract,
         );
         defer self.allocator.free(deployed_name);
-        const quoted_creation = try CommonData.escapeAndQuoteStringAlloc(
-            self.allocator,
-            creation_name,
-        );
-        defer self.allocator.free(quoted_creation);
-        const quoted_deployed = try CommonData.escapeAndQuoteStringAlloc(
-            self.allocator,
-            deployed_name,
-        );
-        defer self.allocator.free(quoted_deployed);
-        const metadata_hex = try CommonData.toHexAlloc(
-            self.allocator,
-            cbor_metadata,
-            .dont_add,
-            .lower,
-        );
-        defer self.allocator.free(metadata_hex);
+        const allocator = self.output_arena.?.allocator();
+        const creation_object = try Objects.Object.create(allocator, creation_name);
+        const deployed_object = try Objects.Object.create(allocator, deployed_name);
+        try creation_object.addSubObject(.{ .object = deployed_object });
+        const dialect = (EVMDialect.strictAssemblyForEVMObjects(self.evm_version) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidDialect,
+        }).dialect();
 
         try self.resetContext(contract, .Creation);
+        const creation_builder = try self.sourceBuilder(contract);
         var creation_utils = self.context.utils();
         const allocate = try creation_utils.allocateUnboundedFunction();
         defer self.allocator.free(allocate);
         const call_value_check = if (!constructorPayable(contract))
-            try self.callValueCheckAlloc(&creation_utils)
+            try self.callValueCheck(&creation_utils)
         else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(call_value_check);
+            Yul.Block{};
         const constructor = findConstructor(contract);
         const constructor_types = if (constructor) |definition|
             try callableTypesAlloc(self.allocator, self.type_provider, definition, false)
@@ -233,14 +258,9 @@ pub const IRGenerator = struct {
             errdefer self.allocator.free(variable);
             try constructor_argument_names.append(self.allocator, variable);
         }
-        const joined_constructor_arguments = try joinAlloc(
-            self.allocator,
-            constructor_argument_names.items,
-            ", ",
-        );
-        defer self.allocator.free(joined_constructor_arguments);
+        const joined_constructor_arguments = constructor_argument_names.items;
         const constructor_argument_copy = if (constructor) |definition| blk: {
-            if (constructor_words == 0) break :blk try self.allocator.alloc(u8, 0);
+            if (constructor_words == 0) break :blk Yul.Block{};
             const copy = try self.copyConstructorArgumentsFunction(
                 contract,
                 definition,
@@ -249,13 +269,8 @@ pub const IRGenerator = struct {
                 &creation_utils,
             );
             defer self.allocator.free(copy);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "let {s} := {s}()\n",
-                .{ joined_constructor_arguments, copy },
-            );
-        } else try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(constructor_argument_copy);
+            break :blk try creation_builder.statements("let @0 := @1()", .{ joined_constructor_arguments, copy });
+        } else Yul.Block{};
         const constructor_name = try self.generateConstructors(contract, &creation_utils);
         defer self.allocator.free(constructor_name);
         try self.generateQueuedFunctions(&creation_utils);
@@ -264,154 +279,63 @@ pub const IRGenerator = struct {
             &creation_utils,
         );
         defer creation_internal_dispatch.deinit();
-        const constructor_invocation = if (is_library)
-            try self.allocator.alloc(u8, 0)
-        else
-            try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})",
-                .{ constructor_name, joined_constructor_arguments },
-            );
-        defer self.allocator.free(constructor_invocation);
+        const constructor_invocation = if (is_library) Yul.Block{} else try creation_builder.statements("@0(@1)", .{ constructor_name, joined_constructor_arguments });
         const deploy_variable = try self.context.newYulVariable();
         defer self.allocator.free(deploy_variable);
-        const immutable_patches = try self.immutablePatchesAlloc(
+        const immutable_patches = try self.immutablePatches(
             contract,
             deploy_variable,
         );
-        defer self.allocator.free(immutable_patches);
-        const creation_location = try self.locationCommentAlloc(contract);
-        defer self.allocator.free(creation_location);
-        const creation_memory = try self.memoryInitAlloc(
-            !self.context.memoryUnsafeInlineAssemblySeen(),
-        );
-        defer self.allocator.free(creation_memory);
-        const creation_functions = try self.context.functionCollector().requestedFunctionsAlloc();
-        defer self.allocator.free(creation_functions);
-        const creation_sub_objects = try self.subObjectSourcesAlloc(other_yul_sources);
-        defer self.allocator.free(creation_sub_objects);
-        const creation_use_src = try self.useSrcMapAlloc();
-        defer self.allocator.free(creation_use_src);
+        const creation_memory = try self.memoryInit(!self.context.memoryUnsafeInlineAssemblySeen());
+        var creation_body: Generated.Buffer = .{ .generator = creation_builder };
+        try creation_body.append(creation_memory);
+        try creation_body.append(call_value_check);
+        try creation_body.append(constructor_argument_copy);
+        try creation_body.append(constructor_invocation);
+        try creation_body.add("let @0 := @1() codecopy(@0, dataoffset(@2), datasize(@2))", .{ deploy_variable, allocate, deployed_name });
+        try creation_body.append(immutable_patches);
+        try creation_body.add("return(@0, datasize(@1))", .{ deploy_variable, deployed_name });
+        try creation_body.append(try self.context.functionCollector().takeGeneratedFunctions());
+        var creation_code = creation_body.take();
+        DebugNormalizer.normalizeBlock(&creation_code);
+        creation_object.setCode(Yul.AST.init(allocator, dialect, creation_code), null);
+        creation_object.debug_data = .{ .source_names = try self.sourceNames(allocator) };
+        try self.addSubObjects(creation_object, other_yul_objects);
 
         try self.resetContext(contract, .Deployed);
         try self.context.initializeInternalDispatch(&creation_internal_dispatch);
+        const deployed_builder = try self.sourceBuilder(contract);
         var deployed_utils = self.context.utils();
-        const dispatch = try self.dispatchRoutineAlloc(tree, contract, &deployed_utils);
-        defer self.allocator.free(dispatch);
+        const dispatch = try self.dispatchRoutine(tree, contract, &deployed_utils);
         try self.generateQueuedFunctions(&deployed_utils);
         var deployed_internal_dispatch = try self.generateInternalDispatchFunctions(
             contract,
             &deployed_utils,
         );
         defer deployed_internal_dispatch.deinit();
-        const deployed_functions = try self.context.functionCollector().requestedFunctionsAlloc();
-        defer self.allocator.free(deployed_functions);
-        const deployed_sub_objects = try self.subObjectSourcesAlloc(other_yul_sources);
-        defer self.allocator.free(deployed_sub_objects);
-        const deployed_location = try self.locationCommentAlloc(contract);
-        defer self.allocator.free(deployed_location);
-        const deployed_memory = try self.memoryInitAlloc(
-            !self.context.memoryUnsafeInlineAssemblySeen(),
-        );
-        defer self.allocator.free(deployed_memory);
-        const deployed_library_init = if (is_library)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "let called_via_delegatecall := iszero(eq(loadimmutable(\"{s}\"), address()))",
-                .{Common.libraryAddressImmutable()},
-            )
-        else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(deployed_library_init);
-        const deployed_use_src = try self.useSrcMapAlloc();
-        defer self.allocator.free(deployed_use_src);
-
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        if (self.debug_info_selection.ethdebug)
-            try output.appendSlice(self.allocator, "/// ethdebug: enabled\n")
-        else
-            try output.append(self.allocator, '\n');
-        try output.print(self.allocator,
-            \\/// @use-src {s}
-            \\object {s} {{
-            \\code {{
-            \\{s}
-            \\{s}
-            \\{s}
-            \\
-            \\{s}
-            \\{s}
-            \\
-            \\let {s} := {s}()
-            \\codecopy({s}, dataoffset({s}), datasize({s}))
-            \\{s}
-            \\
-            \\return({s}, datasize({s}))
-            \\
-            \\{s}
-            \\}}
-            \\/// @use-src {s}
-            \\object {s} {{
-            \\code {{
-            \\{s}
-            \\{s}
-            \\{s}
-            \\
-            \\{s}
-            \\{s}
-            \\}}
-            \\{s}
-            \\
-            \\data ".metadata" hex"{s}"
-            \\}}
-            \\{s}
-            \\
-            \\}}
-            \\
-        , .{
-            creation_use_src,
-            quoted_creation,
-            creation_location,
-            creation_memory,
-            call_value_check,
-            constructor_argument_copy,
-            constructor_invocation,
-            deploy_variable,
-            allocate,
-            deploy_variable,
-            quoted_deployed,
-            quoted_deployed,
-            immutable_patches,
-            deploy_variable,
-            quoted_deployed,
-            creation_functions,
-            deployed_use_src,
-            quoted_deployed,
-            deployed_location,
-            deployed_memory,
-            deployed_library_init,
-            dispatch,
-            deployed_functions,
-            deployed_sub_objects,
-            metadata_hex,
-            creation_sub_objects,
-        });
-        return output.toOwnedSlice(self.allocator);
+        const deployed_functions = try self.context.functionCollector().takeGeneratedFunctions();
+        const deployed_memory = try self.memoryInit(!self.context.memoryUnsafeInlineAssemblySeen());
+        var deployed_body: Generated.Buffer = .{ .generator = deployed_builder };
+        try deployed_body.append(deployed_memory);
+        if (is_library) try deployed_body.add("let called_via_delegatecall := iszero(eq(loadimmutable(@0), address()))", .{Common.libraryAddressImmutable()});
+        try deployed_body.append(dispatch);
+        try deployed_body.append(deployed_functions);
+        var deployed_code = deployed_body.take();
+        DebugNormalizer.normalizeBlock(&deployed_code);
+        deployed_object.setCode(Yul.AST.init(allocator, dialect, deployed_code), null);
+        deployed_object.debug_data = .{ .source_names = try self.sourceNames(allocator) };
+        try self.addSubObjects(deployed_object, other_yul_objects);
+        try deployed_object.addSubObject(.{ .data = try Objects.Data.init(allocator, ".metadata", cbor_metadata) });
+        return creation_object;
     }
 
-    fn subObjectSourcesAlloc(
-        self: *IRGenerator,
-        other_yul_sources: *const OtherYulSources,
-    ) GeneratorError![]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
+    fn addSubObjects(self: *IRGenerator, object: *Objects.Object, dependencies: *const OtherYulObjects) GeneratorError!void {
         for (self.context.sub_objects.items) |sub_object| {
-            const source = other_yul_sources.get(sub_object) orelse
-                return error.MissingSubObjectSource;
-            try output.appendSlice(self.allocator, source);
+            const dependency = dependencies.get(sub_object) orelse return error.MissingSubObject;
+            // Frozen dependency graph: consumers materialize their own mutable
+            // nodes, and owner destruction releases only its arena.
+            try object.addSubObject(.{ .object = @constCast(dependency.root.?) });
         }
-        return output.toOwnedSlice(self.allocator);
     }
 
     fn resetContext(
@@ -421,10 +345,9 @@ pub const IRGenerator = struct {
     ) GeneratorError!void {
         if (!self.context.functionGenerationQueueEmpty())
             return error.FunctionQueueNotEmpty;
-        if (self.context.functionCollector().code.items.len != 0)
+        if (self.context.functionCollector().generated.items.len != 0)
             return error.FunctionCollectorNotEmpty;
-        self.context.deinit();
-        self.context = try ContextModule.IRGenerationContext.init(
+        const next_context = try ContextModule.IRGenerationContext.init(
             self.allocator,
             self.type_provider,
             self.compatibility_ids,
@@ -435,7 +358,11 @@ pub const IRGenerator = struct {
             self.debug_info_selection,
             self.solidity_source_provider,
         );
+        self.context.deinit();
+        self.context = next_context;
+        self.context.functionCollector().output_arena = self.output_arena;
         try self.context.setMostDerivedContract(contract);
+        self.context.functionCollector().function_origin = try self.sourceOrigin(contract);
         try self.registerStateVariables(contract);
         if (execution_context == .Creation)
             try self.registerImmutableVariables(contract);
@@ -564,6 +491,8 @@ pub const IRGenerator = struct {
         errdefer self.context.functionCollector().abortFunction(name);
 
         const constructor = findConstructor(contract);
+        const generator = try self.sourceBuilder(constructor orelse contract);
+        const origin = if (generator.debug_data) |data| data.origin_location else SourceLocation{};
         self.context.resetLocalVariables();
         var parameter_names: std.ArrayList([]u8) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         defer deinitStrings(self.allocator, &parameter_names);
@@ -575,20 +504,15 @@ pub const IRGenerator = struct {
                 try local.appendStackSlots(self.allocator, &parameter_names);
             }
         }
-        const inherited_parameter_names = try constructorParametersTextAlloc(
+        const inherited_parameter_names = try constructorParametersNamesAlloc(
             self.allocator,
             hierarchy,
             base_parameters,
         );
         defer self.allocator.free(inherited_parameter_names);
-        const joined_parameters = try joinAlloc(
-            self.allocator,
-            parameter_names.items,
-            ", ",
-        );
-        defer self.allocator.free(joined_parameters);
+        const joined_parameters = parameter_names.items;
 
-        var argument_evaluator = StatementGeneratorModule.IRGeneratorForStatements.init(
+        var argument_evaluator = try StatementGeneratorModule.IRGeneratorForStatements.init(
             self.allocator,
             &self.context,
             utils,
@@ -596,6 +520,7 @@ pub const IRGenerator = struct {
             null,
         );
         defer argument_evaluator.deinit();
+        argument_evaluator.inheritSourceLocation(origin);
         for (bindings) |binding| {
             const target = @constCast(binding.supplied.target);
             const supplied_arguments = binding.supplied.values;
@@ -631,21 +556,16 @@ pub const IRGenerator = struct {
                 next,
             );
             defer self.allocator.free(next_name);
-            const next_arguments = try constructorParametersTextAlloc(
+            const next_arguments = try constructorParametersNamesAlloc(
                 self.allocator,
                 hierarchy,
                 base_parameters,
             );
             defer self.allocator.free(next_arguments);
-            break :next_call try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})\n",
-                .{ next_name, next_arguments },
-            );
-        } else try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(next_invocation);
+            break :next_call try generator.statements("@0(@1)", .{ next_name, next_arguments });
+        } else Yul.Block{};
 
-        var state_initializer = StatementGeneratorModule.IRGeneratorForStatements.init(
+        var state_initializer = try StatementGeneratorModule.IRGeneratorForStatements.init(
             self.allocator,
             &self.context,
             utils,
@@ -653,6 +573,7 @@ pub const IRGenerator = struct {
             null,
         );
         defer state_initializer.deinit();
+        state_initializer.inheritSourceLocation(if (next_contract != null) origin else argument_evaluator.active_location);
         for (contract.payload.contract_definition.sub_nodes) |member| {
             if (member.nodeKind() != .variable_declaration or
                 !ASTImplementation.isStateVariable(member) or
@@ -678,7 +599,7 @@ pub const IRGenerator = struct {
                     return error.InvalidAst;
             }
             if (real_modifiers.items.len == 0) {
-                var statement_generator = StatementGeneratorModule.IRGeneratorForStatements.init(
+                var statement_generator = try StatementGeneratorModule.IRGeneratorForStatements.init(
                     self.allocator,
                     &self.context,
                     utils,
@@ -686,8 +607,9 @@ pub const IRGenerator = struct {
                     null,
                 );
                 defer statement_generator.deinit();
+                statement_generator.inheritSourceLocation(state_initializer.active_location);
                 try statement_generator.generate(block);
-                break :body try statement_generator.codeAlloc(self.allocator);
+                break :body statement_generator.takeCode();
             }
 
             for (real_modifiers.items, 0..) |invocation, index| {
@@ -718,53 +640,22 @@ pub const IRGenerator = struct {
                 real_modifiers.items[0],
             );
             defer self.allocator.free(first);
-            break :body try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})\n",
-                .{ first, joined_parameters },
-            );
-        } else try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(user_body);
-
-        const location_node = constructor orelse contract;
-        const location = try self.locationCommentAlloc(location_node);
-        defer self.allocator.free(location);
-        const contract_location = try self.locationCommentAlloc(
-            try self.context.mostDerivedContract(),
-        );
-        defer self.allocator.free(contract_location);
-        const ast_id_comment = if (self.debug_info_selection.ast_id and constructor != null)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "/// @ast-id {d}\n",
-                .{try self.compatibilityId(constructor.?)},
-            )
-        else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(ast_id_comment);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n{s}{s}\nfunction {s}({s}{s}{s}) {{\n{s}\n{s}\n{s}{s}{s}\n}}\n{s}\n",
-            .{
-                ast_id_comment,
-                location,
-                name,
-                joined_parameters,
-                if (joined_parameters.len != 0 and inherited_parameter_names.len != 0)
-                    ", "
-                else
-                    "",
-                inherited_parameter_names,
-                argument_evaluator.codeBorrowed(),
-                location,
-                next_invocation,
-                state_initializer.codeBorrowed(),
-                user_body,
-                contract_location,
-            },
-        );
-        defer self.allocator.free(code);
-        try self.context.functionCollector().finishFunction(name, code);
+            break :body try generator.withDebug(if (state_initializer.active_location.isValid()) .{ .origin_location = state_initializer.active_location } else null).statements("@0(@1)", .{ first, joined_parameters });
+        } else Yul.Block{};
+        var body: Generated.Buffer = .{ .generator = generator };
+        try body.append(argument_evaluator.takeCode());
+        try body.append(next_invocation);
+        try body.append(state_initializer.takeCode());
+        try body.append(user_body);
+        var definition = try generator.functionDefinition("function @0(@1, @2) {}", .{ name, parameter_names.items, inherited_parameter_names });
+        definition.body = body.take();
+        definition.body.debug_data = generator.debug_data;
+        if (constructor) |node| if (try self.astId(node)) |id| {
+            if (definition.debug_data == null) definition.debug_data = .{};
+            definition.debug_data.?.ast_id = id;
+        };
+        try self.context.functionCollector().finishGeneratedFunction(name, definition);
+        self.context.functionCollector().function_origin = try self.sourceOrigin(try self.context.mostDerivedContract());
         return name;
     }
 
@@ -794,54 +685,38 @@ pub const IRGenerator = struct {
         if (!(try self.context.functionCollector().beginFunction(name)))
             return self.context.functionCollector().copyFunctionName(name);
         errdefer self.context.functionCollector().abortFunction(name);
+        const generator = try self.builder();
         const return_count = try stackSize(parameter_types);
-        const returns = try variableListAlloc(
-            self.allocator,
-            "ret_param_",
-            return_count,
-        );
-        defer self.allocator.free(returns);
+        const returns = try generator.indexedNames("ret_param_", return_count);
         const allocate = try utils.allocationFunction();
         defer self.allocator.free(allocate);
         var abi = self.context.abiFunctions();
         const decoder = try abi.tupleDecoder(parameter_types, true);
         defer self.allocator.free(decoder);
-        const quoted_object = try CommonData.escapeAndQuoteStringAlloc(
-            self.allocator,
-            creation_object_name,
-        );
-        defer self.allocator.free(quoted_object);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}() -> {s} {{\nlet programSize := datasize({s})\nlet argSize := sub(codesize(), programSize)\n\nlet memoryDataOffset := {s}(argSize)\ncodecopy(memoryDataOffset, programSize, argSize)\n\n{s} := {s}(memoryDataOffset, add(memoryDataOffset, argSize))\n}}\n",
-            .{ name, returns, quoted_object, allocate, returns, decoder },
-        );
-        defer self.allocator.free(code);
-        try self.context.functionCollector().finishFunction(name, code);
+        const body = try generator.statements("let programSize := datasize(@0) let argSize := sub(codesize(), programSize) let memoryDataOffset := @1(argSize) codecopy(memoryDataOffset, programSize, argSize) @2 := @3(memoryDataOffset, add(memoryDataOffset, argSize))", .{ creation_object_name, allocate, returns, decoder });
+        try self.collectFunction(generator, name, &[_][]const u8{}, returns, body, null, false);
         return self.context.functionCollector().copyFunctionName(name);
     }
 
-    fn dispatchRoutineAlloc(
+    fn dispatchRoutine(
         self: *IRGenerator,
         tree: *AST.Tree,
         contract: *AST.Node,
         utils: *YulUtilFunctionsModule.YulUtilFunctions,
-    ) GeneratorError![]u8 {
+    ) GeneratorError!Yul.Block {
+        const generator = try self.sourceBuilder(contract);
         var functions = try self.interfaceFunctionsAlloc(tree, contract);
         defer {
             for (functions.items) |function| self.allocator.free(function.signature);
             functions.deinit(self.allocator);
         }
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
+        var output: Generated.Buffer = .{ .generator = generator };
         if (functions.items.len != 0) {
             const shift = try utils.shiftRightFunction(224);
             defer self.allocator.free(shift);
-            try output.print(
-                self.allocator,
-                "if iszero(lt(calldatasize(), 4))\n{{\nlet selector := {s}(calldataload(0))\nswitch selector\n",
-                .{shift},
-            );
+            var branch = try generator.ifStatement(try generator.expression("iszero(lt(calldatasize(), 4))", .{}), try generator.statements("let selector := @0(calldataload(0))", .{shift}));
+            var dispatch = try generator.switchStatement(try generator.identifier("selector"), &.{});
+            try dispatch.switch_statement.cases.ensureTotalCapacityPrecise(generator.allocator(), functions.items.len + 1);
             for (functions.items) |function| {
                 const delegatecall_check = if (contract.payload.contract_definition.contract_kind == .Library and
                     function.declaration.nodeKind() == .function_definition and
@@ -852,39 +727,33 @@ pub const IRGenerator = struct {
                         "Non-view function of library called without DELEGATECALL",
                     );
                     defer self.allocator.free(revert);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "if iszero(called_via_delegatecall) {{ {s}() }}",
-                        .{revert},
-                    );
-                } else try self.allocator.alloc(u8, 0);
-                defer self.allocator.free(delegatecall_check);
+                    break :blk try generator.statements("if iszero(called_via_delegatecall) { @0() }", .{revert});
+                } else Yul.Block{};
                 const wrapper = try self.generateExternalFunction(
                     contract,
                     function.declaration,
                     utils,
                 );
                 defer self.allocator.free(wrapper);
-                try output.print(
-                    self.allocator,
-                    "\ncase 0x{x:0>8}\n{{\n// {s}\n{s}\n{s}()\n}}\n",
-                    .{
-                        function.selector,
-                        function.signature,
-                        delegatecall_check,
-                        wrapper,
-                    },
-                );
+                var case_body: Generated.Buffer = .{ .generator = generator };
+                try case_body.append(delegatecall_check);
+                try case_body.add("@0()", .{wrapper});
+                const label: Yul.Literal = .{ .debug_data = generator.debug_data, .kind = .Number, .value = .{
+                    .numeric_value = function.selector,
+                    .string_value = try std.fmt.allocPrint(generator.allocator(), "0x{x:0>8}", .{function.selector}),
+                } };
+                dispatch.switch_statement.cases.appendAssumeCapacity(try generator.case(label, case_body.take()));
             }
-            try output.appendSlice(self.allocator, "\ndefault {}\n}\n");
+            dispatch.switch_statement.cases.appendAssumeCapacity(try generator.case(null, .{}));
+            try branch.if_statement.body.statements.append(generator.allocator(), dispatch);
+            try output.block.statements.append(generator.allocator(), branch);
         }
         const receive_function = try resolveSpecialFunction(contract, .Receive);
         if (receive_function) |receive| {
             const receive_name = try self.context.enqueueFunctionForCodeGeneration(receive);
             defer self.allocator.free(receive_name);
-            try output.print(
-                self.allocator,
-                "\nif iszero(calldatasize()) {{ {s}() stop() }}\n",
+            try output.add(
+                "\nif iszero(calldatasize()) { @0() stop() }\n",
                 .{receive_name},
             );
         }
@@ -900,18 +769,15 @@ pub const IRGenerator = struct {
                 (parameters.len == 1 and returns.len == 1)))
                 return error.InvalidAst;
             if (definition.state_mutability != .Payable) {
-                const check = try self.callValueCheckAlloc(utils);
-                defer self.allocator.free(check);
-                try output.print(self.allocator, "\n{s}\n", .{check});
+                try output.append(try self.callValueCheck(utils));
             }
             const fallback_name = try self.context.enqueueFunctionForCodeGeneration(fallback);
             defer self.allocator.free(fallback_name);
             if (parameters.len == 0)
-                try output.print(self.allocator, "{s}()\nstop()\n", .{fallback_name})
+                try output.add("@0()\nstop()\n", .{fallback_name})
             else
-                try output.print(
-                    self.allocator,
-                    "let retval := {s}(0, calldatasize())\nreturn(add(retval, 0x20), mload(retval))\n",
+                try output.add(
+                    "let retval := @0(0, calldatasize())\nreturn(add(retval, 0x20), mload(retval))\n",
                     .{fallback_name},
                 );
         } else {
@@ -922,9 +788,9 @@ pub const IRGenerator = struct {
                     "Contract does not have fallback nor receive functions",
             );
             defer self.allocator.free(fallback_revert);
-            try output.print(self.allocator, "\n{s}()\n", .{fallback_revert});
+            try output.add("\n@0()\n", .{fallback_revert});
         }
-        return output.toOwnedSlice(self.allocator);
+        return output.take();
     }
 
     fn generateExternalFunction(
@@ -956,16 +822,11 @@ pub const IRGenerator = struct {
             true,
         );
         defer self.allocator.free(returns);
+        const generator = try self.builder();
         const parameter_words = try stackSize(parameters);
         const return_words = try stackSize(returns);
-        const parameter_names = try variableListAlloc(
-            self.allocator,
-            "param_",
-            parameter_words,
-        );
-        defer self.allocator.free(parameter_names);
-        const return_names = try variableListAlloc(self.allocator, "ret_", return_words);
-        defer self.allocator.free(return_names);
+        const parameter_names = try generator.indexedNames("param_", parameter_words);
+        const return_names = try generator.indexedNames("ret_", return_words);
 
         const allocate = try utils.allocateUnboundedFunction();
         defer self.allocator.free(allocate);
@@ -973,10 +834,9 @@ pub const IRGenerator = struct {
             declaration.payload.function_definition.state_mutability == .Payable;
         const call_value_check = if (!payable and
             contract.payload.contract_definition.contract_kind != .Library)
-            try self.callValueCheckAlloc(utils)
+            try self.callValueCheck(utils)
         else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(call_value_check);
+            Yul.Block{};
         var abi = self.context.abiFunctions();
         const decoder = try abi.tupleDecoder(parameters, false);
         defer self.allocator.free(decoder);
@@ -994,43 +854,18 @@ pub const IRGenerator = struct {
         );
         defer self.allocator.free(encoder);
 
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-        if (call_value_check.len != 0)
-            try body.print(self.allocator, "{s}\n", .{call_value_check});
+        var body: Generated.Buffer = .{ .generator = generator };
+        try body.append(call_value_check);
         if (parameter_words == 0)
-            try body.print(self.allocator, "{s}(4, calldatasize())\n", .{decoder})
+            try body.add("@0(4, calldatasize())", .{decoder})
         else
-            try body.print(
-                self.allocator,
-                "let {s} :=  {s}(4, calldatasize())\n",
-                .{ parameter_names, decoder },
-            );
+            try body.add("let @0 := @1(4, calldatasize())", .{ parameter_names, decoder });
         if (return_words == 0)
-            try body.print(self.allocator, "{s}({s})\n", .{ internal_name, parameter_names })
+            try body.add("@0(@1)", .{ internal_name, parameter_names })
         else
-            try body.print(
-                self.allocator,
-                "let {s} :=  {s}({s})\n",
-                .{ return_names, internal_name, parameter_names },
-            );
-        try body.print(self.allocator, "let memPos := {s}()\n", .{allocate});
-        try body.print(
-            self.allocator,
-            "let memEnd := {s}(memPos {s} {s})\nreturn(memPos, sub(memEnd, memPos))\n",
-            .{
-                encoder,
-                if (return_names.len == 0) "" else ",",
-                return_names,
-            },
-        );
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}() {{\n\n{s}\n}}\n",
-            .{ name, body.items },
-        );
-        defer self.allocator.free(code);
-        try self.context.functionCollector().finishFunction(name, code);
+            try body.add("let @0 := @1(@2)", .{ return_names, internal_name, parameter_names });
+        try body.add("let memPos := @0() let memEnd := @1(memPos, @2) return(memPos, sub(memEnd, memPos))", .{ allocate, encoder, return_names });
+        try self.collectFunction(generator, name, &[_][]const u8{}, &[_][]const u8{}, body.take(), null, false);
         return name;
     }
 
@@ -1055,45 +890,21 @@ pub const IRGenerator = struct {
         const type_ref = try variableType(variable);
         const getter_type = (try self.type_provider.functionFromVariable(variable))
             .asFunction() orelse return error.InvalidAst;
-        const location = try self.locationCommentAlloc(variable);
-        defer self.allocator.free(location);
-        const contract_location = try self.locationCommentAlloc(
-            try self.context.mostDerivedContract(),
-        );
-        defer self.allocator.free(contract_location);
-        const ast_id_comment = if (self.debug_info_selection.ast_id)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "/// @ast-id {d}\n",
-                .{try self.compatibilityId(variable)},
-            )
-        else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(ast_id_comment);
-
+        const generator = try self.sourceBuilder(variable);
         const variable_data = variable.payload.variable_declaration;
         if (variable_data.mutability == .Immutable) {
             if (getter_type.parameter_types.len != 0 or
                 try TypeBehavior.sizeOnStack(type_ref) != 1)
                 return error.InvalidAst;
-            const code = try std.fmt.allocPrint(
-                self.allocator,
-                "\n{s}{s}\nfunction {s}() -> rval {{\nrval := loadimmutable(\"{d}\")\n}}\n{s}\n",
-                .{
-                    ast_id_comment,
-                    location,
-                    name,
-                    try self.compatibilityId(variable),
-                    contract_location,
-                },
-            );
-            defer self.allocator.free(code);
-            try self.context.functionCollector().finishFunction(name, code);
+            const label = try std.fmt.allocPrint(generator.allocator(), "{d}", .{try self.compatibilityId(variable)});
+            defer generator.allocator().free(label);
+            const body = try generator.statements("rval := loadimmutable(@0)", .{label});
+            try self.collectFunction(generator, name, &[_][]const u8{}, &[_][]const u8{"rval"}, body, try self.astId(variable), true);
             return name;
         }
         if (variable_data.mutability == .Constant) {
             if (getter_type.parameter_types.len != 0) return error.InvalidAst;
-            var statements = StatementGeneratorModule.IRGeneratorForStatements.init(
+            var statements = try StatementGeneratorModule.IRGeneratorForStatements.init(
                 self.allocator,
                 &self.context,
                 utils,
@@ -1103,28 +914,10 @@ pub const IRGenerator = struct {
             defer statements.deinit();
             const constant = try statements.constantValueFunction(variable);
             defer self.allocator.free(constant);
-            const return_names = try variableListAlloc(
-                self.allocator,
-                "ret_",
-                try TypeBehavior.sizeOnStack(type_ref),
-            );
-            defer self.allocator.free(return_names);
+            const return_names = try generator.indexedNames("ret_", try TypeBehavior.sizeOnStack(type_ref));
             if (return_names.len == 0) return error.InvalidAst;
-            const code = try std.fmt.allocPrint(
-                self.allocator,
-                "\n{s}{s}\nfunction {s}() -> {s} {{\n{s} := {s}()\n}}\n{s}\n",
-                .{
-                    ast_id_comment,
-                    location,
-                    name,
-                    return_names,
-                    return_names,
-                    constant,
-                    contract_location,
-                },
-            );
-            defer self.allocator.free(code);
-            try self.context.functionCollector().finishFunction(name, code);
+            const body = try generator.statements("@0 := @1()", .{ return_names, constant });
+            try self.collectFunction(generator, name, &[_][]const u8{}, return_names, body, try self.astId(variable), true);
             return name;
         }
 
@@ -1133,11 +926,9 @@ pub const IRGenerator = struct {
             return error.InvalidAst;
         var parameters: std.ArrayList([]u8) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         defer deinitStrings(self.allocator, &parameters);
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-        try body.print(
-            self.allocator,
-            "\nlet slot := {d}\nlet offset := {d}\n",
+        var body: Generated.Buffer = .{ .generator = generator };
+        try body.add(
+            "\nlet slot := @0\nlet offset := @1\n",
             .{ storage.storage_offset, storage.byte_offset },
         );
 
@@ -1148,16 +939,16 @@ pub const IRGenerator = struct {
                 "key_{d}",
                 .{index},
             );
-            defer self.allocator.free(key_name);
-            var key = try IRVariableModule.IRVariable.init(
-                self.allocator,
-                key_name,
-                parameter_type,
-            );
+            var key: IRVariableModule.IRVariable = .{
+                .allocator = self.allocator,
+                .base_name = key_name,
+                .type_ref = parameter_type,
+            };
             defer key.deinit();
+            const first_slot = parameters.items.len;
             try key.appendStackSlots(self.allocator, &parameters);
-            const keys = try key.commaSeparatedListAlloc();
-            defer self.allocator.free(keys);
+            // No further parameter growth occurs while these names are borrowed.
+            const keys: []const []const u8 = parameters.items[first_slot..];
 
             switch (current_type.payload) {
                 .Mapping => |mapping| {
@@ -1181,9 +972,8 @@ pub const IRGenerator = struct {
                         packed_encoder,
                     );
                     defer self.allocator.free(index_function);
-                    try body.print(
-                        self.allocator,
-                        "\nslot := {s}(slot, {s})\n",
+                    try body.add(
+                        "\nslot := @0(slot, @1)\n",
                         .{ index_function, keys },
                     );
                     current_type = mapping.value_type;
@@ -1199,9 +989,8 @@ pub const IRGenerator = struct {
                     defer self.allocator.free(index_function);
                     const length_function = try utils.arrayLengthFunction(current_type);
                     defer self.allocator.free(length_function);
-                    try body.print(
-                        self.allocator,
-                        "\nif iszero(lt({s}, {s}(slot))) {{ revert(0, 0) }}\nslot, offset := {s}(slot, {s})\n",
+                    try body.add(
+                        "\nif iszero(lt(@0, @1(slot))) { revert(0, 0) }\nslot, offset := @2(slot, @3)\n",
                         .{ keys, length_function, index_function, keys },
                     );
                     current_type = array.base_type;
@@ -1231,16 +1020,15 @@ pub const IRGenerator = struct {
                     "ret_{d}",
                     .{return_variables.items.len},
                 );
-                defer self.allocator.free(result_name);
-                var result = try IRVariableModule.IRVariable.init(
-                    self.allocator,
-                    result_name,
-                    return_type,
-                );
+                var result: IRVariableModule.IRVariable = .{
+                    .allocator = self.allocator,
+                    .base_name = result_name,
+                    .type_ref = return_type,
+                };
                 defer result.deinit();
-                const result_text = try result.commaSeparatedListAlloc();
-                defer self.allocator.free(result_text);
+                const first_slot = return_variables.items.len;
                 try result.appendStackSlots(self.allocator, &return_variables);
+                const result_text: []const []const u8 = return_variables.items[first_slot..];
                 const reader = try utils.readFromStorage(
                     return_type,
                     member_offset.byte_offset,
@@ -1248,9 +1036,8 @@ pub const IRGenerator = struct {
                     storage.location,
                 );
                 defer self.allocator.free(reader);
-                try body.print(
-                    self.allocator,
-                    "\n{s} := {s}(add(slot, {d}))\n",
+                try body.add(
+                    "\n@0 := @1(add(slot, @2))\n",
                     .{ result_text, reader, member_offset.slot },
                 );
             }
@@ -1266,49 +1053,22 @@ pub const IRGenerator = struct {
                 return_type,
             );
             defer result.deinit();
-            const result_text = try result.commaSeparatedListAlloc();
-            defer self.allocator.free(result_text);
+            const first_slot = return_variables.items.len;
             try result.appendStackSlots(self.allocator, &return_variables);
+            const result_text: []const []const u8 = return_variables.items[first_slot..];
             const reader = try utils.readFromStorageDynamic(
                 return_type,
                 true,
                 storage.location,
             );
             defer self.allocator.free(reader);
-            try body.print(
-                self.allocator,
-                "\n{s} := {s}(slot, offset)\n",
+            try body.add(
+                "\n@0 := @1(slot, offset)\n",
                 .{ result_text, reader },
             );
         }
         if (return_variables.items.len == 0) return error.InvalidAst;
-        const parameter_names = try joinAlloc(
-            self.allocator,
-            parameters.items,
-            ", ",
-        );
-        defer self.allocator.free(parameter_names);
-        const return_names = try joinAlloc(
-            self.allocator,
-            return_variables.items,
-            ", ",
-        );
-        defer self.allocator.free(return_names);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n{s}{s}\nfunction {s}({s}) -> {s} {{\n{s}\n}}\n{s}\n",
-            .{
-                ast_id_comment,
-                location,
-                name,
-                parameter_names,
-                return_names,
-                body.items,
-                contract_location,
-            },
-        );
-        defer self.allocator.free(code);
-        try self.context.functionCollector().finishFunction(name, code);
+        try self.collectFunction(generator, name, parameters.items, return_variables.items, body.take(), try self.astId(variable), true);
         return name;
     }
 
@@ -1356,29 +1116,13 @@ pub const IRGenerator = struct {
 
             const panic = try utils.panicFunction(.invalid_internal_function);
             defer self.allocator.free(panic);
-            const inputs = try variableListAlloc(self.allocator, "in_", arity.in);
-            defer self.allocator.free(inputs);
-            const outputs = try variableListAlloc(self.allocator, "out_", arity.out);
-            defer self.allocator.free(outputs);
-            const location = try self.locationCommentAlloc(contract);
-            defer self.allocator.free(location);
-
-            var code: std.ArrayList(u8) = .empty;
-            defer code.deinit(self.allocator);
-            try code.print(
-                self.allocator,
-                "\n{s}\nfunction {s}(fun{s}{s}){s}{s} {{\nswitch fun\n",
-                .{
-                    location,
-                    name,
-                    if (inputs.len == 0) "" else ", ",
-                    inputs,
-                    if (outputs.len == 0) "" else " -> ",
-                    outputs,
-                },
-            );
+            const generator = try self.sourceBuilder(contract);
+            const inputs = try generator.indexedNames("in_", arity.in);
+            const outputs = try generator.indexedNames("out_", arity.out);
+            var dispatch = try generator.switchStatement(try generator.identifier("fun"), &.{});
             const functions = dispatch_map.entries.get(arity) orelse
                 return error.InvalidAst;
+            try dispatch.switch_statement.cases.ensureTotalCapacityPrecise(generator.allocator(), functions.items.len + 1);
             for (functions.items) |function| {
                 if (function.nodeKind() != .function_definition or
                     function.payload.function_definition.kind == .Constructor)
@@ -1392,24 +1136,18 @@ pub const IRGenerator = struct {
                     function,
                 );
                 defer self.allocator.free(function_name);
-                try code.print(
-                    self.allocator,
-                    "case {d}\n{{\n{s}{s}{s}({s})\n}}\n",
-                    .{
-                        identifier,
-                        outputs,
-                        if (outputs.len == 0) "" else " := ",
-                        function_name,
-                        inputs,
-                    },
-                );
+                const body = if (outputs.len == 0)
+                    try generator.statements("@0(@1)", .{ function_name, inputs })
+                else
+                    try generator.statements("@0 := @1(@2)", .{ outputs, function_name, inputs });
+                const label = (try generator.expression("@0", .{identifier})).literal;
+                dispatch.switch_statement.cases.appendAssumeCapacity(try generator.case(label, body));
             }
-            try code.print(
-                self.allocator,
-                "default {{ {s}() }}\n}}\n{s}\n",
-                .{ panic, location },
-            );
-            try self.context.functionCollector().finishFunction(name, code.items);
+            dispatch.switch_statement.cases.appendAssumeCapacity(try generator.case(null, try generator.statements("@0()", .{panic})));
+            var definition = try generator.functionDefinition("function @0(fun, @1) -> @2 {}", .{ name, inputs, outputs });
+            try definition.body.statements.append(generator.allocator(), dispatch);
+            try self.context.functionCollector().finishGeneratedFunction(name, definition);
+            self.context.functionCollector().function_origin = try self.sourceOrigin(contract);
         }
         return dispatch_map;
     }
@@ -1431,6 +1169,8 @@ pub const IRGenerator = struct {
         if (!(try self.context.functionCollector().beginFunction(name))) return;
         errdefer self.context.functionCollector().abortFunction(name);
         self.context.resetLocalVariables();
+        const generator = try self.sourceBuilder(function);
+        var body_origin = if (generator.debug_data) |data| data.origin_location else SourceLocation{};
 
         var parameter_names: std.ArrayList([]u8) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         defer deinitStrings(self.allocator, &parameter_names);
@@ -1442,14 +1182,13 @@ pub const IRGenerator = struct {
         }
         var return_names: std.ArrayList([]u8) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         defer deinitStrings(self.allocator, &return_names);
-        var return_initialization: std.ArrayList(u8) = .empty;
-        defer return_initialization.deinit(self.allocator);
+        var return_initialization: Generated.Buffer = .{ .generator = generator };
         if (definition.callable.return_parameters) |return_parameters| {
             if (return_parameters.nodeKind() != .parameter_list) return error.InvalidAst;
             for (return_parameters.payload.parameter_list.parameters) |return_parameter| {
                 const local = try self.context.addLocalVariable(return_parameter);
                 try local.appendStackSlots(self.allocator, &return_names);
-                var initializer = StatementGeneratorModule.IRGeneratorForStatements.init(
+                var initializer = try StatementGeneratorModule.IRGeneratorForStatements.init(
                     self.allocator,
                     &self.context,
                     utils,
@@ -1457,16 +1196,15 @@ pub const IRGenerator = struct {
                     null,
                 );
                 defer initializer.deinit();
+                initializer.inheritSourceLocation(body_origin);
                 try initializer.initializeLocalVar(return_parameter);
-                try return_initialization.appendSlice(
-                    self.allocator,
-                    initializer.codeBorrowed(),
-                );
+                body_origin = initializer.active_location;
+                try return_initialization.append(initializer.takeCode());
             }
         }
 
         const function_body = if (definition.modifiers.len == 0) blk: {
-            var statements = StatementGeneratorModule.IRGeneratorForStatements.init(
+            var statements = try StatementGeneratorModule.IRGeneratorForStatements.init(
                 self.allocator,
                 &self.context,
                 utils,
@@ -1474,8 +1212,9 @@ pub const IRGenerator = struct {
                 null,
             );
             defer statements.deinit();
+            statements.inheritSourceLocation(body_origin);
             try statements.generate(body_node);
-            break :blk try statements.codeAlloc(self.allocator);
+            break :blk statements.takeCode();
         } else blk: {
             for (definition.modifiers, 0..) |invocation, index| {
                 const next = if (index + 1 < definition.modifiers.len)
@@ -1504,70 +1243,14 @@ pub const IRGenerator = struct {
             defer call_arguments.deinit(self.allocator);
             try call_arguments.appendSlice(self.allocator, return_names.items);
             try call_arguments.appendSlice(self.allocator, parameter_names.items);
-            const joined_call_arguments = try joinAlloc(
-                self.allocator,
-                call_arguments.items,
-                ", ",
-            );
-            defer self.allocator.free(joined_call_arguments);
-            const joined_call_returns = try joinAlloc(
-                self.allocator,
-                return_names.items,
-                ", ",
-            );
-            defer self.allocator.free(joined_call_returns);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}{s}{s}({s})",
-                .{
-                    joined_call_returns,
-                    if (joined_call_returns.len == 0) "" else " := ",
-                    first,
-                    joined_call_arguments,
-                },
-            );
+            const call_builder = generator.withDebug(if (body_origin.isValid()) .{ .origin_location = body_origin } else null);
+            break :blk if (return_names.items.len == 0)
+                try call_builder.statements("@0(@1)", .{ first, call_arguments.items })
+            else
+                try call_builder.statements("@0 := @1(@2)", .{ return_names.items, first, call_arguments.items });
         };
-        defer self.allocator.free(function_body);
-        const joined_parameters = try joinAlloc(
-            self.allocator,
-            parameter_names.items,
-            ", ",
-        );
-        defer self.allocator.free(joined_parameters);
-        const joined_returns = try joinAlloc(self.allocator, return_names.items, ", ");
-        defer self.allocator.free(joined_returns);
-        const source_location = try self.locationCommentAlloc(function);
-        defer self.allocator.free(source_location);
-        const contract_location = try self.locationCommentAlloc(
-            try self.context.mostDerivedContract(),
-        );
-        defer self.allocator.free(contract_location);
-        const ast_id_comment = if (self.debug_info_selection.ast_id)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "/// @ast-id {d}\n",
-                .{try self.compatibilityId(function)},
-            )
-        else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(ast_id_comment);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n{s}{s}\nfunction {s}({s}){s}{s} {{\n{s}\n{s}\n}}\n{s}\n",
-            .{
-                ast_id_comment,
-                source_location,
-                name,
-                joined_parameters,
-                if (joined_returns.len == 0) "" else " -> ",
-                joined_returns,
-                return_initialization.items,
-                function_body,
-                contract_location,
-            },
-        );
-        defer self.allocator.free(code);
-        try self.context.functionCollector().finishFunction(name, code);
+        try return_initialization.append(function_body);
+        try self.collectFunction(generator, name, parameter_names.items, return_names.items, return_initialization.take(), try self.astId(function), true);
     }
 
     fn generateModifier(
@@ -1613,29 +1296,26 @@ pub const IRGenerator = struct {
         if (!(try self.context.functionCollector().beginFunction(name))) return;
         errdefer self.context.functionCollector().abortFunction(name);
         self.context.resetLocalVariables();
+        const generator = try self.sourceBuilder(referenced);
 
         var parameter_names: std.ArrayList([]u8) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         defer deinitStrings(self.allocator, &parameter_names);
         var return_outputs: std.ArrayList([]u8) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         defer deinitStrings(self.allocator, &return_outputs);
-        var return_assignments: std.ArrayList(u8) = .empty;
-        defer return_assignments.deinit(self.allocator);
+        var return_assignments: Generated.Buffer = .{ .generator = generator };
 
         if (function.payload.function_definition.callable.return_parameters) |returns| {
             for (returns.payload.parameter_list.parameters) |declaration| {
                 const local = try self.context.addLocalVariable(declaration);
-                var slots = try local.stackSlotsAlloc();
-                defer slots.deinit();
-                for (slots.items) |slot| {
-                    try parameter_names.ensureUnusedCapacity(self.allocator, 1);
-                    const parameter = try self.allocator.dupe(u8, slot);
-                    parameter_names.appendAssumeCapacity(parameter);
+                const first_slot = parameter_names.items.len;
+                try local.appendStackSlots(self.allocator, &parameter_names);
+                // This owner stays fixed while its new names are borrowed below.
+                for (parameter_names.items[first_slot..]) |slot| {
                     try return_outputs.ensureUnusedCapacity(self.allocator, 1);
                     const output = try self.context.newYulVariable();
                     return_outputs.appendAssumeCapacity(output);
-                    try return_assignments.print(
-                        self.allocator,
-                        "{s} := {s}\n",
+                    try return_assignments.add(
+                        "@0 := @1\n",
                         .{ output, slot },
                     );
                 }
@@ -1648,7 +1328,7 @@ pub const IRGenerator = struct {
             try local.appendStackSlots(self.allocator, &parameter_names);
         }
 
-        var argument_evaluator = StatementGeneratorModule.IRGeneratorForStatements.init(
+        var argument_evaluator = try StatementGeneratorModule.IRGeneratorForStatements.init(
             self.allocator,
             &self.context,
             utils,
@@ -1656,6 +1336,7 @@ pub const IRGenerator = struct {
             null,
         );
         defer argument_evaluator.deinit();
+        argument_evaluator.inheritSourceLocation(if (generator.debug_data) |data| data.origin_location else .{});
         for (invocation_arguments, modifier_parameters) |argument, parameter| {
             var value = try argument_evaluator.evaluateExpression(
                 argument,
@@ -1666,24 +1347,12 @@ pub const IRGenerator = struct {
             try argument_evaluator.bindLocalValue(parameter, &value);
         }
 
-        const joined_parameters = try joinAlloc(
-            self.allocator,
-            parameter_names.items,
-            ", ",
-        );
-        defer self.allocator.free(joined_parameters);
-        const joined_returns = try joinAlloc(
-            self.allocator,
-            return_outputs.items,
-            ", ",
-        );
-        defer self.allocator.free(joined_returns);
         var placeholder_context: ModifierPlaceholderContext = .{
             .next_function = next_function,
-            .return_values = joined_returns,
-            .arguments = joined_parameters,
+            .return_values = return_outputs.items,
+            .arguments = parameter_names.items,
         };
-        var statements = StatementGeneratorModule.IRGeneratorForStatements.init(
+        var statements = try StatementGeneratorModule.IRGeneratorForStatements.init(
             self.allocator,
             &self.context,
             utils,
@@ -1694,41 +1363,12 @@ pub const IRGenerator = struct {
             },
         );
         defer statements.deinit();
+        statements.inheritSourceLocation(argument_evaluator.active_location);
         try statements.generate(modifier_body);
 
-        const source_location = try self.locationCommentAlloc(referenced);
-        defer self.allocator.free(source_location);
-        const contract_location = try self.locationCommentAlloc(
-            try self.context.mostDerivedContract(),
-        );
-        defer self.allocator.free(contract_location);
-        const ast_id_comment = if (self.debug_info_selection.ast_id)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "/// @ast-id {d}\n",
-                .{try self.compatibilityId(referenced)},
-            )
-        else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(ast_id_comment);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n{s}{s}\nfunction {s}({s}){s}{s} {{\n{s}\n{s}\n{s}\n}}\n{s}\n",
-            .{
-                ast_id_comment,
-                source_location,
-                name,
-                joined_parameters,
-                if (joined_returns.len == 0) "" else " -> ",
-                joined_returns,
-                return_assignments.items,
-                argument_evaluator.codeBorrowed(),
-                statements.codeBorrowed(),
-                contract_location,
-            },
-        );
-        defer self.allocator.free(code);
-        try self.context.functionCollector().finishFunction(name, code);
+        try return_assignments.append(argument_evaluator.takeCode());
+        try return_assignments.append(statements.takeCode());
+        try self.collectFunction(generator, name, parameter_names.items, return_outputs.items, return_assignments.take(), try self.astId(referenced), true);
     }
 
     fn generateFunctionWithModifierInner(
@@ -1745,29 +1385,26 @@ pub const IRGenerator = struct {
         if (!(try self.context.functionCollector().beginFunction(name))) return;
         errdefer self.context.functionCollector().abortFunction(name);
         self.context.resetLocalVariables();
+        const generator = try self.sourceBuilder(function);
 
         var parameter_names: std.ArrayList([]u8) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         defer deinitStrings(self.allocator, &parameter_names);
         var return_names: std.ArrayList([]u8) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         defer deinitStrings(self.allocator, &return_names);
-        var assignments: std.ArrayList(u8) = .empty;
-        defer assignments.deinit(self.allocator);
+        var assignments: Generated.Buffer = .{ .generator = generator };
 
         if (function.payload.function_definition.callable.return_parameters) |returns| {
             for (returns.payload.parameter_list.parameters) |declaration| {
                 const local = try self.context.addLocalVariable(declaration);
-                var slots = try local.stackSlotsAlloc();
-                defer slots.deinit();
-                for (slots.items) |slot| {
-                    try return_names.ensureUnusedCapacity(self.allocator, 1);
-                    const output = try self.allocator.dupe(u8, slot);
-                    return_names.appendAssumeCapacity(output);
+                const first_slot = return_names.items.len;
+                try local.appendStackSlots(self.allocator, &return_names);
+                // This owner stays fixed while its new names are borrowed below.
+                for (return_names.items[first_slot..]) |slot| {
                     try parameter_names.ensureUnusedCapacity(self.allocator, 1);
                     const input = try self.context.newYulVariable();
                     parameter_names.appendAssumeCapacity(input);
-                    try assignments.print(
-                        self.allocator,
-                        "{s} := {s}\n",
+                    try assignments.add(
+                        "@0 := @1\n",
                         .{ slot, input },
                     );
                 }
@@ -1779,7 +1416,7 @@ pub const IRGenerator = struct {
             const local = try self.context.addLocalVariable(declaration);
             try local.appendStackSlots(self.allocator, &parameter_names);
         }
-        var statements = StatementGeneratorModule.IRGeneratorForStatements.init(
+        var statements = try StatementGeneratorModule.IRGeneratorForStatements.init(
             self.allocator,
             &self.context,
             utils,
@@ -1787,43 +1424,12 @@ pub const IRGenerator = struct {
             null,
         );
         defer statements.deinit();
+        statements.inheritSourceLocation(if (generator.debug_data) |data| data.origin_location else .{});
         try statements.generate(
             function.payload.function_definition.body orelse return error.MissingFunctionBody,
         );
-        const joined_parameters = try joinAlloc(
-            self.allocator,
-            parameter_names.items,
-            ", ",
-        );
-        defer self.allocator.free(joined_parameters);
-        const joined_returns = try joinAlloc(
-            self.allocator,
-            return_names.items,
-            ", ",
-        );
-        defer self.allocator.free(joined_returns);
-        const source_location = try self.locationCommentAlloc(function);
-        defer self.allocator.free(source_location);
-        const contract_location = try self.locationCommentAlloc(
-            try self.context.mostDerivedContract(),
-        );
-        defer self.allocator.free(contract_location);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n{s}\nfunction {s}({s}){s}{s} {{\n{s}\n{s}\n}}\n{s}\n",
-            .{
-                source_location,
-                name,
-                joined_parameters,
-                if (joined_returns.len == 0) "" else " -> ",
-                joined_returns,
-                assignments.items,
-                statements.codeBorrowed(),
-                contract_location,
-            },
-        );
-        defer self.allocator.free(code);
-        try self.context.functionCollector().finishFunction(name, code);
+        try assignments.append(statements.takeCode());
+        try self.collectFunction(generator, name, parameter_names.items, return_names.items, assignments.take(), null, true);
     }
 
     fn interfaceFunctionsAlloc(
@@ -1867,99 +1473,54 @@ pub const IRGenerator = struct {
         return result;
     }
 
-    fn callValueCheckAlloc(
-        self: *IRGenerator,
-        utils: *YulUtilFunctionsModule.YulUtilFunctions,
-    ) GeneratorError![]u8 {
-        const revert = try utils.revertReasonIfDebugFunction(
-            "Ether sent to non-payable function",
-        );
+    fn callValueCheck(self: *IRGenerator, utils: *YulUtilFunctionsModule.YulUtilFunctions) GeneratorError!Yul.Block {
+        const revert = try utils.revertReasonIfDebugFunction("Ether sent to non-payable function");
         defer self.allocator.free(revert);
-        return std.fmt.allocPrint(
-            self.allocator,
-            "if callvalue() {{ {s}() }}",
-            .{revert},
-        );
+        return (try self.builder()).statements("if callvalue() { @0() }", .{revert});
     }
 
-    fn immutablePatchesAlloc(
+    fn immutablePatches(
         self: *IRGenerator,
         contract: *AST.Node,
         code_offset: []const u8,
-    ) GeneratorError![]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
+    ) GeneratorError!Yul.Block {
+        const generator = try self.sourceBuilder(contract);
+        var output: Generated.Buffer = .{ .generator = generator };
         if (contract.payload.contract_definition.contract_kind == .Library) {
-            try output.print(
-                self.allocator,
-                "setimmutable({s}, \"{s}\", address())\n",
-                .{ code_offset, Common.libraryAddressImmutable() },
-            );
-            return output.toOwnedSlice(self.allocator);
+            try output.add("setimmutable(@0, @1, address())", .{ code_offset, Common.libraryAddressImmutable() });
+            return output.take();
         }
         var variables = try self.immutableVariablesAlloc(contract);
         defer variables.deinit(self.allocator);
-        for (variables.items) |variable|
-            try output.print(
-                self.allocator,
-                "setimmutable({s}, \"{d}\", mload({d}))\n",
-                .{
-                    code_offset,
-                    try self.compatibilityId(variable),
-                    try self.context.immutableMemoryOffset(variable),
-                },
-            );
-        return output.toOwnedSlice(self.allocator);
+        for (variables.items) |variable| {
+            const label = try std.fmt.allocPrint(generator.allocator(), "{d}", .{try self.compatibilityId(variable)});
+            defer generator.allocator().free(label);
+            try output.add("setimmutable(@0, @1, mload(@2))", .{ code_offset, label, try self.context.immutableMemoryOffset(variable) });
+        }
+        return output.take();
     }
 
-    fn memoryInitAlloc(
+    fn memoryInit(
         self: *IRGenerator,
         use_memory_guard: bool,
-    ) GeneratorError![]u8 {
+    ) GeneratorError!Yul.Block {
         const reserved = try self.context.reservedMemory();
         const free_memory_start = ContextModule.general_purpose_memory_start + reserved;
+        const generator = try self.sourceBuilder(try self.context.mostDerivedContract());
         return if (use_memory_guard)
-            std.fmt.allocPrint(
-                self.allocator,
-                "mstore(64, memoryguard({d}))",
-                .{free_memory_start},
-            )
+            generator.statements("mstore(64, memoryguard(@0))", .{free_memory_start})
         else
-            std.fmt.allocPrint(
-                self.allocator,
-                "mstore(64, {d})",
-                .{free_memory_start},
-            );
+            generator.statements("mstore(64, @0)", .{free_memory_start});
     }
 
-    fn locationCommentAlloc(
-        self: *IRGenerator,
-        node: *const AST.Node,
-    ) GeneratorError![]u8 {
-        if (!node.location.isValid()) return self.allocator.alloc(u8, 0);
-        return Common.dispenseNodeLocationCommentAlloc(
-            self.allocator,
-            node,
-            self.context.locationCommentContext(),
-        );
-    }
-
-    fn useSrcMapAlloc(self: *IRGenerator) GeneratorError![]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        var first = true;
+    fn sourceNames(self: *IRGenerator, allocator: std.mem.Allocator) GeneratorError!Objects.SourceNameMap {
+        var result: Objects.SourceNameMap = .{};
+        errdefer result.deinit(allocator);
         for (self.source_index_to_name) |source| {
-            if (!self.context.sourceUsed(source.name)) continue;
-            const quoted = try CommonData.escapeAndQuoteStringAlloc(
-                self.allocator,
-                source.name,
-            );
-            defer self.allocator.free(quoted);
-            if (!first) try output.appendSlice(self.allocator, ", ");
-            try output.print(self.allocator, "{d}:{s}", .{ source.index, quoted });
-            first = false;
+            if (self.context.sourceUsed(source.name))
+                try result.put(allocator, source.index, source.name);
         }
-        return output.toOwnedSlice(self.allocator);
+        return result;
     }
 };
 
@@ -2180,17 +1741,17 @@ fn stackSize(types: []const *const Types.Type) GeneratorError!usize {
     return result;
 }
 
-fn constructorParametersTextAlloc(
+fn constructorParametersNamesAlloc(
     allocator: std.mem.Allocator,
     hierarchy: []const *AST.Node,
     parameters: *const ConstructorParameterMap,
-) std.mem.Allocator.Error![]u8 {
+) std.mem.Allocator.Error![][]const u8 {
     var ordered: std.ArrayList([]const u8) = .empty;
-    defer ordered.deinit(allocator);
+    errdefer ordered.deinit(allocator);
     for (hierarchy) |contract|
         if (parameters.get(contract)) |values|
             try ordered.appendSlice(allocator, values.items);
-    return joinAlloc(allocator, ordered.items, ", ");
+    return ordered.toOwnedSlice(allocator);
 }
 
 fn deinitConstructorParameterMap(
@@ -2208,41 +1769,4 @@ fn deinitStrings(
 ) void {
     for (values.items) |value| allocator.free(value);
     values.deinit(allocator);
-}
-
-fn variableListAlloc(
-    allocator: std.mem.Allocator,
-    prefix: []const u8,
-    count: usize,
-) std.mem.Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    for (0..count) |index| {
-        if (index != 0) try output.appendSlice(allocator, ", ");
-        try output.print(allocator, "{s}{d}", .{ prefix, index });
-    }
-    return output.toOwnedSlice(allocator);
-}
-
-fn joinAlloc(
-    allocator: std.mem.Allocator,
-    values: []const []const u8,
-    separator: []const u8,
-) std.mem.Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    for (values, 0..) |value, index| {
-        if (index != 0) try output.appendSlice(allocator, separator);
-        try output.appendSlice(allocator, value);
-    }
-    return output.toOwnedSlice(allocator);
-}
-
-test "external wrapper variable lists retain upstream numbering" {
-    const empty = try variableListAlloc(std.testing.allocator, "param_", 0);
-    defer std.testing.allocator.free(empty);
-    try std.testing.expectEqualStrings("", empty);
-    const values = try variableListAlloc(std.testing.allocator, "param_", 3);
-    defer std.testing.allocator.free(values);
-    try std.testing.expectEqualStrings("param_0, param_1, param_2", values);
 }

@@ -1060,6 +1060,29 @@ pub fn build(b: *std.Build) void {
     }) });
     b.step("test-evm", "Run shared EVM semantics tests").dependOn(&b.addRunArtifact(evm_tests).step);
 
+    const ownership_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ownership_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options_module },
+                .{ .name = "big_int", .module = big_int_module },
+                .{ .name = "common", .module = common_module },
+                .{ .name = "cxx_compat", .module = cxx_compat_module },
+            },
+        }),
+        .filters = &.{ "ownership test inventory", "assembly inliner", "label ID dispenser", "peephole", "assembly CSE", "assembly immutable", "assembly append", "backend scratch", "stack diagnostic", "function grouper", "source locations", "source snippets", "escaped string content", "function specializer", "function analysis cache", "optimizer scratch retention", "optimizer debug snapshots", "name simplifier", "IR variable", "IR source", "SSA transform", "SSA reverser", "Yul stack owned printing", "Yul AST generated object", "assembly printing", "contract artifact", "statement remover", "profiler ", "for-loop init rewriter", "structural simplifier", "expression joiner", "expression splitter", "loop-invariant", "block flattener", "full inliner", "inline declarations", "linker ", "append rebases", "expression classes", "nested logical", "printing ", "CFG lowering", "transient optimizer", "unused store", "unused assignment", "unused parameter", "variable name cleaner", "conditional simplifier" },
+    });
+    ownership_tests.stack_size = 32 * 1024 * 1024;
+    check_step.dependOn(&ownership_tests.step);
+    const run_ownership_tests = b.addRunArtifact(ownership_tests);
+    test_step.dependOn(&run_ownership_tests.step);
+    b.step("test-ownership", "Test compiler allocation failures and ownership transfers").dependOn(&run_ownership_tests.step);
+
+    const structured_yul_step = b.step("test-structured-yul", "Test structured Yul ownership and solc artifact compatibility");
+    structured_yul_step.dependOn(&run_ownership_tests.step);
     const yul_construction_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/yul_construction_tests.zig"),
@@ -1079,8 +1102,22 @@ pub fn build(b: *std.Build) void {
     yul_construction_tests.stack_size = 32 * 1024 * 1024;
     const run_yul_construction = b.addRunArtifact(yul_construction_tests);
     b.step("test-yul-construction", "Test typed Yul construction independently of compiler integration").dependOn(&run_yul_construction.step);
+    structured_yul_step.dependOn(&run_yul_construction.step);
     check_step.dependOn(&yul_construction_tests.step);
     test_step.dependOn(&run_yul_construction.step);
+    const structured_yul_tests = b.addTest(.{
+        .root_module = compiler_module,
+        .filters = &.{ "compiler module inventory", "source locations", "source snippets", "escaped string content", "Yul AST builder", "Yul AST template", "printer renders", "Yul stack", "AST copier", "object code transfer", "stack compression", "stack limit eva", "disambiguator", "function specializer", "object optimizer", "compiler session propagates cache OOM", "backend cache", "code size warnings", "structured Yul", "compiler session reloads optimized Yul", "compiler session reuses backend layers", "Yul simplification", "expression simplifier", "constant EVM arithmetic", "expression classes" },
+    });
+    structured_yul_tests.stack_size = 32 * 1024 * 1024;
+    structured_yul_step.dependOn(&b.addRunArtifact(structured_yul_tests).step);
+    const structured_yul_artifact_tests = b.addTest(.{
+        .root_module = standard_json_dispatch_module,
+        .filters = &.{"parallel "},
+    });
+    const run_structured_yul_artifact_tests = b.addRunArtifact(structured_yul_artifact_tests);
+    structured_yul_step.dependOn(&run_structured_yul_artifact_tests.step);
+    b.step("test-parallel-artifacts", "Test artifact ownership, parallel output and retained-storage profiling").dependOn(&run_structured_yul_artifact_tests.step);
 
     const sqlite_tests = b.addTest(.{
         .name = "sqlite-store",
