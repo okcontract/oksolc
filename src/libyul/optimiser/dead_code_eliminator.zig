@@ -19,12 +19,12 @@ pub const DeadCodeEliminator = struct {
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
         var collector = try ControlFlowCollector.init(
-            context.dispenser.allocator,
+            context.scratchAllocator(),
             context.dialect,
             ast,
         );
         defer collector.deinit();
-        var named = try collector.functionSideEffectsNamed(context.dispenser.allocator);
+        var named = try collector.functionSideEffectsNamed(context.scratchAllocator());
         defer named.deinit();
         var pass: DeadCodeEliminator = .{
             .allocator = context.dispenser.allocator,

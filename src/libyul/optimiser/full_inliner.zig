@@ -24,7 +24,11 @@ fn lessYulName(left: YulName, right: YulName) bool {
 }
 
 const FunctionMap = ordered.OrderedMap(YulName, *AST.FunctionDefinition, lessYulName);
-const SizeMap = ordered.OrderedMap(YulName, usize, lessYulName);
+const FunctionInfo = struct {
+    size: usize,
+    direct_recursive: ?bool = null,
+};
+const FunctionInfoMap = ordered.OrderedMap(YulName, FunctionInfo, lessYulName);
 const TranslationMap = ordered.OrderedMap(YulName, YulName, lessYulName);
 
 const Pass = enum {
@@ -45,7 +49,7 @@ pub const FullInliner = struct {
     has_memory_guard: bool = false,
     single_use: NameCollector.NameSet = .{},
     constants: NameCollector.NameSet = .{},
-    function_sizes: SizeMap = .{},
+    function_info: FunctionInfoMap = .{},
 
     pub const name = "FullInliner";
 
@@ -91,10 +95,10 @@ pub const FullInliner = struct {
             }
         }
 
-        _ = try result.function_sizes.insert(
+        _ = try result.function_info.insert(
             scratch_allocator,
             .{},
-            Metrics.CodeSize.codeSize(ast, .{}),
+            .{ .size = Metrics.CodeSize.codeSize(ast, .{}) },
         );
         var references = try NameCollector.ReferencesCounter.countReferencesBlock(
             scratch_allocator,
@@ -132,7 +136,7 @@ pub const FullInliner = struct {
         self.no_inline_functions.deinit(self.scratch_allocator);
         self.single_use.deinit(self.scratch_allocator);
         self.constants.deinit(self.scratch_allocator);
-        self.function_sizes.deinit(self.scratch_allocator);
+        self.function_info.deinit(self.scratch_allocator);
         self.* = undefined;
     }
 
@@ -225,10 +229,11 @@ pub const FullInliner = struct {
     }
 
     fn updateCodeSize(self: *FullInliner, function_definition: *const AST.FunctionDefinition) !void {
-        _ = try self.function_sizes.fetchPut(
+        _ = try self.function_info.fetchPut(
             self.scratch_allocator,
             function_definition.name,
-            Metrics.CodeSize.codeSize(&function_definition.body, .{}),
+            // A body rewrite invalidates its cached direct-recursion result.
+            .{ .size = Metrics.CodeSize.codeSize(&function_definition.body, .{}) },
         );
     }
 
@@ -248,13 +253,21 @@ pub const FullInliner = struct {
     }
 
     fn recursive(self: *FullInliner, function_definition: *const AST.FunctionDefinition) !bool {
+        const info = self.function_info.getPtr(function_definition.name) orelse
+            return error.MissingFunctionSize;
+        if (info.direct_recursive) |result| return result;
+        // Other callees are stable while this body is rewritten. Self-calls are
+        // rejected before this query; updateCodeSize invalidates after rewriting.
+        // Do not use the initial SCC set: mutual recursion is a different test.
         var references = try NameCollector.ReferencesCounter.countReferencesFunction(
             self.scratch_allocator,
             function_definition,
         );
         defer references.deinit(self.scratch_allocator);
-        const count = references.get(.{ .user = function_definition.name }) orelse return false;
-        return count.* > 0;
+        const count = references.get(.{ .user = function_definition.name });
+        const result = if (count) |value| value.* > 0 else false;
+        info.direct_recursive = result;
+        return result;
     }
 
     fn shallInline(self: *FullInliner, call: *const AST.FunctionCall, call_site: YulName) !bool {
@@ -271,8 +284,8 @@ pub const FullInliner = struct {
             if (argument != .literal and argument != .identifier)
                 return false;
 
-        const size = (self.function_sizes.get(called_function.name) orelse
-            return error.MissingFunctionSize).*;
+        const size = (self.function_info.get(called_function.name) orelse
+            return error.MissingFunctionSize).size;
         if (size <= 1) return true;
         if (self.pass == .inline_tiny) return false;
 
@@ -285,8 +298,8 @@ pub const FullInliner = struct {
         if (!self.has_memory_guard or
             self.recursive_functions.contains(.{ .user = call_site }))
             aggressive = false;
-        const call_site_size = (self.function_sizes.get(call_site) orelse
-            return error.MissingCallSiteSize).*;
+        const call_site_size = (self.function_info.get(call_site) orelse
+            return error.MissingCallSiteSize).size;
         if (!aggressive and call_site_size > 45) return false;
         if (self.single_use.contains(called_function.name)) return true;
 
@@ -307,11 +320,11 @@ pub const FullInliner = struct {
     }
 
     fn tentativelyUpdateCodeSize(self: *FullInliner, function_name: YulName, call_site: YulName) !void {
-        const call_size = self.function_sizes.get(function_name) orelse
+        const call_size = self.function_info.get(function_name) orelse
             return error.MissingFunctionSize;
-        const site_size = self.function_sizes.getPtr(call_site) orelse
+        const site_size = self.function_info.getPtr(call_site) orelse
             return error.MissingCallSiteSize;
-        site_size.* = std.math.add(usize, site_size.*, call_size.*) catch
+        site_size.size = std.math.add(usize, site_size.size, call_size.size) catch
             return error.CodeSizeOverflow;
     }
 };
@@ -360,7 +373,7 @@ pub const InlineModifier = struct {
 
     fn tryInlineStatement(
         self: *InlineModifier,
-        statement: *const AST.Statement,
+        statement: *AST.Statement,
     ) anyerror!?std.ArrayList(AST.Statement) {
         const expression = switch (statement.*) {
             .expression_statement => |*value| &value.expression,
@@ -379,8 +392,8 @@ pub const InlineModifier = struct {
 
     fn performInline(
         self: *InlineModifier,
-        statement: *const AST.Statement,
-        call: *const AST.FunctionCall,
+        statement: *AST.Statement,
+        call: *AST.FunctionCall,
     ) anyerror!std.ArrayList(AST.Statement) {
         const function_name = switch (call.function_name) {
             .identifier => |identifier| identifier.name,
@@ -404,25 +417,27 @@ pub const InlineModifier = struct {
         defer replacements.deinit(self.scratch_allocator);
         var result: std.ArrayList(AST.Statement) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
         errdefer deinitStatements(self.allocator, &result);
-        var copier = ASTCopierModule.ASTCopier.init(self.allocator);
 
         var parameter_index = function.parameters.items.len;
         while (parameter_index != 0) {
             parameter_index -= 1;
-            var argument = try copier.translateExpression(&call.arguments.items[parameter_index]);
-            errdefer argument.deinit(self.allocator);
+            const argument = &call.arguments.items[parameter_index];
             try self.newVariable(
                 &result,
                 &replacements,
                 function.parameters.items[parameter_index],
                 call.debug_data,
-                argument,
+                argument.*,
             );
+            // newVariable consumes only on success; the removed call no longer
+            // owns this argument after its declaration takes it.
+            argument.* = .{ .identifier = .{} };
         }
         for (function.return_variables.items) |return_variable| {
-            const zero = AST.Expression{
+            var zero = AST.Expression{
                 .literal = try self.driver.dialect.zeroLiteral(self.allocator),
             };
+            errdefer zero.deinit(self.allocator);
             try self.newVariable(
                 &result,
                 &replacements,
@@ -438,11 +453,7 @@ pub const InlineModifier = struct {
             self.driver.name_dispenser,
             &replacements,
         );
-        var body = try body_copier.translateBlock(&function.body);
-        defer body.deinit(self.allocator);
-        try result.ensureUnusedCapacity(self.allocator, body.statements.items.len);
-        while (body.statements.items.len != 0)
-            result.appendAssumeCapacity(body.statements.orderedRemove(0));
+        try body_copier.appendBlockStatements(&result, &function.body);
 
         switch (statement.*) {
             .assignment => |assignment| for (assignment.variable_names.items, 0..) |variable, index|
@@ -511,14 +522,21 @@ pub const BodyCopier = struct {
         };
     }
 
-    pub fn translateBlock(self: *BodyCopier, block: *const AST.Block) !AST.Block {
+    /// Appends private copies directly to the caller's replacement owner. On
+    /// error, that owner also destroys any completed prefix. Source statements
+    /// must not alias output; their block header is not part of the replacement.
+    pub fn appendBlockStatements(self: *BodyCopier, output: *std.ArrayList(AST.Statement), block: *const AST.Block) !void {
         try self.collectLocalDeclarations(block);
         var copier = ASTCopierModule.ASTCopier.initWithHooks(
             self.allocator,
             self,
             .{ .translate_identifier = translateIdentifier },
         );
-        return copier.translateBlock(block);
+        // This copier has only an identifier hook; no enclosing scope/debug
+        // callback is skipped when the unused top-level block copy is omitted.
+        try output.ensureUnusedCapacity(self.allocator, block.statements.items.len);
+        for (block.statements.items) |*statement|
+            output.appendAssumeCapacity(try copier.translateStatement(statement));
     }
 
     fn translateIdentifier(context: ?*anyopaque, name_value: YulName) anyerror!YulName {
@@ -559,7 +577,8 @@ fn appendDeclaration(
     try output.ensureUnusedCapacity(allocator, 1);
     var declaration: AST.VariableDeclaration = .{ .debug_data = debug_data };
     errdefer declaration.deinit(allocator);
-    try declaration.variables.append(allocator, variable);
+    try declaration.variables.ensureTotalCapacityPrecise(allocator, 1);
+    declaration.variables.appendAssumeCapacity(variable);
     declaration.value = try AST.createExpression(allocator, value);
     output.appendAssumeCapacity(.{ .variable_declaration = declaration });
 }
@@ -574,7 +593,8 @@ fn appendAssignment(
     try output.ensureUnusedCapacity(allocator, 1);
     var assignment: AST.Assignment = .{ .debug_data = debug_data };
     errdefer assignment.deinit(allocator);
-    try assignment.variable_names.append(allocator, variable);
+    try assignment.variable_names.ensureTotalCapacityPrecise(allocator, 1);
+    assignment.variable_names.appendAssumeCapacity(variable);
     assignment.value = try AST.createExpression(allocator, .{ .identifier = .{
         .debug_data = debug_data,
         .name = value_name,
@@ -650,4 +670,116 @@ test "full inliner expands direct calls with fresh parameter and return variable
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.find(u8, rendered, "f(1, 2)") == null);
     try std.testing.expect(std.mem.find(u8, rendered, "add(") != null);
+}
+
+test "full inliner transfers call arguments in evaluation order across allocation failures" {
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialectModule.EVMDialect.init(allocator, .current(), false);
+    defer dialect.deinit();
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var source = (try Parser.parseSource(allocator,
+        \\{ { let z := f(0x01, 0x02) z := f(z, 0x03) discard(0x04) }
+        \\  function f(a, b) -> c { c := add(a, b) }
+        \\  function discard(d) { pop(d) }
+        \\}
+    , "inliner-ownership.yul", &reporter, dialect.dialect(), .{})).?;
+    defer source.deinit();
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, input: *const AST.AST, separate_scratch: bool) !void {
+            const Analysis = @import("../asm_analysis.zig");
+            const Structure = @import("../object.zig").Structure;
+            var copier = ASTCopierModule.ASTCopier.init(failing);
+            var ast = try copier.translateBlock(input.root());
+            defer ast.deinit(failing);
+            var reserved: NameCollector.NameSet = .{};
+            defer reserved.deinit(failing);
+            var dispenser = try NameDispenser.initFromAst(failing, input.dialect().*, &ast, &reserved);
+            defer dispenser.deinit();
+            var scratch = std.heap.ArenaAllocator.init(failing);
+            defer scratch.deinit();
+            var context: OptimiserStepContext = .{
+                .dialect = input.dialect().*,
+                .dispenser = &dispenser,
+                .reserved_identifiers = &reserved,
+                .scratch_arena = if (separate_scratch) &scratch else null,
+            };
+            const before = ast.statements.items[0].block.statements.items;
+            const first = before[0].variable_declaration.value.?.function_call.arguments.items;
+            const first_left = first[0].literal.value.string_value.?.ptr;
+            const first_right = first[1].literal.value.string_value.?.ptr;
+            const second_right = before[1].assignment.value.?.function_call.arguments.items[1].literal.value.string_value.?.ptr;
+            const discard_argument = before[2].expression_statement.expression.function_call.arguments.items[0].literal.value.string_value.?.ptr;
+            try FullInliner.run(&context, &ast);
+            _ = scratch.reset(.free_all);
+            const after = ast.statements.items[0].block.statements.items;
+            try std.testing.expectEqual(@as(usize, 12), after.len);
+            try std.testing.expectEqual(first_right, after[0].variable_declaration.value.?.literal.value.string_value.?.ptr);
+            try std.testing.expectEqual(first_left, after[1].variable_declaration.value.?.literal.value.string_value.?.ptr);
+            try std.testing.expectEqual(second_right, after[5].variable_declaration.value.?.literal.value.string_value.?.ptr);
+            try std.testing.expectEqual(discard_argument, after[10].variable_declaration.value.?.literal.value.string_value.?.ptr);
+            try std.testing.expectEqual(@as(u256, 0), after[2].variable_declaration.value.?.literal.value.numeric_value.?);
+            try std.testing.expectEqualStrings("z", try after[9].assignment.variable_names.items[0].name.str());
+            var structure = try Structure.init(failing, "");
+            defer structure.deinit();
+            var analysis = try Analysis.analyzeStrictBlock(failing, input.dialect().*, &ast, &structure, .{});
+            defer analysis.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &source, false });
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &source, true });
+}
+
+test "full inliner reuses recursion checks and invalidates changed bodies" {
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialectModule.EVMDialect.init(allocator, .current(), false);
+    defer dialect.deinit();
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(allocator, "{ {} function f() { g() } function g() { f() } }", "recursive-inline.yul", &reporter, dialect.dialect(), .{})).?;
+    defer ast.deinit();
+    var reserved: NameCollector.NameSet = .{};
+    defer reserved.deinit(allocator);
+    var dispenser = try NameDispenser.initFromAst(allocator, dialect.dialect(), ast.root(), &reserved);
+    defer dispenser.deinit();
+    var inliner = try FullInliner.init(allocator, allocator, &ast.root_block, &dispenser, dialect.dialect());
+    defer inliner.deinit();
+    const f = inliner.lookupFunction(try YulName.init("f")).?;
+    const g = inliner.lookupFunction(try YulName.init("g")).?;
+    // A failed query must not publish a false result into the cache.
+    var rejecting = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    {
+        inliner.scratch_allocator = rejecting.allocator();
+        defer inliner.scratch_allocator = allocator;
+        try std.testing.expectError(error.OutOfMemory, inliner.recursive(f));
+        try std.testing.expectEqual(null, inliner.function_info.get(f.name).?.direct_recursive);
+    }
+    try std.testing.expect(inliner.recursive_functions.contains(.{ .user = f.name }));
+    try std.testing.expect(!try inliner.recursive(f));
+    try std.testing.expect(!try inliner.recursive(g));
+    {
+        inliner.scratch_allocator = rejecting.allocator();
+        defer inliner.scratch_allocator = allocator;
+        for (0..8) |_| {
+            try std.testing.expect(!try inliner.recursive(f));
+            try std.testing.expect(!try inliner.recursive(g));
+        }
+    }
+    // Inlining g into f turns mutual recursion into a direct self-call. The
+    // following attempt to inline f into g must observe the rewritten body.
+    try inliner.runPass(.inline_rest);
+    try std.testing.expect(try inliner.recursive(f));
+    try std.testing.expect(!try inliner.recursive(g));
+    try std.testing.expect(f.body.statements.items[0].expression_statement.expression.function_call.function_name.identifier.name.eql(f.name));
+    try std.testing.expect(g.body.statements.items[0].expression_statement.expression.function_call.function_name.identifier.name.eql(f.name));
+    {
+        inliner.scratch_allocator = rejecting.allocator();
+        defer inliner.scratch_allocator = allocator;
+        try std.testing.expect(try inliner.recursive(f));
+        try std.testing.expect(!try inliner.recursive(g));
+    }
 }

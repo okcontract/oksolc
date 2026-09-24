@@ -19,12 +19,12 @@ pub const ConditionalSimplifier = struct {
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
         var collector = try ControlFlowCollector.init(
-            context.dispenser.allocator,
+            context.scratchAllocator(),
             context.dialect,
             ast,
         );
         defer collector.deinit();
-        var named = try collector.functionSideEffectsNamed(context.dispenser.allocator);
+        var named = try collector.functionSideEffectsNamed(context.scratchAllocator());
         defer named.deinit();
         var pass: ConditionalSimplifier = .{
             .allocator = context.dispenser.allocator,
@@ -51,10 +51,11 @@ pub const ConditionalSimplifier = struct {
                         if_statement.body.statements.items.len - 1
                     ];
                     if (try finder.controlFlowKind(last) != .flow_out) {
-                        const assignment = try self.zeroAssignment(
+                        var assignment = try self.zeroAssignment(
                             condition.identifier.name,
                             if_statement.debug_data,
                         );
+                        errdefer assignment.deinit(self.allocator);
                         try block.statements.insert(self.allocator, index + 1, assignment);
                         index += 1;
                     }

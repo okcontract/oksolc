@@ -25,7 +25,12 @@ fn simplify(allocator: std.mem.Allocator, statements: *std.ArrayList(AST.Stateme
     while (index < statements.items.len) {
         if (try replacementFor(allocator, &statements.items[index])) |*replacement| {
             var owned = replacement.*;
-            defer owned.deinit(allocator);
+            defer {
+                // The source block no longer owns these detached statements.
+                // Successful insertion clears the list; errors destroy payloads.
+                for (owned.items) |*statement| statement.deinit(allocator);
+                owned.deinit(allocator);
+            }
             try simplify(allocator, &owned);
             try statements.ensureUnusedCapacity(allocator, owned.items.len);
             var removed = statements.orderedRemove(index);
