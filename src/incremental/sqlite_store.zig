@@ -394,6 +394,17 @@ pub const SqliteStore = struct {
     }
 
     pub fn deinit(self: *SqliteStore) void {
+        // Short-lived compilers often exit before the access batch fills. Keep
+        // those hits recent for the next process's admission/pruning decisions.
+        {
+            self.lock();
+            defer self.unlock();
+            // Teardown must not invoke a diagnostic callback that could reenter
+            // an owning compiler session which has already been destroyed.
+            self.flushPendingAccessesLocked() catch {
+                _ = self.maintenance_failure_count.fetchAdd(1, .monotonic);
+            };
+        }
         self.pending_accesses.deinit(self.allocator);
         self.deinitStatements();
         if (self.pending_diagnostic) |*diagnostic| diagnostic.deinit();
@@ -2263,7 +2274,7 @@ test "SQLite transaction guard rolls back an interrupted operation" {
     try std.testing.expect(try store.contains(reference));
 }
 
-test "SQLite artifact store retains recent entries across restart while pruning" {
+test "SQLite artifact store retains batched accesses across restart while pruning" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const path = try testPathAlloc(std.testing.allocator, &temporary);
@@ -2273,7 +2284,7 @@ test "SQLite artifact store retains recent entries across restart while pruning"
     const third = testReference(.creation_machine, "third");
     const options: Options = .{
         .limits = .{ .max_entries = 2, .max_bytes = 6 },
-        .access_flush_interval = 1,
+        .access_flush_interval = 128,
     };
 
     var initial = try testStoreInitWithOptions(
