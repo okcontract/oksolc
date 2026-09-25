@@ -617,6 +617,26 @@ pub const SqliteStore = struct {
             "PRAGMA temp_store=MEMORY;",
         ) catch |err| return mapInitError(err);
 
+        // Read the version and authentication from one snapshot. Only a new
+        // database needs a writer lock; existing caches can open during writes.
+        var transaction = Transaction.begin(self.lockedDatabase(), .deferred) catch |err|
+            return mapInitError(err);
+        defer transaction.rollbackUnlessCommitted();
+        if (!try self.hasCompatibleSchema()) {
+            transaction.rollback() catch |err| return mapInitError(err);
+            transaction = Transaction.begin(self.lockedDatabase(), .immediate) catch |err|
+                return mapInitError(err);
+            // Another process may have initialized the database while we
+            // waited. Schema creation and authentication must commit together.
+            if (!try self.hasCompatibleSchema()) {
+                try self.execInitQuery(.step, .create_schema, schema_sql);
+                self.storeAuthenticationVerifier() catch |err| return mapInitError(err);
+            }
+        }
+        transaction.commit() catch |err| return mapInitError(err);
+    }
+
+    fn hasCompatibleSchema(self: *SqliteStore) InitError!bool {
         const actual_application_id = self.scalarIntInit(
             .read_application_id,
             "PRAGMA application_id;",
@@ -633,20 +653,13 @@ pub const SqliteStore = struct {
                 "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%';",
             ) catch |err| return mapInitError(err);
             if (table_count != 0) return error.IncompatibleSchema;
-            // Publish the schema and authentication together so an interrupted
-            // startup cannot leave a permanently unauthenticated cache.
-            var transaction = Transaction.begin(self.lockedDatabase(), .immediate) catch |err|
-                return mapInitError(err);
-            defer transaction.rollbackUnlessCommitted();
-            try self.execInitQuery(.step, .create_schema, schema_sql);
-            self.storeAuthenticationVerifier() catch |err| return mapInitError(err);
-            transaction.commit() catch |err| return mapInitError(err);
-            return;
+            return false;
         }
         if (actual_application_id != application_id) return error.IncompatibleSchema;
         if (actual_schema_version > schema_version) return error.NewerSchema;
         if (actual_schema_version != schema_version) return error.IncompatibleSchema;
         self.verifyAuthentication() catch |err| return mapInitError(err);
+        return true;
     }
 
     fn storeAuthenticationVerifier(self: *SqliteStore) StoreError!void {
@@ -1855,6 +1868,42 @@ test "SQLite initialization rolls back the schema if authentication cannot be wr
     try std.testing.expectEqual(@as(i64, 0), try store.scalarIntInit(.ad_hoc, "PRAGMA user_version;"));
     try std.testing.expectEqual(@as(i64, 0), try store.scalarIntInit(.ad_hoc, "SELECT count(*) FROM sqlite_schema WHERE type='table';"));
     try store.initializeSchema();
+    try store.verifyAuthentication();
+}
+
+test "SQLite initialization rechecks a database created by another connection" {
+    const Injection = struct {
+        path: []const u8,
+        ran: bool = false,
+        failure: ?anyerror = null,
+
+        fn authorize(context: ?*anyopaque, action: c_int, pragma: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (!self.ran and action == sqlite.SQLITE_PRAGMA and pragma != null and std.mem.eql(u8, std.mem.span(pragma), "user_version")) {
+                self.ran = true;
+                var peer = testStoreInit(std.testing.allocator, std.testing.io, self.path) catch |err| {
+                    self.failure = err;
+                    return sqlite.SQLITE_DENY;
+                };
+                peer.deinit();
+            }
+            return sqlite.SQLITE_OK;
+        }
+    };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try testPathAlloc(std.testing.allocator, &temporary);
+    defer std.testing.allocator.free(path);
+    const path_z = try std.testing.allocator.dupeSentinel(u8, path, 0);
+    defer std.testing.allocator.free(path_z);
+    var store = try testUninitializedStore(path_z);
+    defer store.deinit();
+    var injection: Injection = .{ .path = path };
+    try std.testing.expectEqual(sqlite.SQLITE_OK, sqlite.sqlite3_set_authorizer(store.database, Injection.authorize, &injection));
+    defer _ = sqlite.sqlite3_set_authorizer(store.database, null, null);
+    try store.initializeSchema();
+    try std.testing.expect(injection.ran);
+    try std.testing.expect(injection.failure == null);
     try store.verifyAuthentication();
 }
 

@@ -3,6 +3,7 @@
 # Copyright (C) 2026 OKcontract Pte. Ltd.
 """Exercise persistent-cache deletion, restart, recovery and concurrent startup."""
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -114,8 +115,21 @@ def run(binary):
             assert sql.execute('PRAGMA user_version').fetchone()[0] == 999
         assert not list(database.parent.glob('artifacts.sqlite.rejected-*'))
 
+        # Every cold-start contender must compile correctly, including after clean.
+        clean()
+        requests = [request(f'C{index}') for index in range(8)]
+        outputs = [compile(body, '--no-cache') for body in requests]
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            assert list(workers.map(compile, requests)) == outputs
+        assert stats()['entries'] > 0
+        assert not list(database.parent.glob('artifacts.sqlite.rejected-*'))
+        with sqlite3.connect(database) as sql:
+            assert sql.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        for body, output in zip(requests, outputs):
+            assert compile(body) == output
+
     print('cache lifecycle: clean/restart, opt-outs, pruning, zero limits, corruption, '
-          'incomplete initialization and trust isolation passed')
+          'incomplete initialization, trust isolation, concurrent startup passed')
 
 
 if __name__ == '__main__':
