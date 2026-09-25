@@ -314,6 +314,11 @@ fn foundryStandardJsonCommand(
     allow_paths: ?[]const u8,
     no_cache: bool,
 ) !void {
+    // Forge finishes writing stdin before it collects our exit status/stderr.
+    // Consume the request before fallible startup work so a configuration or
+    // cache-key error is not masked by a BrokenPipe in the parent process.
+    const input = try readInputAlloc(init, "-");
+    defer init.gpa.free(input);
     try validateSourcePathArguments(base_path, include_paths);
     var parallel_options = try resolveParallelOptions(
         init,
@@ -323,8 +328,6 @@ fn foundryStandardJsonCommand(
         no_cache,
     );
     defer parallel_options.deinit();
-    const input = try readInputAlloc(init, "-");
-    defer init.gpa.free(input);
     try compileAndWrite(
         init,
         input,

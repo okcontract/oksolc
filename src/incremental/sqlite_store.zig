@@ -121,7 +121,6 @@ pub const DiagnosticSink = struct {
 };
 
 const schema_sql =
-    \\BEGIN IMMEDIATE;
     \\CREATE TABLE IF NOT EXISTS artifact(
     \\    kind INTEGER NOT NULL,
     \\    key BLOB NOT NULL CHECK(length(key)=32),
@@ -174,7 +173,6 @@ const schema_sql =
     \\ON artifact(used_epoch,created_epoch,kind,key);
     \\PRAGMA application_id=0x5a534f4c;
     \\PRAGMA user_version=2;
-    \\COMMIT;
 ;
 
 const StoredArtifact = struct {
@@ -396,6 +394,17 @@ pub const SqliteStore = struct {
     }
 
     pub fn deinit(self: *SqliteStore) void {
+        // Short-lived compilers often exit before the access batch fills. Keep
+        // those hits recent for the next process's admission/pruning decisions.
+        {
+            self.lock();
+            defer self.unlock();
+            // Teardown must not invoke a diagnostic callback that could reenter
+            // an owning compiler session which has already been destroyed.
+            self.flushPendingAccessesLocked() catch {
+                _ = self.maintenance_failure_count.fetchAdd(1, .monotonic);
+            };
+        }
         self.pending_accesses.deinit(self.allocator);
         self.deinitStatements();
         if (self.pending_diagnostic) |*diagnostic| diagnostic.deinit();
@@ -619,6 +628,26 @@ pub const SqliteStore = struct {
             "PRAGMA temp_store=MEMORY;",
         ) catch |err| return mapInitError(err);
 
+        // Read the version and authentication from one snapshot. Only a new
+        // database needs a writer lock; existing caches can open during writes.
+        var transaction = Transaction.begin(self.lockedDatabase(), .deferred) catch |err|
+            return mapInitError(err);
+        defer transaction.rollbackUnlessCommitted();
+        if (!try self.hasCompatibleSchema()) {
+            transaction.rollback() catch |err| return mapInitError(err);
+            transaction = Transaction.begin(self.lockedDatabase(), .immediate) catch |err|
+                return mapInitError(err);
+            // Another process may have initialized the database while we
+            // waited. Schema creation and authentication must commit together.
+            if (!try self.hasCompatibleSchema()) {
+                try self.execInitQuery(.step, .create_schema, schema_sql);
+                self.storeAuthenticationVerifier() catch |err| return mapInitError(err);
+            }
+        }
+        transaction.commit() catch |err| return mapInitError(err);
+    }
+
+    fn hasCompatibleSchema(self: *SqliteStore) InitError!bool {
         const actual_application_id = self.scalarIntInit(
             .read_application_id,
             "PRAGMA application_id;",
@@ -635,15 +664,13 @@ pub const SqliteStore = struct {
                 "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%';",
             ) catch |err| return mapInitError(err);
             if (table_count != 0) return error.IncompatibleSchema;
-            self.execInitQuery(.step, .create_schema, schema_sql) catch |err|
-                return mapInitError(err);
-            self.storeAuthenticationVerifier() catch |err| return mapInitError(err);
-            return;
+            return false;
         }
         if (actual_application_id != application_id) return error.IncompatibleSchema;
         if (actual_schema_version > schema_version) return error.NewerSchema;
         if (actual_schema_version != schema_version) return error.IncompatibleSchema;
         self.verifyAuthentication() catch |err| return mapInitError(err);
+        return true;
     }
 
     fn storeAuthenticationVerifier(self: *SqliteStore) StoreError!void {
@@ -663,7 +690,10 @@ pub const SqliteStore = struct {
             "SELECT verifier FROM cache_authentication WHERE singleton=1;",
         );
         defer statement.deinit();
-        if (try statement.step() != .row) return error.AuthenticationFailed;
+        // Older versions could commit the schema before inserting this row.
+        // An absent verifier is incomplete storage and can be quarantined;
+        // a present verifier from another key remains an authentication error.
+        if (try statement.step() != .row) return error.Corrupt;
         const stored = try statement.columnAuthenticationTag(0);
         if (try statement.step() != .done) return error.AuthenticationFailed;
         const expected = databaseAuthentication(self.authentication_key);
@@ -1812,6 +1842,82 @@ fn testReference(kind: ArtifactKind, label: []const u8) ArtifactRef {
     return .{ .kind = kind, .key = builder.finish() };
 }
 
+fn testUninitializedStore(path: [:0]const u8) !SqliteStore {
+    var database: ?*sqlite.sqlite3 = null;
+    const status = sqlite.sqlite3_open_v2(path.ptr, &database, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, null);
+    if (status != sqlite.SQLITE_OK) {
+        if (database) |handle| _ = sqlite.sqlite3_close_v2(handle);
+        return mapInitStatus(status);
+    }
+    const options: Options = .{};
+    return .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .database = database.?,
+        .authentication_key = test_authentication_key,
+        .limits = options.limits,
+        .access_flush_interval = options.access_flush_interval,
+        .max_pending_accesses = options.max_pending_accesses,
+        .diagnostic_sink = null,
+    };
+}
+
+test "SQLite initialization rolls back the schema if authentication cannot be written" {
+    const Injection = struct {
+        fn authorize(_: ?*anyopaque, action: c_int, table: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            if (action == sqlite.SQLITE_INSERT and table != null and std.mem.eql(u8, std.mem.span(table), "cache_authentication"))
+                return sqlite.SQLITE_DENY;
+            return sqlite.SQLITE_OK;
+        }
+    };
+    var store = try testUninitializedStore(":memory:");
+    defer store.deinit();
+    try std.testing.expectEqual(sqlite.SQLITE_OK, sqlite.sqlite3_set_authorizer(store.database, Injection.authorize, null));
+    try std.testing.expectError(error.Unavailable, store.initializeSchema());
+    try std.testing.expectEqual(sqlite.SQLITE_OK, sqlite.sqlite3_set_authorizer(store.database, null, null));
+    try std.testing.expectEqual(@as(i64, 0), try store.scalarIntInit(.ad_hoc, "PRAGMA application_id;"));
+    try std.testing.expectEqual(@as(i64, 0), try store.scalarIntInit(.ad_hoc, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try store.scalarIntInit(.ad_hoc, "SELECT count(*) FROM sqlite_schema WHERE type='table';"));
+    try store.initializeSchema();
+    try store.verifyAuthentication();
+}
+
+test "SQLite initialization rechecks a database created by another connection" {
+    const Injection = struct {
+        path: []const u8,
+        ran: bool = false,
+        failure: ?anyerror = null,
+
+        fn authorize(context: ?*anyopaque, action: c_int, pragma: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (!self.ran and action == sqlite.SQLITE_PRAGMA and pragma != null and std.mem.eql(u8, std.mem.span(pragma), "user_version")) {
+                self.ran = true;
+                var peer = testStoreInit(std.testing.allocator, std.testing.io, self.path) catch |err| {
+                    self.failure = err;
+                    return sqlite.SQLITE_DENY;
+                };
+                peer.deinit();
+            }
+            return sqlite.SQLITE_OK;
+        }
+    };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try testPathAlloc(std.testing.allocator, &temporary);
+    defer std.testing.allocator.free(path);
+    const path_z = try std.testing.allocator.dupeSentinel(u8, path, 0);
+    defer std.testing.allocator.free(path_z);
+    var store = try testUninitializedStore(path_z);
+    defer store.deinit();
+    var injection: Injection = .{ .path = path };
+    try std.testing.expectEqual(sqlite.SQLITE_OK, sqlite.sqlite3_set_authorizer(store.database, Injection.authorize, &injection));
+    defer _ = sqlite.sqlite3_set_authorizer(store.database, null, null);
+    try store.initializeSchema();
+    try std.testing.expect(injection.ran);
+    try std.testing.expect(injection.failure == null);
+    try store.verifyAuthentication();
+}
+
 test "SQLite artifact store identifies authenticated cache format v2" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -2168,7 +2274,7 @@ test "SQLite transaction guard rolls back an interrupted operation" {
     try std.testing.expect(try store.contains(reference));
 }
 
-test "SQLite artifact store retains recent entries across restart while pruning" {
+test "SQLite artifact store retains batched accesses across restart while pruning" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const path = try testPathAlloc(std.testing.allocator, &temporary);
@@ -2178,7 +2284,7 @@ test "SQLite artifact store retains recent entries across restart while pruning"
     const third = testReference(.creation_machine, "third");
     const options: Options = .{
         .limits = .{ .max_entries = 2, .max_bytes = 6 },
-        .access_flush_interval = 1,
+        .access_flush_interval = 128,
     };
 
     var initial = try testStoreInitWithOptions(
