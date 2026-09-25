@@ -128,8 +128,36 @@ def run(binary):
         for body, output in zip(requests, outputs):
             assert compile(body) == output
 
+        # Forge writes the request before waiting for the compiler's exit status.
+        # Early configuration failures must not close stdin and hide their real
+        # diagnostic behind a BrokenPipe error in the parent process.
+        for configuration, extra_env, diagnostic in (
+            ('cache = true\njobs = 4\n', {}, b'JobsRequireParallel'),
+            ('cache = "invalid"\n', {}, b'InvalidProjectConfig'),
+            ('cache = true\n', {'OKSOLC_CACHE_AUTH_KEY': 'invalid'}, b'InvalidCacheAuthenticationKey'),
+        ):
+            (config / 'config.toml').write_text(configuration)
+            process = subprocess.Popen([binary, '--standard-json', '--base-path', str(project)],
+                                       cwd=project, env={**env, **extra_env}, stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            broken_pipe = False
+            try:
+                # Substantially larger than a pipe buffer, as real Forge inputs are.
+                process.stdin.write(request() + b' ' * (1024 * 1024))
+                process.stdin.close()
+            except BrokenPipeError:
+                broken_pipe = True
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+            process.stdin = None
+            _, errors = process.communicate(timeout=40)
+            assert process.returncode != 0 and diagnostic in errors, errors
+            assert not broken_pipe, (diagnostic, errors)
+
     print('cache lifecycle: clean/restart, opt-outs, pruning, zero limits, corruption, '
-          'incomplete initialization, trust isolation, concurrent startup passed')
+          'incomplete initialization, trust isolation, concurrent startup and startup diagnostics passed')
 
 
 if __name__ == '__main__':
