@@ -13,11 +13,25 @@ const Instruction = @import("../../libevmasm/instruction.zig").Instruction;
 const Token = @import("../../liblangutil/token.zig");
 
 pub fn removeEmptyBlocks(allocator: std.mem.Allocator, block: *AST.Block) void {
+    removeStatementsIf(allocator, block, {}, struct {
+        fn isEmpty(_: void, statement: *const AST.Statement) bool {
+            return statement.* == .block and statement.block.statements.items.len == 0;
+        }
+    }.isEmpty);
+}
+
+fn removeStatementsIf(
+    allocator: std.mem.Allocator,
+    block: *AST.Block,
+    context: anytype,
+    comptime predicate: fn (@TypeOf(context), *const AST.Statement) bool,
+) void {
     var write_index: usize = 0;
     const original_len = block.statements.items.len;
     for (0..original_len) |read_index| {
         const statement = &block.statements.items[read_index];
-        if (statement.* == .block and statement.block.statements.items.len == 0) {
+        // Address-based predicates must see the original slot before it moves.
+        if (predicate(context, statement)) {
             statement.deinit(allocator);
             statement.* = emptyStatement();
             continue;
@@ -67,29 +81,17 @@ pub const StatementRemover = struct {
         block: *AST.Block,
         to_remove: *const StatementSet,
     ) !void {
+        if (to_remove.count() == 0) return;
         var remover: StatementRemover = .{ .allocator = allocator, .to_remove = to_remove };
         try remover.visitBlock(block);
     }
 
     fn visitBlock(self: *StatementRemover, block: *AST.Block) anyerror!void {
-        var replacement: std.ArrayList(AST.Statement) = .empty;
-        errdefer {
-            for (replacement.items) |*statement| statement.deinit(self.allocator);
-            replacement.deinit(self.allocator);
-        }
-        try replacement.ensureTotalCapacity(self.allocator, block.statements.items.len);
-        for (block.statements.items) |*statement| {
-            if (self.to_remove.contains(statement)) {
-                statement.deinit(self.allocator);
-                statement.* = emptyStatement();
-            } else {
-                replacement.appendAssumeCapacity(statement.*);
-                statement.* = emptyStatement();
+        removeStatementsIf(self.allocator, block, self.to_remove, struct {
+            fn isSelected(selected: *const StatementSet, statement: *const AST.Statement) bool {
+                return selected.contains(statement);
             }
-        }
-        block.statements.deinit(self.allocator);
-        block.statements = replacement;
-        replacement = .empty;
+        }.isSelected);
         for (block.statements.items) |*statement| try self.visitStatement(statement);
     }
 
@@ -131,4 +133,50 @@ test "optimizer utilities identify restricted names and remove selected statemen
     try block.statements.append(allocator, .{ .break_statement = .{} });
     removeEmptyBlocks(allocator, &block);
     try std.testing.expectEqual(@as(usize, 1), block.statements.items.len);
+}
+
+test "statement remover preserves buffers and original address selection without allocations" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Printer = @import("../asm_printer.zig").AsmPrinter;
+    const allocator = std.testing.allocator;
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(
+        allocator,
+        "{ pop(0) if 1 { pop(1) pop(2) } pop(3) { pop(4) pop(5) } for {} 0 {} { pop(6) } }",
+        "remove.yul",
+        &reporter,
+        .{},
+        .{},
+    )).?;
+    defer ast.deinit();
+    var selected = StatementSet.init(allocator);
+    defer selected.deinit();
+    var rejecting = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const original = ast.root_block.statements.items;
+    try StatementRemover.run(rejecting.allocator(), &ast.root_block, &selected);
+    try std.testing.expect(original.ptr == ast.root_block.statements.items.ptr);
+    try std.testing.expectEqual(original.len, ast.root_block.statements.items.len);
+
+    const if_body = original[1].if_statement.body.statements.items.ptr;
+    try selected.put(&original[0], {});
+    try selected.put(&original[1].if_statement.body.statements.items[0], {});
+    try selected.put(&original[2], {});
+    // Deleting an ancestor must not revisit a selected, already freed child.
+    try selected.put(&original[3], {});
+    try selected.put(&original[3].block.statements.items[0], {});
+    try selected.put(&original[4].for_loop.body.statements.items[0], {});
+    try StatementRemover.run(rejecting.allocator(), &ast.root_block, &selected);
+    try std.testing.expect(!rejecting.has_induced_failure);
+    try std.testing.expect(original.ptr == ast.root_block.statements.items.ptr);
+    try std.testing.expectEqual(@as(usize, 2), ast.root_block.statements.items.len);
+    try std.testing.expect(if_body == ast.root_block.statements.items[0].if_statement.body.statements.items.ptr);
+    var expected = (try Parser.parseSource(allocator, "{ if 1 { pop(2) } for {} 0 {} {} }", "remove.yul", &reporter, .{}, .{})).?;
+    defer expected.deinit();
+    const actual_text = try Printer.formatDefault(allocator, &ast);
+    defer allocator.free(actual_text);
+    const expected_text = try Printer.formatDefault(allocator, &expected);
+    defer allocator.free(expected_text);
+    try std.testing.expectEqualStrings(expected_text, actual_text);
 }

@@ -16,11 +16,9 @@ const DebugSettings = @import("../interface/debug_settings.zig");
 const CollectorModule = @import("multi_use_yul_function_collector.zig");
 const YulUtilFunctionsModule = @import("yul_util_functions.zig");
 const Numeric = @import("../../libsolutil/numeric.zig");
-const CommonData = @import("../../libsolutil/common_data.zig");
+const Yul = @import("../../libyul/ast.zig");
+const Generated = @import("../../libyul/generated_code.zig");
 
-const interface_address = Types.Type{ .payload = .{ .Address = .{
-    .state_mutability = .NonPayable,
-} } };
 const interface_uint8 = Types.Type{ .payload = .{ .Integer = .{
     .bits = 8,
     .modifier = .Unsigned,
@@ -143,66 +141,31 @@ pub const ABIFunctions = struct {
             ) catch return error.Overflow;
         }
 
-        const parameters = try variableListAlloc(
-            self.allocator,
-            "value",
-            stack_size,
-            reversed,
-        );
-        defer self.allocator.free(parameters);
-        var code: std.ArrayList(u8) = .empty;
-        defer code.deinit(self.allocator);
-        try code.print(
-            self.allocator,
-            "\nfunction {s}(headStart {s}{s}) -> tail {{\ntail := add(headStart, {d})\n",
-            .{
-                name.items,
-                if (parameters.len == 0) "" else ", ",
-                parameters,
-                head_size,
-            },
-        );
+        const generator = try self.function_collector.generator(self.evm_version);
+        const parameters = try generator.indexedNames("value", stack_size);
+        var body: Generated.Buffer = .{ .generator = generator };
+        try body.add("tail := add(headStart, @0)", .{head_size});
         var head_position: usize = 0;
         var stack_position: usize = 0;
         for (given_types, encoded_targets) |given, target| {
             const stack_words = try TypeBehavior.sizeOnStack(given);
-            const values = try variableRangeAlloc(
-                self.allocator,
-                "value",
-                stack_position,
-                stack_position + stack_words,
-            );
-            defer self.allocator.free(values);
+            const values = parameters[stack_position..][0..stack_words];
             const encoder = try self.abiEncodingFunction(given, target, options);
             defer self.allocator.free(encoder);
             if (TypeBehavior.isDynamicallyEncoded(target))
-                try code.print(
-                    self.allocator,
-                    "\nmstore(add(headStart, {d}), sub(tail, headStart))\ntail := {s}({s}{s} tail)\n",
-                    .{
-                        head_position,
-                        encoder,
-                        values,
-                        if (values.len == 0) "" else ", ",
-                    },
-                )
+                try body.add("mstore(add(headStart, @0), sub(tail, headStart)) tail := @1(@2, tail)", .{ head_position, encoder, values })
             else
-                try code.print(
-                    self.allocator,
-                    "\n{s}({s}{s} add(headStart, {d}))\n",
-                    .{
-                        encoder,
-                        values,
-                        if (values.len == 0) "" else ", ",
-                        head_position,
-                    },
-                );
+                try body.add("@0(@1, add(headStart, @2))", .{ encoder, values, head_position });
             head_position += try TypeBehavior.calldataHeadSize(target);
             stack_position += stack_words;
         }
         if (head_position != head_size) return error.InvalidTypeList;
-        try code.appendSlice(self.allocator, "\n}\n");
-        try self.function_collector.finishFunction(name.items, code.items);
+        const code = try generator.functionDefinition(
+            "function @0(headStart, @1) -> tail { @2 }",
+            .{ name.items, parameters, body.take() },
+        );
+        if (reversed) std.mem.reverse(Yul.NameWithDebugData, code.parameters.items[1..]);
+        try self.function_collector.finishGeneratedFunction(name.items, code);
         return self.function_collector.copyFunctionName(name.items);
     }
 
@@ -264,59 +227,30 @@ pub const ABIFunctions = struct {
                 stack_size,
                 try TypeBehavior.sizeOnStack(given),
             ) catch return error.Overflow;
-        const parameters = try variableListAlloc(
-            self.allocator,
-            "value",
-            stack_size,
-            reversed,
-        );
-        defer self.allocator.free(parameters);
-        var code: std.ArrayList(u8) = .empty;
-        defer code.deinit(self.allocator);
-        try code.print(
-            self.allocator,
-            "\nfunction {s}(pos{s}{s}) -> end {{\n",
-            .{
-                name.items,
-                if (parameters.len == 0) "" else ", ",
-                parameters,
-            },
-        );
+        const generator = try self.function_collector.generator(self.evm_version);
+        const parameters = try generator.indexedNames("value", stack_size);
+        var body: Generated.Buffer = .{ .generator = generator };
         var stack_position: usize = 0;
         for (given_types, encoded_targets) |given, target| {
             const stack_words = try TypeBehavior.sizeOnStack(given);
-            const values = try variableRangeAlloc(
-                self.allocator,
-                "value",
-                stack_position,
-                stack_position + stack_words,
-            );
-            defer self.allocator.free(values);
+            const values = parameters[stack_position..][0..stack_words];
             const encoder = try self.abiEncodingFunction(given, target, options);
             defer self.allocator.free(encoder);
             if (TypeBehavior.isDynamicallyEncoded(target))
-                try code.print(
-                    self.allocator,
-                    "\npos := {s}({s}{s} pos)\n",
-                    .{ encoder, values, if (values.len == 0) "" else ", " },
-                )
+                try body.add("pos := @0(@1, pos)", .{ encoder, values })
             else {
                 const encoded_size = try TypeBehavior.calldataEncodedSize(target, false);
-                try code.print(
-                    self.allocator,
-                    "\n{s}({s}{s} pos)\npos := add(pos, {d})\n",
-                    .{
-                        encoder,
-                        values,
-                        if (values.len == 0) "" else ", ",
-                        encoded_size,
-                    },
-                );
+                try body.add("@0(@1, pos) pos := add(pos, @2)", .{ encoder, values, encoded_size });
             }
             stack_position += stack_words;
         }
-        try code.appendSlice(self.allocator, "\nend := pos\n}\n");
-        try self.function_collector.finishFunction(name.items, code.items);
+        try body.add("end := pos", .{});
+        const code = try generator.functionDefinition(
+            "function @0(pos, @1) -> end { @2 }",
+            .{ name.items, parameters, body.take() },
+        );
+        if (reversed) std.mem.reverse(Yul.NameWithDebugData, code.parameters.items[1..]);
+        try self.function_collector.finishGeneratedFunction(name.items, code);
         return self.function_collector.copyFunctionName(name.items);
     }
 
@@ -361,30 +295,14 @@ pub const ABIFunctions = struct {
                 try TypeBehavior.calldataHeadSize(decoding),
             ) catch return error.Overflow;
         }
-        const returns = try variableListAlloc(
-            self.allocator,
-            "value",
-            return_count,
-            false,
-        );
-        defer self.allocator.free(returns);
+        const generator = try self.function_collector.generator(self.evm_version);
+        const returns = try generator.indexedNames("value", return_count);
         const short_revert = try self.utils.revertReasonIfDebugFunction(
             "ABI decoding: tuple data too short",
         );
         defer self.allocator.free(short_revert);
-        var code: std.ArrayList(u8) = .empty;
-        defer code.deinit(self.allocator);
-        try code.print(
-            self.allocator,
-            "\nfunction {s}(headStart, dataEnd) {s} {s} {{\nif slt(sub(dataEnd, headStart), {d}) {{ {s}() }}\n",
-            .{
-                name.items,
-                if (returns.len == 0) "" else "->",
-                returns,
-                minimum_size,
-                short_revert,
-            },
-        );
+        var body: Generated.Buffer = .{ .generator = generator };
+        try body.add("if slt(sub(dataEnd, headStart), @0) { @1() }", .{ minimum_size, short_revert });
         var head_position: usize = 0;
         var stack_position: usize = 0;
         for (types, decoding_types) |type_ref, decoding| {
@@ -393,38 +311,18 @@ pub const ABIFunctions = struct {
             );
             defer self.allocator.free(invalid_offset_revert);
             const stack_words = try TypeBehavior.sizeOnStack(type_ref);
-            const values = try variableRangeAlloc(
-                self.allocator,
-                "value",
-                stack_position,
-                stack_position + stack_words,
-            );
-            defer self.allocator.free(values);
+            const values = returns[stack_position..][0..stack_words];
             const decoder = try self.abiDecodingFunction(type_ref, from_memory, true);
             defer self.allocator.free(decoder);
             if (TypeBehavior.isDynamicallyEncoded(decoding))
-                try code.print(
-                    self.allocator,
-                    "\n{{\n\nlet offset := {s}(add(headStart, {d}))\nif gt(offset, 0xffffffffffffffff) {{ {s}() }}\n\n{s} := {s}(add(headStart, offset), dataEnd)\n}}\n",
-                    .{
-                        if (from_memory) "mload" else "calldataload",
-                        head_position,
-                        invalid_offset_revert,
-                        values,
-                        decoder,
-                    },
-                )
+                try body.add("{ let offset := @0(add(headStart, @1)) if gt(offset, 0xffffffffffffffff) { @2() } @3 := @4(add(headStart, offset), dataEnd) }", .{ if (from_memory) "mload" else "calldataload", head_position, invalid_offset_revert, values, decoder })
             else
-                try code.print(
-                    self.allocator,
-                    "\n{{\n\nlet offset := {d}\n\n{s} := {s}(add(headStart, offset), dataEnd)\n}}\n",
-                    .{ head_position, values, decoder },
-                );
+                try body.add("{ let offset := @0 @1 := @2(add(headStart, offset), dataEnd) }", .{ head_position, values, decoder });
             head_position += try TypeBehavior.calldataHeadSize(decoding);
             stack_position += stack_words;
         }
-        try code.appendSlice(self.allocator, "\n}\n");
-        try self.function_collector.finishFunction(name.items, code.items);
+        const code = try generator.functionDefinition("function @0(headStart, dataEnd) -> @1 { @2 }", .{ name.items, returns, body.take() });
+        try self.function_collector.finishGeneratedFunction(name.items, code);
         return self.function_collector.copyFunctionName(name.items);
     }
 
@@ -519,48 +417,44 @@ pub const ABIFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
+        const generator = try self.function_collector.generator(self.evm_version);
         var cleanup_expression = if (TypeBehavior.dataStoredIn(given_type, .Storage)) blk: {
             if (!options.encode_as_library_types or !options.padded or
                 options.dynamic_inplace or
                 !TypeBehavior.equals(target_type, self.type_provider.uint256()))
                 return error.InvalidType;
-            break :blk try self.allocator.dupe(u8, "value");
+            break :blk try generator.identifier("value");
         } else if (TypeBehavior.equals(given_type, target_type)) blk: {
             const cleanup = try self.utils.cleanupFunction(given_type);
             defer self.allocator.free(cleanup);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}(value)",
+            break :blk try generator.expression(
+                "@0(value)",
                 .{cleanup},
             );
         } else blk: {
             const conversion = try self.utils.conversionFunction(given_type, target_type);
             defer self.allocator.free(conversion);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}(value)",
+            break :blk try generator.expression(
+                "@0(value)",
                 .{conversion},
             );
         };
-        defer self.allocator.free(cleanup_expression);
+
         if (!options.padded) {
             const align_function = try self.utils.leftAlignFunction(target_type);
             defer self.allocator.free(align_function);
             const unaligned = cleanup_expression;
-            cleanup_expression = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})",
+            cleanup_expression = try generator.expression(
+                "@0(@1)",
                 .{ align_function, unaligned },
             );
-            self.allocator.free(unaligned);
         }
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value, pos) {{\nmstore(pos, {s})\n}}\n",
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value, pos) {\nmstore(pos, @1)\n}\n",
             .{ name, cleanup_expression },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -591,50 +485,18 @@ pub const ABIFunctions = struct {
             target_type,
             options.encode_as_library_types,
         );
-        const values = try variableListAlloc(
-            self.allocator,
-            "value",
-            try self.numVariablesForType(given_type, options),
-            false,
-        );
-        defer self.allocator.free(values);
+        const generator = try self.function_collector.generator(self.evm_version);
+        const values = try generator.indexedNames("value", try self.numVariablesForType(given_type, options));
         const code = if (TypeBehavior.isDynamicallyEncoded(target_encoding))
-            try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}({s}{s}pos) -> updatedPos {{\nupdatedPos := {s}({s}{s}pos)\n}}\n",
-                .{
-                    name,
-                    values,
-                    if (values.len == 0) "" else ", ",
-                    encoder,
-                    values,
-                    if (values.len == 0) "" else ", ",
-                },
-            )
+            try generator.functionDefinition("function @0(@1, pos) -> updatedPos { updatedPos := @2(@1, pos) }", .{ name, values, encoder })
         else blk: {
-            const size = try TypeBehavior.calldataEncodedSize(
-                target_encoding,
-                options.padded,
-            );
+            const size = try TypeBehavior.calldataEncodedSize(target_encoding, options.padded);
             if (size == 0) return error.InvalidType;
             const size_text = try compactHex(self.allocator, size);
             defer self.allocator.free(size_text);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}({s}{s}pos) -> updatedPos {{\n{s}({s}{s}pos)\nupdatedPos := add(pos, {s})\n}}\n",
-                .{
-                    name,
-                    values,
-                    if (values.len == 0) "" else ", ",
-                    encoder,
-                    values,
-                    if (values.len == 0) "" else ", ",
-                    size_text,
-                },
-            );
+            break :blk try generator.functionDefinition("function @0(@1, pos) -> updatedPos { @2(@1, pos) updatedPos := add(pos, @3) }", .{ name, values, encoder, try generator.numberToken(size_text) });
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -657,17 +519,17 @@ pub const ABIFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const body = if (array.isDynamicallySized() and !options.dynamic_inplace)
-            "mstore(pos, length)\nupdated_pos := add(pos, 0x20)"
+            try generator.statements("mstore(pos, length) updated_pos := add(pos, 0x20)", .{})
         else
-            "updated_pos := pos";
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(pos, length) -> updated_pos {{\n{s}\n}}\n",
+            try generator.statements("updated_pos := pos", .{});
+        const code = try generator.functionDefinition(
+            "\nfunction @0(pos, length) -> updated_pos {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -700,26 +562,14 @@ pub const ABIFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
-        const readable_from = try TypeBehavior.toStringAlloc(
-            self.allocator,
-            from_type,
-            true,
-        );
-        defer self.allocator.free(readable_from);
-        const readable_to = try TypeBehavior.toStringAlloc(
-            self.allocator,
-            to_type,
-            true,
-        );
-        defer self.allocator.free(readable_to);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (from.isDynamicallySized()) blk: {
             const store_length = try self.arrayStoreLengthForEncodingFunction(
                 to_type,
                 options,
             );
             defer self.allocator.free(store_length);
-            var scale: std.ArrayList(u8) = .empty;
-            defer scale.deinit(self.allocator);
+            var scale: Generated.Buffer = .{ .generator = generator };
             if (!from.isByteArrayOrString() and from_stride != 1) {
                 const maximum = std.math.maxInt(u256) / @as(u256, from_stride);
                 const maximum_text = try compactHex(self.allocator, maximum);
@@ -730,10 +580,9 @@ pub const ABIFunctions = struct {
                     "ABI encoding: array data too long",
                 );
                 defer self.allocator.free(revert);
-                try scale.print(
-                    self.allocator,
-                    "if gt(length, {s}) {{ {s}() }}\nlength := mul(length, {s})",
-                    .{ maximum_text, revert, stride_text },
+                try scale.add(
+                    "if gt(length, @0) { @1() }\nlength := mul(length, @2)",
+                    .{ try generator.numberToken(maximum_text), revert, try generator.numberToken(stride_text) },
                 );
             }
             const copy = try self.utils.copyToMemoryFunction(
@@ -744,22 +593,18 @@ pub const ABIFunctions = struct {
             const length_padded = if (options.padded and from.isByteArrayOrString()) pad: {
                 const round = try self.utils.roundUpFunction();
                 defer self.allocator.free(round);
-                break :pad try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}(length)",
+                break :pad try generator.expression(
+                    "@0(length)",
                     .{round},
                 );
-            } else try self.allocator.dupe(u8, "length");
-            defer self.allocator.free(length_padded);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\n// {s} -> {s}\nfunction {s}(start, length, pos) -> end {{\npos := {s}(pos, length)\n{s}\n{s}(start, pos, length)\nend := add(pos, {s})\n}}\n",
+            } else try generator.identifier("length");
+
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(start, length, pos) -> end {\npos := @1(pos, length)\n@2\n@3(start, pos, length)\nend := add(pos, @4)\n}\n",
                 .{
-                    readable_from,
-                    readable_to,
                     name,
                     store_length,
-                    scale.items,
+                    scale.take(),
                     copy,
                     length_padded,
                 },
@@ -778,14 +623,13 @@ pub const ABIFunctions = struct {
                 from.isByteArrayOrString(),
             );
             defer self.allocator.free(copy);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\n// {s} -> {s}\nfunction {s}(start, pos) {{\n{s}(start, pos, {s})\n}}\n",
-                .{ readable_from, readable_to, name, copy, byte_length_text },
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(start, pos) {\n@1(start, pos, @2)\n}\n",
+                .{ name, copy, try generator.numberToken(byte_length_text) },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -813,19 +657,19 @@ pub const ABIFunctions = struct {
         defer self.allocator.free(store_length);
         const copy = try self.utils.copyToMemoryFunction(false, true);
         defer self.allocator.free(copy);
+        const generator = try self.function_collector.generator(self.evm_version);
         const padded = if (options.padded) blk: {
             const round = try self.utils.roundUpFunction();
             defer self.allocator.free(round);
-            break :blk try std.fmt.allocPrint(self.allocator, "{s}(length)", .{round});
-        } else try self.allocator.dupe(u8, "length");
-        defer self.allocator.free(padded);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value, pos) -> end {{\nlet length := {s}(value)\npos := {s}(pos, length)\n{s}(add(value, 0x20), pos, length)\nend := add(pos, {s})\n}}\n",
+            break :blk try generator.expression("@0(length)", .{round});
+        } else try generator.identifier("length");
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value, pos) -> end {\nlet length := @1(value)\npos := @2(pos, length)\n@3(add(value, 0x20), pos, length)\nend := add(pos, @4)\n}\n",
             .{ name, length_function, store_length, copy, padded },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -855,28 +699,22 @@ pub const ABIFunctions = struct {
         var sub_options = options;
         sub_options.encode_function_from_stack = false;
         sub_options.padded = true;
+        const generator = try self.function_collector.generator(self.evm_version);
         const element_count = try self.numVariablesForType(from.base_type, sub_options);
-        const element_values = try variableListAlloc(
-            self.allocator,
-            "elementValue",
-            element_count,
-            false,
-        );
-        defer self.allocator.free(element_values);
+        const element_values = try generator.indexedNames("elementValue", element_count);
         const length_as_argument = from.reference.location == .CallData and
             from.isDynamicallySized();
         const length_declaration = if (length_as_argument)
-            try self.allocator.alloc(u8, 0)
+            Yul.Block{}
         else blk: {
             const length_function = try self.utils.arrayLengthFunction(from_type);
             defer self.allocator.free(length_function);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "let length := {s}(value)",
+            break :blk try generator.statements(
+                "let length := @0(value)",
                 .{length_function},
             );
         };
-        defer self.allocator.free(length_declaration);
+
         const store_length = try self.arrayStoreLengthForEncodingFunction(to_type, options);
         defer self.allocator.free(store_length);
         const data_area = try self.utils.arrayDataAreaFunction(from_type);
@@ -888,74 +726,44 @@ pub const ABIFunctions = struct {
         );
         defer self.allocator.free(encode);
         const access = switch (from.reference.location) {
-            .Memory => try self.allocator.dupe(u8, "mload(srcPtr)"),
+            .Memory => try generator.expression("mload(srcPtr)", .{}),
             .Storage => if (TypeBehavior.isValueType(from.base_type)) blk: {
-                const read = try self.utils.readFromStorageFunction(from.base_type, 0);
+                const read = try self.utils.readFromStorage(from.base_type, 0, false, .Unspecified);
                 defer self.allocator.free(read);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}(srcPtr)",
+                break :blk try generator.expression(
+                    "@0(srcPtr)",
                     .{read},
                 );
-            } else try self.allocator.dupe(u8, "srcPtr"),
+            } else try generator.expression("srcPtr", .{}),
             .CallData => blk: {
                 const calldata_access = try self.calldataAccessFunction(from.base_type);
                 defer self.allocator.free(calldata_access);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}(baseRef, srcPtr)",
+                break :blk try generator.expression(
+                    "@0(baseRef, srcPtr)",
                     .{calldata_access},
                 );
             },
             .Transient => return error.UnsupportedType,
         };
-        defer self.allocator.free(access);
+
         const next = try self.utils.nextArrayElementFunction(from_type);
         defer self.allocator.free(next);
-        const readable_from = try TypeBehavior.toStringAlloc(self.allocator, from_type, true);
-        defer self.allocator.free(readable_from);
-        const readable_to = try TypeBehavior.toStringAlloc(self.allocator, to_type, true);
-        defer self.allocator.free(readable_to);
 
-        var loop_body: std.ArrayList(u8) = .empty;
-        defer loop_body.deinit(self.allocator);
-        if (uses_tail)
-            try loop_body.print(
-                self.allocator,
-                "mstore(pos, sub(tail, headStart))\nlet {s} := {s}\ntail := {s}({s}, tail)\nsrcPtr := {s}(srcPtr)\npos := add(pos, 0x20)",
-                .{ element_values, access, encode, element_values, next },
-            )
+        const loop_body = if (uses_tail)
+            try generator.statements("mstore(pos, sub(tail, headStart)) let @0 := @1 tail := @2(@0, tail) srcPtr := @3(srcPtr) pos := add(pos, 0x20)", .{ element_values, access, encode, next })
         else
-            try loop_body.print(
-                self.allocator,
-                "let {s} := {s}\npos := {s}({s}, pos)\nsrcPtr := {s}(srcPtr)",
-                .{ element_values, access, encode, element_values, next },
-            );
-        const tail_setup = if (uses_tail)
-            "let headStart := pos\nlet tail := add(pos, mul(length, 0x20))\n"
-        else
-            "";
-        const tail_finish = if (uses_tail) "pos := tail\n" else "";
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n// {s} -> {s}\nfunction {s}(value{s} pos){s} {{\n{s}\npos := {s}(pos, length)\n{s}let baseRef := {s}(value)\nlet srcPtr := baseRef\nfor {{ let i := 0 }} lt(i, length) {{ i := add(i, 1) }}\n{{\n{s}\n}}\n{s}{s}\n}}\n",
-            .{
-                readable_from,
-                readable_to,
-                name,
-                if (length_as_argument) ", length," else ",",
-                if (dynamic) " -> end" else "",
-                length_declaration,
-                store_length,
-                tail_setup,
-                data_area,
-                loop_body.items,
-                tail_finish,
-                if (dynamic) "end := pos" else "",
-            },
+            try generator.statements("let @0 := @1 pos := @2(@0, pos) srcPtr := @3(srcPtr)", .{ element_values, access, encode, next });
+        const tail_setup = if (uses_tail) try generator.statements("let headStart := pos let tail := add(pos, mul(length, 0x20))", .{}) else Yul.Block{};
+        var finish: Generated.Buffer = .{ .generator = generator };
+        if (uses_tail) try finish.add("pos := tail", .{});
+        if (dynamic) try finish.add("end := pos", .{});
+        const length_parameters: []const []const u8 = if (length_as_argument) &.{"length"} else &.{};
+        const returns: []const []const u8 = if (dynamic) &.{"end"} else &.{};
+        const code = try generator.functionDefinition(
+            "function @0(value, @1, pos) -> @2 { @3 pos := @4(pos, length) @5 let baseRef := @6(value) let srcPtr := baseRef for { let i := 0 } lt(i, length) { i := add(i, 1) } { @7 } @8 }",
+            .{ name, length_parameters, returns, length_declaration, store_length, tail_setup, data_area, loop_body, finish.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -976,11 +784,8 @@ pub const ABIFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
-        const readable_from = try TypeBehavior.toStringAlloc(self.allocator, from_type, true);
-        defer self.allocator.free(readable_from);
-        const readable_to = try TypeBehavior.toStringAlloc(self.allocator, to_type, true);
-        defer self.allocator.free(readable_to);
 
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (from.isByteArrayOrString()) blk: {
             if (!to.isByteArrayOrString()) return error.InvalidType;
             const length_function = try self.utils.extractByteArrayLengthFunction();
@@ -989,18 +794,15 @@ pub const ABIFunctions = struct {
             defer self.allocator.free(store_length);
             const data_area = try self.utils.arrayDataAreaFunction(from_type);
             defer self.allocator.free(data_area);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\n// {s} -> {s}\nfunction {s}(value, pos) -> ret {{\nlet slotValue := sload(value)\nlet length := {s}(slotValue)\npos := {s}(pos, length)\nswitch and(slotValue, 1)\ncase 0 {{\n// short byte array\nmstore(pos, and(slotValue, not(0xff)))\nret := add(pos, mul({s}, iszero(iszero(length))))\n}}\ncase 1 {{\n// long byte array\nlet dataPos := {s}(value)\nlet i := 0\nfor {{ }} lt(i, length) {{ i := add(i, 0x20) }} {{\nmstore(add(pos, i), sload(dataPos))\ndataPos := add(dataPos, 1)\n}}\nret := add(pos, {s})\n}}\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(value, pos) -> ret {\nlet slotValue := sload(value)\nlet length := @1(slotValue)\npos := @2(pos, length)\nswitch and(slotValue, 1)\ncase 0 {\n// short byte array\nmstore(pos, and(slotValue, not(0xff)))\nret := add(pos, mul(@3, iszero(iszero(length))))\n}\ncase 1 {\n// long byte array\nlet dataPos := @4(value)\nlet i := 0\nfor { } lt(i, length) { i := add(i, 0x20) } {\nmstore(add(pos, i), sload(dataPos))\ndataPos := add(dataPos, 1)\n}\nret := add(pos, @5)\n}\n}\n",
                 .{
-                    readable_from,
-                    readable_to,
                     name,
                     length_function,
                     store_length,
-                    if (options.padded) "0x20" else "length",
+                    if (options.padded) try generator.expression("0x20", .{}) else try generator.identifier("length"),
                     data_area,
-                    if (options.padded) "i" else "length",
+                    if (options.padded) try generator.identifier("i") else try generator.identifier("length"),
                 },
             );
         } else blk: {
@@ -1036,59 +838,50 @@ pub const ABIFunctions = struct {
                 try TypeBehavior.calldataStride(to.*),
             );
             defer self.allocator.free(stride);
-            var loop_items: std.ArrayList(u8) = .empty;
-            defer loop_items.deinit(self.allocator);
-            var spill_items: std.ArrayList(u8) = .empty;
-            defer spill_items.deinit(self.allocator);
+            var loop_items: Generated.Buffer = .{ .generator = generator };
+            var spill_items: Generated.Buffer = .{ .generator = generator };
             for (0..items_per_slot) |index| {
                 const extract = try self.utils.extractFromStorageValueFunction(
                     from.base_type,
                     @intCast(index * storage_bytes),
                 );
                 defer self.allocator.free(extract);
-                try loop_items.print(
-                    self.allocator,
-                    "{s}({s}(data), pos)\npos := add(pos, {s})\n",
-                    .{ encode, extract, stride },
+                try loop_items.add(
+                    "@0(@1(data), pos)\npos := add(pos, @2)\n",
+                    .{ encode, extract, try generator.numberToken(stride) },
                 );
                 const condition = if (from.isDynamicallySized())
-                    "lt(itemCounter, length)"
-                else if (index < spill)
-                    "1"
+                    try generator.expression("lt(itemCounter, length)", .{})
                 else
-                    "0";
-                try spill_items.print(
-                    self.allocator,
-                    "if {s} {{\n{s}({s}(data), pos)\npos := add(pos, {s})\nitemCounter := add(itemCounter, 1)\n}}\n",
-                    .{ condition, encode, extract, stride },
+                    try generator.expression("@0", .{@intFromBool(index < spill)});
+                try spill_items.add(
+                    "if @0 {\n@1(@2(data), pos)\npos := add(pos, @3)\nitemCounter := add(itemCounter, 1)\n}\n",
+                    .{ condition, encode, extract, try generator.numberToken(stride) },
                 );
             }
             const use_loop = from.isDynamicallySized() or
                 from.length.? >= items_per_slot;
             const use_spill = from.isDynamicallySized() or spill != 0;
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\n// {s} -> {s}\nfunction {s}(value, pos){s} {{\nlet length := {s}(value)\npos := {s}(pos, length)\nlet originalPos := pos\nlet srcPtr := {s}(value)\nlet itemCounter := 0\nif {d} {{\n// Run the loop over all full slots\nfor {{ }} lt(add(itemCounter, sub({d}, 1)), length)\n{{ itemCounter := add(itemCounter, {d}) }}\n{{\nlet data := sload(srcPtr)\n{s}srcPtr := add(srcPtr, 1)\n}}\n}}\n// Handle the last (not necessarily full) slot specially\nif {d} {{\nlet data := sload(srcPtr)\n{s}}}\n{s}\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(value, pos) -> @1 {\nlet length := @2(value)\npos := @3(pos, length)\nlet originalPos := pos\nlet srcPtr := @4(value)\nlet itemCounter := 0\nif @5 {\n// Run the loop over all full slots\nfor { } lt(add(itemCounter, sub(@6, 1)), length)\n{ itemCounter := add(itemCounter, @7) }\n{\nlet data := sload(srcPtr)\n@8 srcPtr := add(srcPtr, 1)\n}\n}\n// Handle the last (not necessarily full) slot specially\nif @9 {\nlet data := sload(srcPtr)\n@10}\n@11\n}\n",
                 .{
-                    readable_from,
-                    readable_to,
                     name,
-                    if (dynamic) " -> end" else "",
+                    @as([]const []const u8, if (dynamic) &.{"end"} else &.{}),
                     length_function,
                     store_length,
                     data_area,
                     @intFromBool(use_loop),
                     items_per_slot,
                     items_per_slot,
-                    loop_items.items,
+                    loop_items.take(),
                     @intFromBool(use_spill),
-                    spill_items.items,
-                    if (dynamic) "end := pos" else "",
+                    spill_items.take(),
+                    if (dynamic) try generator.statements("end := pos", .{}) else Yul.Block{},
                 },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1138,8 +931,8 @@ pub const ABIFunctions = struct {
             self.allocator.free(storage_layout.offsets);
 
         const dynamic = TypeBehavior.isDynamicallyEncoded(to_type);
-        var member_code: std.ArrayList(u8) = .empty;
-        defer member_code.deinit(self.allocator);
+        const generator = try self.function_collector.generator(self.evm_version);
+        var member_code: Generated.Buffer = .{ .generator = generator };
         var encoding_offset: u256 = 0;
         var previous_slot: ?u256 = null;
         for (members, from_member_types, 0..) |member, member_from, index| {
@@ -1158,8 +951,8 @@ pub const ABIFunctions = struct {
             const dynamic_member = TypeBehavior.isDynamicallyEncoded(member_to);
             if (dynamic_member and !dynamic) return error.InvalidType;
 
-            var preprocess = try self.allocator.alloc(u8, 0);
-            defer self.allocator.free(preprocess);
+            var preprocess: Yul.Block = .{};
+
             const retrieve = switch (from.reference.location) {
                 .Storage => blk: {
                     const location = storage_layout.offsets[index] orelse
@@ -1167,13 +960,11 @@ pub const ABIFunctions = struct {
                     const relative_slot = location.slot;
                     if (TypeBehavior.isValueType(member_from)) {
                         if (previous_slot == null or previous_slot.? != relative_slot) {
-                            self.allocator.free(preprocess);
                             const slot_text = try compactHex(self.allocator, relative_slot);
                             defer self.allocator.free(slot_text);
-                            preprocess = try std.fmt.allocPrint(
-                                self.allocator,
-                                "slotValue := sload(add(value, {s}))",
-                                .{slot_text},
+                            preprocess = try generator.statements(
+                                "slotValue := sload(add(value, @0))",
+                                .{try generator.numberToken(slot_text)},
                             );
                             previous_slot = relative_slot;
                         }
@@ -1182,19 +973,17 @@ pub const ABIFunctions = struct {
                             location.byte_offset,
                         );
                         defer self.allocator.free(extract);
-                        break :blk try std.fmt.allocPrint(
-                            self.allocator,
-                            "{s}(slotValue)",
+                        break :blk try generator.expression(
+                            "@0(slotValue)",
                             .{extract},
                         );
                     }
                     if (location.byte_offset != 0) return error.InvalidType;
                     const slot_text = try compactHex(self.allocator, relative_slot);
                     defer self.allocator.free(slot_text);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "add(value, {s})",
-                        .{slot_text},
+                    break :blk try generator.expression(
+                        "add(value, @0)",
+                        .{try generator.numberToken(slot_text)},
                     );
                 },
                 .Memory => blk: {
@@ -1204,10 +993,9 @@ pub const ABIFunctions = struct {
                     );
                     const text = try compactHex(self.allocator, offset);
                     defer self.allocator.free(text);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "mload(add(value, {s}))",
-                        .{text},
+                    break :blk try generator.expression(
+                        "mload(add(value, @0))",
+                        .{try generator.numberToken(text)},
                     );
                 },
                 .CallData => blk: {
@@ -1219,25 +1007,18 @@ pub const ABIFunctions = struct {
                     defer self.allocator.free(text);
                     const access = try self.calldataAccessFunction(member_from);
                     defer self.allocator.free(access);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}(value, add(value, {s}))",
-                        .{ access, text },
+                    break :blk try generator.expression(
+                        "@0(value, add(value, @1))",
+                        .{ access, try generator.numberToken(text) },
                     );
                 },
                 .Transient => return error.UnsupportedType,
             };
-            defer self.allocator.free(retrieve);
+
             var sub_options = options;
             sub_options.encode_function_from_stack = false;
             sub_options.padded = true;
-            const member_values = try variableListAlloc(
-                self.allocator,
-                "memberValue",
-                try self.numVariablesForType(member_from, sub_options),
-                false,
-            );
-            defer self.allocator.free(member_values);
+            const member_values = try generator.indexedNames("memberValue", try self.numVariablesForType(member_from, sub_options));
             const encode = if (options.dynamic_inplace) blk: {
                 const updated = try self.abiEncodeAndReturnUpdatedPosFunction(
                     member_from,
@@ -1245,9 +1026,8 @@ pub const ABIFunctions = struct {
                     sub_options,
                 );
                 defer self.allocator.free(updated);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "pos := {s}({s}, pos)",
+                break :blk try generator.statements(
+                    "pos := @0(@1, pos)",
                     .{ updated, member_values },
                 );
             } else if (dynamic_member) blk: {
@@ -1259,10 +1039,9 @@ pub const ABIFunctions = struct {
                 defer self.allocator.free(encoder);
                 const offset_text = try compactHex(self.allocator, encoding_offset);
                 defer self.allocator.free(offset_text);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "mstore(add(pos, {s}), sub(tail, pos))\ntail := {s}({s}, tail)",
-                    .{ offset_text, encoder, member_values },
+                break :blk try generator.statements(
+                    "mstore(add(pos, @0), sub(tail, pos))\ntail := @1(@2, tail)",
+                    .{ try generator.numberToken(offset_text), encoder, member_values },
                 );
             } else blk: {
                 const encoder = try self.abiEncodingFunction(
@@ -1273,53 +1052,38 @@ pub const ABIFunctions = struct {
                 defer self.allocator.free(encoder);
                 const offset_text = try compactHex(self.allocator, encoding_offset);
                 defer self.allocator.free(offset_text);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}({s}, add(pos, {s}))",
-                    .{ encoder, member_values, offset_text },
+                break :blk try generator.statements(
+                    "@0(@1, add(pos, @2))",
+                    .{ encoder, member_values, try generator.numberToken(offset_text) },
                 );
             };
-            defer self.allocator.free(encode);
+
             if (!options.dynamic_inplace)
                 encoding_offset = std.math.add(
                     u256,
                     encoding_offset,
                     try TypeBehavior.calldataHeadSize(member_to),
                 ) catch return error.Overflow;
-            try member_code.print(
-                self.allocator,
-                "{{\n// {s}\n{s}\nlet {s} := {s}\n{s}\n}}\n",
-                .{ member_name, preprocess, member_values, retrieve, encode },
+            try member_code.add(
+                "{\n@0\nlet @1 := @2\n@3\n}\n",
+                .{ preprocess, member_values, retrieve, encode },
             );
         }
-        const readable_from = try TypeBehavior.toStringAlloc(self.allocator, from_type, true);
-        defer self.allocator.free(readable_from);
-        const readable_to = try TypeBehavior.toStringAlloc(self.allocator, to_type, true);
-        defer self.allocator.free(readable_to);
         const head_size = try compactHex(self.allocator, encoding_offset);
         defer self.allocator.free(head_size);
         const assign_end = if (dynamic and options.dynamic_inplace)
-            "end := pos"
+            try generator.statements("end := pos", .{})
         else if (dynamic)
-            "end := tail"
+            try generator.statements("end := tail", .{})
         else
-            "";
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n// {s} -> {s}\nfunction {s}(value, pos){s} {{\nlet tail := add(pos, {s})\n{s}\n{s}{s}\n}}\n",
-            .{
-                readable_from,
-                readable_to,
-                name,
-                if (dynamic) " -> end" else "",
-                head_size,
-                if (from.reference.location == .Storage) "let slotValue := 0" else "",
-                member_code.items,
-                assign_end,
-            },
+            Yul.Block{};
+        const returns: []const []const u8 = if (dynamic) &.{"end"} else &.{};
+        const preload = if (from.reference.location == .Storage) try generator.statements("let slotValue := 0", .{}) else Yul.Block{};
+        const code = try generator.functionDefinition(
+            "function @0(value, pos) -> @1 { let tail := add(pos, @2) @3 @4 @5 }",
+            .{ name, returns, try generator.numberToken(head_size), preload, member_code.take(), assign_end },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1338,6 +1102,7 @@ pub const ABIFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (TypeBehavior.isDynamicallySized(to_type)) blk: {
             if (to_type.category() != .Array) return error.InvalidType;
             const store_length = try self.arrayStoreLengthForEncodingFunction(
@@ -1351,28 +1116,22 @@ pub const ABIFunctions = struct {
                 ((literal.len + 31) / 32) * 32
             else
                 literal.len;
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(pos) -> end {{\npos := {s}(pos, {d})\n{s}(pos)\nend := add(pos, {d})\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(pos) -> end {\npos := @1(pos, @2)\n@3(pos)\nend := add(pos, @4)\n}\n",
                 .{ name, store_length, literal.len, store_literal, overall_size },
             );
         } else blk: {
             const fixed = to_type.asFixedBytes() orelse return error.InvalidType;
             if (literal.len > 32 or fixed.bytes < literal.len)
                 return error.InvalidType;
-            const word = try CommonData.formatAsStringOrNumberAlloc(
-                self.allocator,
-                literal,
-            );
-            defer self.allocator.free(word);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(pos) {{\nmstore(pos, {s})\n}}\n",
+            const word = try generator.word(literal);
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(pos) {\nmstore(pos, @1)\n}\n",
                 .{ name, word },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1393,27 +1152,26 @@ pub const ABIFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (options.encode_function_from_stack) blk: {
             const combine = try self.utils.combineExternalFunctionIdFunction();
             defer self.allocator.free(combine);
             const conversion = try self.utils.conversionFunction(from_type, to_type);
             defer self.allocator.free(conversion);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(addr, function_id, pos) {{\naddr, function_id := {s}(addr, function_id)\nmstore(pos, {s}(addr, function_id))\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(addr, function_id, pos) {\naddr, function_id := @1(addr, function_id)\nmstore(pos, @2(addr, function_id))\n}\n",
                 .{ name, conversion, combine },
             );
         } else blk: {
             const cleanup = try self.utils.cleanupFunction(to_type);
             defer self.allocator.free(cleanup);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(addr_and_function_id, pos) {{\nmstore(pos, {s}(addr_and_function_id))\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(addr_and_function_id, pos) {\nmstore(pos, @1(addr_and_function_id))\n}\n",
                 .{ name, cleanup },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1478,13 +1236,13 @@ pub const ABIFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const validator = try self.utils.validatorFunction(type_ref, true);
         defer self.allocator.free(validator);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(offset, end) -> value {{\nvalue := {s}(offset)\n{s}(value)\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(offset, end) -> value {\nvalue := @1(offset)\n@2(value)\n}\n",
             .{ name, if (from_memory) "mload" else "calldataload", validator },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1509,31 +1267,30 @@ pub const ABIFunctions = struct {
             from_memory,
         );
         defer self.allocator.free(available);
+        const generator = try self.function_collector.generator(self.evm_version);
         const retrieve_length = if (array.isDynamicallySized())
-            try std.fmt.allocPrint(
-                self.allocator,
-                "{s}(offset)",
+            try generator.expression(
+                "@0(offset)",
                 .{if (from_memory) "mload" else "calldataload"},
             )
-        else
-            try compactHex(self.allocator, array.length.?);
-        defer self.allocator.free(retrieve_length);
-        const readable = try TypeBehavior.toStringAlloc(self.allocator, type_ref, true);
-        defer self.allocator.free(readable);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n// {s}\nfunction {s}(offset, end) -> array {{\nif iszero(slt(add(offset, 0x1f), end)) {{ {s}() }}\nlet length := {s}\narray := {s}({s}, length, end)\n}}\n",
+        else blk: {
+            const length = try compactHex(self.allocator, array.length.?);
+            defer self.allocator.free(length);
+            break :blk try generator.numberToken(length);
+        };
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(offset, end) -> array {\nif iszero(slt(add(offset, 0x1f), end)) { @1() }\nlet length := @2\narray := @3(@4, length, end)\n}\n",
             .{
-                readable,
                 name,
                 revert,
                 retrieve_length,
                 available,
-                if (array.isDynamicallySized()) "add(offset, 0x20)" else "offset",
+                if (array.isDynamicallySized()) try generator.expression("add(offset, 0x20)", .{}) else try generator.identifier("offset"),
             },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1582,39 +1339,35 @@ pub const ABIFunctions = struct {
         defer self.allocator.free(decoder);
         const stride_text = try compactHex(self.allocator, stride);
         defer self.allocator.free(stride_text);
-        const readable = try TypeBehavior.toStringAlloc(self.allocator, type_ref, true);
-        defer self.allocator.free(readable);
         const dynamic_base = TypeBehavior.isDynamicallyEncoded(array.base_type);
+        const generator = try self.function_collector.generator(self.evm_version);
         const element_position = if (dynamic_base)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "let innerOffset := {s}(src)\nif gt(innerOffset, 0xffffffffffffffff) {{ {s}() }}\nlet elementPos := add(offset, innerOffset)",
+            try generator.statements(
+                "let innerOffset := @0(src)\nif gt(innerOffset, 0xffffffffffffffff) { @1() }\nlet elementPos := add(offset, innerOffset)",
                 .{ if (from_memory) "mload" else "calldataload", invalid_offset },
             )
         else
-            try self.allocator.dupe(u8, "let elementPos := src");
-        defer self.allocator.free(element_position);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n// {s}\nfunction {s}(offset, length, end) -> array {{\narray := {s}({s}(length))\nlet dst := array\n{s}\nlet srcEnd := add(offset, mul(length, {s}))\nif gt(srcEnd, end) {{\n{s}()\n}}\nfor {{ let src := offset }} lt(src, srcEnd) {{ src := add(src, {s}) }}\n{{\n{s}\nmstore(dst, {s}(elementPos, end))\ndst := add(dst, 0x20)\n}}\n}}\n",
+            try generator.statements("let elementPos := src", .{});
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(offset, length, end) -> array {\narray := @1(@2(length))\nlet dst := array\n@3\nlet srcEnd := add(offset, mul(length, @4))\nif gt(srcEnd, end) {\n@5()\n}\nfor { let src := offset } lt(src, srcEnd) { src := add(src, @6) }\n{\n@7\nmstore(dst, @8(elementPos, end))\ndst := add(dst, 0x20)\n}\n}\n",
             .{
-                readable,
                 name,
                 allocate,
                 allocation_size,
                 if (array.isDynamicallySized())
-                    "mstore(array, length)\ndst := add(array, 0x20)"
+                    try generator.statements("mstore(array, length) dst := add(array, 0x20)", .{})
                 else
-                    "",
-                stride_text,
+                    Yul.Block{},
+                try generator.numberToken(stride_text),
                 invalid_stride,
-                stride_text,
+                try generator.numberToken(stride_text),
                 element_position,
                 decoder,
             },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1633,8 +1386,7 @@ pub const ABIFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const stride_text = try compactHex(self.allocator, stride);
         defer self.allocator.free(stride_text);
-        const readable = try TypeBehavior.toStringAlloc(self.allocator, type_ref, true);
-        defer self.allocator.free(readable);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (array.isDynamicallySized()) blk: {
             const invalid_offset = try self.utils.revertReasonIfDebugFunction(
                 "ABI decoding: invalid calldata array offset",
@@ -1648,10 +1400,9 @@ pub const ABIFunctions = struct {
                 "ABI decoding: invalid calldata array stride",
             );
             defer self.allocator.free(invalid_position);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\n// {s}\nfunction {s}(offset, end) -> arrayPos, length {{\nif iszero(slt(add(offset, 0x1f), end)) {{ {s}() }}\nlength := calldataload(offset)\nif gt(length, 0xffffffffffffffff) {{ {s}() }}\narrayPos := add(offset, 0x20)\nif gt(add(arrayPos, mul(length, {s})), end) {{ {s}() }}\n}}\n",
-                .{ readable, name, invalid_offset, invalid_length, stride_text, invalid_position },
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(offset, end) -> arrayPos, length {\nif iszero(slt(add(offset, 0x1f), end)) { @1() }\nlength := calldataload(offset)\nif gt(length, 0xffffffffffffffff) { @2() }\narrayPos := add(offset, 0x20)\nif gt(add(arrayPos, mul(length, @3)), end) { @4() }\n}\n",
+                .{ name, invalid_offset, invalid_length, try generator.numberToken(stride_text), invalid_position },
             );
         } else blk: {
             const length = try compactHex(self.allocator, array.length.?);
@@ -1660,14 +1411,13 @@ pub const ABIFunctions = struct {
                 "ABI decoding: invalid calldata array stride",
             );
             defer self.allocator.free(invalid_position);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\n// {s}\nfunction {s}(offset, end) -> arrayPos {{\narrayPos := offset\nif gt(add(arrayPos, mul({s}, {s})), end) {{ {s}() }}\n}}\n",
-                .{ readable, name, length, stride_text, invalid_position },
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(offset, end) -> arrayPos {\narrayPos := offset\nif gt(add(arrayPos, mul(@1, @2)), end) { @3() }\n}\n",
+                .{ name, try generator.numberToken(length), try generator.numberToken(stride_text), invalid_position },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1700,13 +1450,13 @@ pub const ABIFunctions = struct {
         defer self.allocator.free(allocation_size);
         const copy = try self.utils.copyToMemoryFunction(!from_memory, true);
         defer self.allocator.free(copy);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(src, length, end) -> array {{\narray := {s}({s}(length))\nmstore(array, length)\nlet dst := add(array, 0x20)\nif gt(add(src, length), end) {{ {s}() }}\n{s}(src, dst, length)\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(src, length, end) -> array {\narray := @1(@2(length))\nmstore(array, length)\nlet dst := add(array, 0x20)\nif gt(add(src, length), end) { @3() }\n@4(src, dst, length)\n}\n",
             .{ name, allocate, allocation_size, invalid_length, copy },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1732,15 +1482,13 @@ pub const ABIFunctions = struct {
             try TypeBehavior.calldataEncodedTailSize(type_ref)
         else
             try TypeBehavior.calldataEncodedSize(type_ref, true);
-        const readable = try TypeBehavior.toStringAlloc(self.allocator, type_ref, true);
-        defer self.allocator.free(readable);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n// {s}\nfunction {s}(offset, end) -> value {{\nif slt(sub(end, offset), {d}) {{ {s}() }}\nvalue := offset\n}}\n",
-            .{ readable, name, minimum, revert },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(offset, end) -> value {\nif slt(sub(end, offset), @1) { @2() }\nvalue := offset\n}\n",
+            .{ name, minimum, revert },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1770,8 +1518,8 @@ pub const ABIFunctions = struct {
         const memory_size = try TypeBehavior.memoryDataSize(type_ref);
         const memory_size_text = try compactHex(self.allocator, memory_size);
         defer self.allocator.free(memory_size_text);
-        var member_code: std.ArrayList(u8) = .empty;
-        defer member_code.deinit(self.allocator);
+        const generator = try self.function_collector.generator(self.evm_version);
+        var member_code: Generated.Buffer = .{ .generator = generator };
         var head_position: u32 = 0;
         for (structure.declaration.payload.struct_definition.members) |member| {
             if (member.nodeKind() != .variable_declaration) return error.InvalidType;
@@ -1800,23 +1548,20 @@ pub const ABIFunctions = struct {
             const memory_offset_text = try compactHex(self.allocator, memory_offset);
             defer self.allocator.free(memory_offset_text);
             if (TypeBehavior.isDynamicallyEncoded(decoding))
-                try member_code.print(
-                    self.allocator,
-                    "{{\n// {s}\nlet offset := {s}(add(headStart, {d}))\nif gt(offset, 0xffffffffffffffff) {{ {s}() }}\nmstore(add(value, {s}), {s}(add(headStart, offset), end))\n}}\n",
+                try member_code.add(
+                    "{ let offset := @0(add(headStart, @1)) if gt(offset, 0xffffffffffffffff) { @2() } mstore(add(value, @3), @4(add(headStart, offset), end)) }",
                     .{
-                        member_name,
                         if (from_memory) "mload" else "calldataload",
                         head_position,
                         invalid_offset,
-                        memory_offset_text,
+                        try generator.numberToken(memory_offset_text),
                         decoder,
                     },
                 )
             else
-                try member_code.print(
-                    self.allocator,
-                    "{{\n// {s}\nlet offset := {d}\nmstore(add(value, {s}), {s}(add(headStart, offset), end))\n}}\n",
-                    .{ member_name, head_position, memory_offset_text, decoder },
+                try member_code.add(
+                    "{\nlet offset := @0\nmstore(add(value, @1), @2(add(headStart, offset), end))\n}\n",
+                    .{ head_position, try generator.numberToken(memory_offset_text), decoder },
                 );
             head_position = std.math.add(
                 u32,
@@ -1826,15 +1571,12 @@ pub const ABIFunctions = struct {
         }
         const minimum = try compactHex(self.allocator, head_position);
         defer self.allocator.free(minimum);
-        const readable = try TypeBehavior.toStringAlloc(self.allocator, type_ref, true);
-        defer self.allocator.free(readable);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n// {s}\nfunction {s}(headStart, end) -> value {{\nif slt(sub(end, headStart), {s}) {{ {s}() }}\nvalue := {s}({s})\n{s}}}\n",
-            .{ readable, name, minimum, revert, allocate, memory_size_text, member_code.items },
+        const code = try generator.functionDefinition(
+            "\nfunction @0(headStart, end) -> value {\nif slt(sub(end, headStart), @1) { @2() }\nvalue := @3(@4)\n@5}\n",
+            .{ name, try generator.numberToken(minimum), revert, allocate, try generator.numberToken(memory_size_text), member_code.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1855,6 +1597,7 @@ pub const ABIFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (for_use_on_stack) blk: {
             const nested = try self.abiDecodingFunctionFunctionType(
                 type_ref,
@@ -1864,22 +1607,20 @@ pub const ABIFunctions = struct {
             defer self.allocator.free(nested);
             const split = try self.utils.splitExternalFunctionIdFunction();
             defer self.allocator.free(split);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(offset, end) -> addr, function_selector {{\naddr, function_selector := {s}({s}(offset, end))\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(offset, end) -> addr, function_selector {\naddr, function_selector := @1(@2(offset, end))\n}\n",
                 .{ name, split, nested },
             );
         } else blk: {
             const validator = try self.utils.validatorFunction(type_ref, true);
             defer self.allocator.free(validator);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(offset, end) -> fun {{\nfun := {s}(offset)\n{s}(fun)\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(offset, end) -> fun {\nfun := @1(offset)\n@2(fun)\n}\n",
                 .{ name, if (from_memory) "mload" else "calldataload", validator },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -1901,6 +1642,7 @@ pub const ABIFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (TypeBehavior.isDynamicallyEncoded(type_ref)) blk: {
             const tail_size = try TypeBehavior.calldataEncodedTailSize(type_ref);
             if (tail_size <= 1) return error.InvalidType;
@@ -1925,20 +1667,18 @@ pub const ABIFunctions = struct {
                     "Invalid calldata access offset",
                 );
                 defer self.allocator.free(invalid_offset);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "\nfunction {s}(base_ref, ptr) -> value, length {{\nlet rel_offset_of_tail := calldataload(ptr)\nif iszero(slt(rel_offset_of_tail, sub(sub(calldatasize(), base_ref), sub({s}, 1)))) {{ {s}() }}\nvalue := add(rel_offset_of_tail, base_ref)\nlength := calldataload(value)\nvalue := add(value, 0x20)\nif gt(length, 0xffffffffffffffff) {{ {s}() }}\nif sgt(value, sub(calldatasize(), mul(length, {s}))) {{ {s}() }}\n}}\n",
-                    .{ name, tail_size_text, invalid_offset, invalid_length, stride, invalid_stride },
+                break :blk try generator.functionDefinition(
+                    "\nfunction @0(base_ref, ptr) -> value, length {\nlet rel_offset_of_tail := calldataload(ptr)\nif iszero(slt(rel_offset_of_tail, sub(sub(calldatasize(), base_ref), sub(@1, 1)))) { @2() }\nvalue := add(rel_offset_of_tail, base_ref)\nlength := calldataload(value)\nvalue := add(value, 0x20)\nif gt(length, 0xffffffffffffffff) { @3() }\nif sgt(value, sub(calldatasize(), mul(length, @4))) { @5() }\n}\n",
+                    .{ name, try generator.numberToken(tail_size_text), invalid_offset, invalid_length, try generator.numberToken(stride), invalid_stride },
                 );
             }
             const invalid_offset = try self.utils.revertReasonIfDebugFunction(
                 "Invalid calldata access offset",
             );
             defer self.allocator.free(invalid_offset);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(base_ref, ptr) -> value {{\nlet rel_offset_of_tail := calldataload(ptr)\nif iszero(slt(rel_offset_of_tail, sub(sub(calldatasize(), base_ref), sub({s}, 1)))) {{ {s}() }}\nvalue := add(rel_offset_of_tail, base_ref)\n}}\n",
-                .{ name, tail_size_text, invalid_offset },
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(base_ref, ptr) -> value {\nlet rel_offset_of_tail := calldataload(ptr)\nif iszero(slt(rel_offset_of_tail, sub(sub(calldatasize(), base_ref), sub(@1, 1)))) { @2() }\nvalue := add(rel_offset_of_tail, base_ref)\n}\n",
+                .{ name, try generator.numberToken(tail_size_text), invalid_offset },
             );
         } else if (TypeBehavior.isValueType(type_ref)) blk: {
             const decoder = if (type_ref.category() == .Function)
@@ -1946,21 +1686,19 @@ pub const ABIFunctions = struct {
             else
                 try self.abiDecodingFunctionValueType(type_ref, false);
             defer self.allocator.free(decoder);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(baseRef, ptr) -> value {{\nvalue := {s}(ptr, add(ptr, 32))\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(baseRef, ptr) -> value {\nvalue := @1(ptr, add(ptr, 32))\n}\n",
                 .{ name, decoder },
             );
         } else switch (type_ref.category()) {
-            .Array, .Struct => try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(baseRef, ptr) -> value {{\nvalue := ptr\n}}\n",
+            .Array, .Struct => try generator.functionDefinition(
+                "\nfunction @0(baseRef, ptr) -> value {\nvalue := ptr\n}\n",
                 .{name},
             ),
             else => return error.InvalidType,
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -2049,10 +1787,13 @@ pub const ABIFunctions = struct {
             .Bool,
             .FixedPoint,
             .FixedBytes,
-            .Contract,
             .Enum,
             .InaccessibleDynamic,
             => type_ref,
+            .Contract => if (in_library_call)
+                type_ref
+            else
+                self.encodingType(type_ref),
             .UserDefinedValueType => |value| value.underlying_type orelse
                 return error.InvalidType,
             .Function => |function| if (function.kind == .External and
@@ -2105,7 +1846,8 @@ pub const ABIFunctions = struct {
             .FixedBytes,
             .InaccessibleDynamic,
             => type_ref,
-            .Contract => &interface_address,
+            .Contract => (try TypeBehavior.encodingType(self.type_provider, type_ref)) orelse
+                error.InvalidType,
             .Enum => &interface_uint8,
             .UserDefinedValueType => |value| value.underlying_type orelse
                 return error.InvalidType,
@@ -2175,39 +1917,7 @@ fn mapProviderError(err: TypeProviderModule.ProviderError) ABIError {
     };
 }
 
-fn variableListAlloc(
-    allocator: std.mem.Allocator,
-    prefix: []const u8,
-    count: usize,
-    reversed: bool,
-) std.mem.Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    for (0..count) |position| {
-        if (position != 0) try output.appendSlice(allocator, ", ");
-        const index = if (reversed) count - position - 1 else position;
-        try output.print(allocator, "{s}{d}", .{ prefix, index });
-    }
-    return output.toOwnedSlice(allocator);
-}
-
-fn variableRangeAlloc(
-    allocator: std.mem.Allocator,
-    prefix: []const u8,
-    start: usize,
-    end: usize,
-) std.mem.Allocator.Error![]u8 {
-    if (end < start) return allocator.alloc(u8, 0);
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    for (start..end) |index| {
-        if (index != start) try output.appendSlice(allocator, ", ");
-        try output.print(allocator, "{s}{d}", .{ prefix, index });
-    }
-    return output.toOwnedSlice(allocator);
-}
-
-test "scalar ABI tuple helpers retain upstream names and checks" {
+test "Yul AST scalar ABI tuple helpers retain upstream names and checks" {
     var type_provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
     defer type_provider.deinit();
     var collector = CollectorModule.MultiUseYulFunctionCollector.init(std.testing.allocator);
@@ -2238,14 +1948,16 @@ test "scalar ABI tuple helpers retain upstream names and checks" {
         "abi_encode_tuple_t_uint256__to_t_uint256__fromStack",
         encoder,
     );
-    const code = try collector.requestedFunctionsAlloc();
+    try std.testing.expectEqual(collector.requested_functions.count(), collector.generated.items.len);
+    const code = try collector.testFunctionsAlloc();
     defer std.testing.allocator.free(code);
+    try expectCanonicalHelpers(code, "5f240399f45568a746fea42612c3dd5d99dc48ad609a3685fd6d462098cbbdb9");
     try std.testing.expect(std.mem.find(u8, code, "slt(sub(dataEnd, headStart), 64)") != null);
     try std.testing.expect(std.mem.find(u8, code, "calldataload(offset)") != null);
     try std.testing.expect(std.mem.find(u8, code, "mstore(pos, cleanup_t_uint256(value))") != null);
 }
 
-test "encoding option suffix order is stable" {
+test "Yul AST encoding option suffix order is stable" {
     const suffix = try (EncodingOptions{
         .padded = false,
         .dynamic_inplace = true,
@@ -2259,7 +1971,7 @@ test "encoding option suffix order is stable" {
     );
 }
 
-test "composite ABI helpers cover arrays, literals, storage packing, and external functions" {
+test "Yul AST composite ABI helpers cover arrays, literals, storage packing, and external functions" {
     var type_provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
     defer type_provider.deinit();
     var collector = CollectorModule.MultiUseYulFunctionCollector.init(std.testing.allocator);
@@ -2337,8 +2049,10 @@ test "composite ABI helpers cover arrays, literals, storage packing, and externa
     const function_decoder = try abi.tupleDecoder(&.{external_function}, false);
     defer std.testing.allocator.free(function_decoder);
 
-    const code = try collector.requestedFunctionsAlloc();
+    try std.testing.expectEqual(collector.requested_functions.count(), collector.generated.items.len);
+    const code = try collector.testFunctionsAlloc();
     defer std.testing.allocator.free(code);
+    try expectCanonicalHelpers(code, "905725869928b98ec2fc3d5acc5cbdb57951ac9b3cd32df203878056cb9cf157");
     try std.testing.expect(std.mem.find(
         u8,
         code,
@@ -2371,7 +2085,7 @@ test "composite ABI helpers cover arrays, literals, storage packing, and externa
     ) != null);
 }
 
-test "struct ABI helpers cover memory, calldata, and storage members" {
+test "Yul AST struct ABI helpers cover memory, calldata, and storage members" {
     var type_provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
     defer type_provider.deinit();
     var tree = try AST.Tree.init(std.testing.allocator, "", "Struct.sol");
@@ -2439,12 +2153,68 @@ test "struct ABI helpers cover memory, calldata, and storage members" {
     );
     defer std.testing.allocator.free(tuple_encoder);
 
-    const code = try collector.requestedFunctionsAlloc();
+    try std.testing.expectEqual(collector.requested_functions.count(), collector.generated.items.len);
+    const code = try collector.testFunctionsAlloc();
     defer std.testing.allocator.free(code);
-    try std.testing.expect(std.mem.find(u8, code, "// amount") != null);
-    try std.testing.expect(std.mem.find(u8, code, "// payload") != null);
+    try expectCanonicalHelpers(code, "ddff1da0e066db1f8021ef6eb110a427b34b780f2cdf9efbb714fa64c06a4921");
     try std.testing.expect(std.mem.find(u8, code, "slotValue := sload") != null);
     try std.testing.expect(std.mem.find(u8, code, "calldata_access_t_bytes_calldata") != null);
     try std.testing.expect(std.mem.find(u8, code, "ABI decoding: invalid struct offset") == null);
     try std.testing.expect(std.mem.find(u8, code, "mstore(add(value,") != null);
+}
+
+fn expectCanonicalHelpers(code: []const u8, expected: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const Errors = @import("../../liblangutil/error_reporter.zig");
+    const Parser = @import("../../libyul/asm_parser.zig").Parser;
+    const Dialect = @import("../../libyul/backends/evm/evm_dialect.zig").EVMDialect;
+    const wrapped = try std.fmt.allocPrint(allocator, "{{{s}}}", .{code});
+    defer allocator.free(wrapped);
+    var errors = Errors.ErrorReporter.init(allocator);
+    defer errors.deinit();
+    var dialect = try Dialect.init(allocator, .current(), true);
+    defer dialect.deinit();
+    var parsed = (try Parser.parseSource(allocator, wrapped, "abi-matrix.yul", &errors, dialect.dialect(), .{})) orelse return error.TestUnexpectedResult;
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), errors.diagnostics().len);
+    var printer = @import("../../libyul/asm_printer.zig").AsmPrinter.init(allocator, dialect.dialect(), &.{}, .noneValue(), null);
+    const canonical = try printer.renderBlock(parsed.root());
+    defer allocator.free(canonical);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(canonical, &digest, .{});
+    // Normalized legacy ABI helper output at 66608805b, before AST construction.
+    try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(digest, .lower));
+}
+
+test "Yul AST ABI tuples preserve reversed bindings and empty lists" {
+    const allocator = std.testing.allocator;
+    var types = try TypeProviderModule.TypeProvider.init(allocator);
+    defer types.deinit();
+    var collector = CollectorModule.MultiUseYulFunctionCollector.init(allocator);
+    defer collector.deinit();
+    var abi = ABIFunctions.init(allocator, &types, CompatibilityIdResolver.legacyNodeIds(), .current(), .Default, &collector);
+    for ([_]bool{ false, true }) |is_packed| {
+        const name = if (is_packed)
+            try abi.tupleEncoderPacked(&.{ types.uint256(), types.uint256() }, &.{ types.uint256(), types.uint256() }, true)
+        else
+            try abi.tupleEncoder(&.{ types.uint256(), types.uint256() }, &.{ types.uint256(), types.uint256() }, false, true);
+        defer allocator.free(name);
+        const function = &collector.generated.items[collector.generated.items.len - 1];
+        try std.testing.expectEqualStrings(name, try function.name.str());
+        try std.testing.expectEqual(@as(usize, 3), function.parameters.items.len);
+        try std.testing.expectEqualStrings(if (is_packed) "pos" else "headStart", try function.parameters.items[0].name.str());
+        try std.testing.expectEqualStrings("value1", try function.parameters.items[1].name.str());
+        try std.testing.expectEqualStrings("value0", try function.parameters.items[2].name.str());
+        // Reversing the entry bindings must not reverse logical tuple order.
+        const first_call = function.body.statements.items[if (is_packed) 0 else 1].expression_statement.expression.function_call;
+        try std.testing.expectEqualStrings("value0", try first_call.arguments.items[0].identifier.name.str());
+        const empty = if (is_packed) try abi.tupleEncoderPacked(&.{}, &.{}, true) else try abi.tupleEncoder(&.{}, &.{}, false, true);
+        defer allocator.free(empty);
+        const empty_function = &collector.generated.items[collector.generated.items.len - 1];
+        try std.testing.expectEqual(@as(usize, 1), empty_function.parameters.items.len);
+    }
+    const decoder = try abi.tupleDecoder(&.{}, false);
+    defer allocator.free(decoder);
+    const empty_decoder = &collector.generated.items[collector.generated.items.len - 1];
+    try std.testing.expectEqual(@as(usize, 0), empty_decoder.return_variables.items.len);
 }

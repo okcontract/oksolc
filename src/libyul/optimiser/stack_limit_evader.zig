@@ -8,7 +8,6 @@
 const std = @import("std");
 const ordered = @import("cxx_compat");
 const AST = @import("../ast.zig");
-const ASTCopier = @import("ast_copier.zig").ASTCopier;
 const AsmAnalysis = @import("../asm_analysis.zig");
 const CallGraphModule = @import("call_graph_generator.zig");
 const Compilability = @import("../compilability_checker.zig");
@@ -105,14 +104,17 @@ pub const MemoryOffsetAllocator = struct {
 };
 
 pub const StackLimitEvader = struct {
+    /// Consumes the object code, returning its storage after rewriting. The
+    /// context must allocate AST nodes with the object allocator. Source names
+    /// still borrow the object; on error the consumed tree is destroyed.
     pub fn runObject(
         context: *OptimiserStepContext,
-        object: *const Object,
+        object: *Object,
     ) !AST.Block {
-        const code = object.code() orelse return error.MissingObjectCode;
         const evm_dialect = try requireObjectDialect(context.dialect);
-        var copier = ASTCopier.init(context.dispenser.allocator);
-        var ast_root = try copier.translateBlock(code.root());
+        std.debug.assert(context.dispenser.allocator.ptr == object.allocator.ptr and
+            context.dispenser.allocator.vtable == object.allocator.vtable);
+        var ast_root = try object.takeCodeRoot();
         errdefer ast_root.deinit(context.dispenser.allocator);
 
         if (evm_dialect.evmVersion().canOverchargeGasForCall()) {
@@ -144,9 +146,10 @@ pub const StackLimitEvader = struct {
             );
             try runWithStackTooDeep(context, &ast_root, &stack_errors);
         } else {
-            var checker = try Compilability.CompilabilityChecker.init(
+            var checker = try Compilability.CompilabilityChecker.initWithBlock(
                 context.dispenser.allocator,
                 object,
+                &ast_root,
                 true,
             );
             defer checker.deinit();
@@ -257,14 +260,11 @@ pub const StackLimitEvader = struct {
                 return error.InvalidMemoryGuardCall;
             const literal = &call.arguments.items[0].literal;
             if (literal.kind != .Number) return error.InvalidMemoryGuardCall;
+            const spelling = try Numeric.toCompactHexWithPrefixAlloc(u256, allocator, final_reserved_memory);
             literal.value.deinit(allocator);
             literal.value = .{
                 .numeric_value = final_reserved_memory,
-                .string_value = try Numeric.toCompactHexWithPrefixAlloc(
-                    u256,
-                    allocator,
-                    final_reserved_memory,
-                ),
+                .string_value = spelling,
             };
         }
     }
@@ -407,4 +407,54 @@ test "object-driven stack limit evasion selects and runs the backend" {
     var transformed = try StackLimitEvader.runObject(&context, object);
     defer transformed.deinit(allocator);
     try std.testing.expect(transformed.statements.items.len != 0);
+}
+
+test "stack limit evasion and stack compression transfer roots and release allocation failures" {
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const NameDispenser = @import("name_dispenser.zig").NameDispenser;
+    const Copier = @import("ast_copier.zig").ASTCopier;
+    const Compressor = @import("stack_compressor.zig").StackCompressor;
+    const Encoding = @import("../ast_encoding.zig");
+    const allocator = std.testing.allocator;
+    for ([_]@import("../../liblangutil/evm_version.zig").EVMVersion{ .current(), .init(.Homestead) }) |version| {
+        var dialect = try EVMDialectModule.EVMDialect.init(allocator, version, true);
+        defer dialect.deinit();
+        var reporter = Diagnostics.ErrorReporter.init(allocator);
+        defer reporter.deinit();
+        var source = (try Parser.parseSource(allocator, "{ { mstore(0x40, memoryguard(0x80)) let x := 1 pop(x) } }", "transfer.yul", &reporter, dialect.dialect(), .{})).?;
+        defer source.deinit();
+        const Check = struct {
+            fn run(failing: std.mem.Allocator, ast: *const AST.AST) !void {
+                const object = try Object.create(failing, "Root");
+                defer object.destroy();
+                var copier = Copier.init(failing);
+                object.setCode(try copier.translateAst(ast), null);
+                const storage = object.code().?.root().statements.items.ptr;
+                const value = object.code().?.root().statements.items[0].block.statements.items[1].variable_declaration.value;
+                var compressed = try Compressor.run(object, true, 16);
+                errdefer compressed.deinit(failing);
+                try std.testing.expectEqual(storage, compressed.ast.statements.items.ptr);
+                object.replaceCode(AST.AST.init(failing, ast.dialect().*, compressed.ast), null);
+                compressed.ast = .{};
+                var reserved: NameCollector.NameSet = .{};
+                defer reserved.deinit(failing);
+                var dispenser = try NameDispenser.initFromAst(failing, ast.dialect().*, object.code().?.root(), &reserved);
+                defer dispenser.deinit();
+                var context: OptimiserStepContext = .{
+                    .dialect = ast.dialect().*,
+                    .dispenser = &dispenser,
+                    .reserved_identifiers = &reserved,
+                };
+                var transformed = try StackLimitEvader.runObject(&context, object);
+                defer transformed.deinit(failing);
+                // The spill pass can rebuild statement containers. The owned
+                // expression remains at its original address across both passes.
+                try std.testing.expectEqual(value, transformed.statements.items[0].block.statements.items[1].variable_declaration.value);
+                try std.testing.expectEqual(@as(usize, 0), object.code().?.root().statements.items.len);
+                try std.testing.expectEqualDeep(try Encoding.hashBlock(ast.root()), try Encoding.hashBlock(&transformed));
+            }
+        };
+        try std.testing.checkAllAllocationFailures(allocator, Check.run, .{&source});
+    }
 }

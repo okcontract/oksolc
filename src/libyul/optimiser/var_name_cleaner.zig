@@ -23,7 +23,7 @@ pub const VarNameCleaner = struct {
     pub const name = "VarNameCleaner";
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
-        const allocator = context.dispenser.allocator;
+        const allocator = context.scratchAllocator();
         var names_to_keep = try context.reserved_identifiers.clone(allocator);
         errdefer names_to_keep.deinit(allocator);
         for (ast.statements.items) |statement| switch (statement) {

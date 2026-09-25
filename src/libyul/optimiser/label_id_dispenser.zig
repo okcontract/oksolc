@@ -32,10 +32,13 @@ pub const LabelIDDispenser = struct {
         errdefer result.deinit();
         for (reserved) |label_value| {
             if (result.reserved_labels.contains(label_value)) continue;
+            try result.reserved_storage.ensureUnusedCapacity(allocator, 1);
             const owned = try allocator.dupe(u8, label_value);
             errdefer allocator.free(owned);
-            try result.reserved_storage.append(allocator, owned);
             try result.reserved_labels.put(owned, {});
+            // The map borrows the name. Publish its owner only after the last
+            // fallible operation, so cleanup never owns the same name twice.
+            result.reserved_storage.appendAssumeCapacity(owned);
         }
         return result;
     }
@@ -83,7 +86,7 @@ pub const LabelIDDispenser = struct {
     ) !ASTLabelRegistry {
         if (used_ids_input.len == 0) return ASTLabelRegistry.initEmpty(self.allocator);
 
-        var used_ids = try self.allocator.dupe(LabelID, used_ids_input);
+        const used_ids = try self.allocator.dupe(LabelID, used_ids_input);
         defer self.allocator.free(used_ids);
         std.sort.insertion(LabelID, used_ids, {}, std.sort.asc(LabelID));
         var unique_count: usize = 0;
@@ -92,9 +95,10 @@ pub const LabelIDDispenser = struct {
             used_ids[unique_count] = id;
             unique_count += 1;
         }
-        used_ids = used_ids[0..unique_count];
-        if (used_ids[0] == ASTLabelRegistry.emptyID()) return error.EmptyLabelIDCannotBeSelected;
-        const maximum_id = used_ids[used_ids.len - 1];
+        // Keep the allocation's full extent for deferred cleanup.
+        const unique_ids = used_ids[0..unique_count];
+        if (unique_ids[0] == ASTLabelRegistry.emptyID()) return error.EmptyLabelIDCannotBeSelected;
+        const maximum_id = unique_ids[unique_ids.len - 1];
         try self.validateID(maximum_id);
 
         const original_labels = self.parent_labels.labels();
@@ -118,7 +122,7 @@ pub const LabelIDDispenser = struct {
 
         var to_generate: std.ArrayList(LabelID) = .empty;
         defer to_generate.deinit(self.allocator);
-        for (used_ids) |id| {
+        for (unique_ids) |id| {
             if (try self.ghost(id)) {
                 id_to_label_map[id] = ASTLabelRegistry.ghostLabelIndex();
                 continue;
@@ -263,4 +267,82 @@ test "label ID dispenser reuses originals before allocating suffixes" {
     try std.testing.expectEqualStrings("alpha_2", try generated.label(alpha_copy));
     try std.testing.expectEqualStrings("add_1", try generated.label(builtin_copy));
     try std.testing.expect(try generated.ghost(ghost_id));
+}
+
+test "label ID dispenser owns compacted ID storage through failures" {
+    const EVMDialect = @import("../backends/evm/evm_dialect.zig").EVMDialect;
+    const Check = struct {
+        const Case = enum { duplicates, empty, selected_empty, out_of_bounds };
+
+        fn run(allocator: std.mem.Allocator, dialect: AST.Dialect, case: Case) !void {
+            // The returned registry must remain independent after both its
+            // parent and the dispenser's temporary owners have been destroyed.
+            var generated = blk: {
+                var parent = try ASTLabelRegistry.init(
+                    allocator,
+                    &.{ "", "alpha", "alpha_1", "add" },
+                    &.{ 0, 1, 2, 3 },
+                );
+                defer parent.deinit();
+                var dispenser = try LabelIDDispenser.init(allocator, &parent, &.{});
+                defer dispenser.deinit();
+                const alpha_copy = try dispenser.newID(1);
+                const builtin_copy = try dispenser.newID(3);
+                const ghost_id = try dispenser.newGhost();
+                const input: []const LabelID = switch (case) {
+                    .duplicates => &.{ ghost_id, alpha_copy, 1, 3, 2, builtin_copy, alpha_copy, ghost_id, 2, 1 },
+                    .empty => &.{},
+                    .selected_empty => &.{ 1, 0, 1, 0 },
+                    .out_of_bounds => &.{ 1, 99, 99, 1 },
+                };
+                const original = try allocator.dupe(LabelID, input);
+                defer allocator.free(original);
+                var result = dispenser.generateNewLabels(input, dialect) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    try std.testing.expectEqualSlices(LabelID, original, input);
+                    try std.testing.expectEqual(switch (case) {
+                        .selected_empty => error.EmptyLabelIDCannotBeSelected,
+                        .out_of_bounds => error.LabelIDOutOfBounds,
+                        else => return err,
+                    }, err);
+                    return;
+                };
+                errdefer result.deinit();
+                try std.testing.expect(case == .duplicates or case == .empty);
+                try std.testing.expectEqualSlices(LabelID, original, input);
+                break :blk result;
+            };
+            defer generated.deinit();
+            if (case == .empty) {
+                try std.testing.expectEqual(@as(usize, 0), generated.maxID());
+                try std.testing.expectEqualStrings("", try generated.label(0));
+            } else {
+                try std.testing.expectEqual(@as(usize, 6), generated.maxID());
+                for ([_][]const u8{ "", "alpha", "alpha_1", "add", "alpha_2", "add_1" }, 0..) |expected, id|
+                    try std.testing.expectEqualStrings(expected, try generated.label(id));
+                try std.testing.expect(try generated.ghost(6));
+            }
+        }
+    };
+    var dialect = try EVMDialect.init(std.testing.allocator, .current(), false);
+    defer dialect.deinit();
+    for (std.enums.values(Check.Case)) |case|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{ dialect.dialect(), case });
+}
+
+test "label ID dispenser publishes reserved names once across allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, parent: *const ASTLabelRegistry) !void {
+            const reserved: []const []const u8 = &.{ "alpha_1", "beta", "gamma", "alpha_1", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda", "beta" };
+            var dispenser = try LabelIDDispenser.init(allocator, parent, reserved);
+            defer dispenser.deinit();
+            try std.testing.expectEqual(@as(usize, 11), dispenser.reserved_storage.items.len);
+            try std.testing.expectEqual(@as(usize, 11), dispenser.reserved_labels.count());
+            for (reserved) |label_value|
+                try std.testing.expect(dispenser.reserved_labels.contains(label_value));
+        }
+    };
+    var parent = try ASTLabelRegistry.initEmpty(std.testing.allocator);
+    defer parent.deinit();
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{&parent});
 }

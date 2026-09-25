@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const AST = @import("../ast.zig");
+const ASTWalker = @import("ast_walker.zig").ASTWalker;
 const NameCollector = @import("name_collector.zig");
 const OptimiserStepContext = @import("optimiser_step.zig").OptimiserStepContext;
 const Semantics = @import("semantics.zig");
@@ -91,15 +92,8 @@ pub const LoopInvariantCodeMotion = struct {
         for (declaration.variables.items) |variable|
             if (!self.ssa_variables.contains(variable.name)) return false;
         if (declaration.value) |expression| {
-            var references = try NameCollector.VariableReferencesCounter.countReferencesExpression(
-                self.scratch_allocator,
-                expression,
-            );
-            defer references.deinit(self.scratch_allocator);
-            for (references.items()) |entry|
-                if (variables_defined_in_scope.contains(entry.key) or
-                    !self.ssa_variables.contains(entry.key))
-                    return false;
+            if (!ReferenceAvailability.check(expression, self.ssa_variables, variables_defined_in_scope))
+                return false;
             const effects = try Semantics.SideEffectsCollector.collectExpression(
                 self.dialect,
                 expression,
@@ -156,6 +150,28 @@ pub const LoopInvariantCodeMotion = struct {
     }
 };
 
+/// Promotion needs availability for every referenced name. Duplicate occurrences
+/// do not change the result, so no reference-count map is needed.
+const ReferenceAvailability = struct {
+    ssa_variables: *const NameCollector.NameSet,
+    variables_defined_in_scope: *const NameCollector.NameSet,
+    available: bool = true,
+
+    fn check(expression: *const AST.Expression, ssa: *const NameCollector.NameSet, scoped: *const NameCollector.NameSet) bool {
+        var state: ReferenceAvailability = .{ .ssa_variables = ssa, .variables_defined_in_scope = scoped };
+        var walker = ASTWalker.init(&state, .{ .identifier = visitIdentifier });
+        walker.visitExpression(expression);
+        return state.available;
+    }
+
+    fn visitIdentifier(context: ?*anyopaque, _: *ASTWalker, identifier: *const AST.Identifier) void {
+        const self: *ReferenceAvailability = @ptrCast(@alignCast(context.?));
+        self.available = self.available and
+            !self.variables_defined_in_scope.contains(identifier.name) and
+            self.ssa_variables.contains(identifier.name);
+    }
+};
+
 fn deinitStatements(
     allocator: std.mem.Allocator,
     statements: *std.ArrayList(AST.Statement),
@@ -205,4 +221,48 @@ test "loop-invariant SSA declarations move before their loop" {
     const declaration = std.mem.find(u8, rendered, "let invariant").?;
     const loop_keyword = std.mem.find(u8, rendered, "for").?;
     try std.testing.expect(declaration < loop_keyword);
+}
+
+test "loop-invariant reference checks match counted references without materialization" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const YulName = @import("../yul_name.zig").YulName;
+    const allocator = std.testing.allocator;
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(
+        allocator,
+        "{ let r := user(outer, add(outer, scoped)) let c := add(1, 2) }",
+        "loop-references.yul",
+        &reporter,
+        .{},
+        .{},
+    )).?;
+    defer ast.deinit();
+    const names = [_]YulName{ try YulName.init("outer"), try YulName.init("scoped"), try YulName.init("unused") };
+    for (ast.root().statements.items) |*statement| {
+        const expression = statement.variable_declaration.value.?;
+        var references = try NameCollector.VariableReferencesCounter.countReferencesExpression(allocator, expression);
+        defer references.deinit(allocator);
+        for (0..8) |ssa_mask| {
+            for (0..8) |scope_mask| {
+                var ssa: NameCollector.NameSet = .{};
+                defer ssa.deinit(allocator);
+                var scoped: NameCollector.NameSet = .{};
+                defer scoped.deinit(allocator);
+                for (names, 0..) |name, index| {
+                    const bit = @as(usize, 1) << @intCast(index);
+                    if (ssa_mask & bit != 0) _ = try ssa.insert(allocator, name);
+                    if (scope_mask & bit != 0) _ = try scoped.insert(allocator, name);
+                }
+                var expected = true;
+                for (references.items()) |entry|
+                    if (scoped.contains(entry.key) or !ssa.contains(entry.key)) {
+                        expected = false;
+                        break;
+                    };
+                try std.testing.expectEqual(expected, ReferenceAvailability.check(expression, &ssa, &scoped));
+            }
+        }
+    }
 }

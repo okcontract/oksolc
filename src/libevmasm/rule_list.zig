@@ -18,6 +18,15 @@ pub const ExpressionId = u32;
 
 const max_word = ~@as(u256, 0);
 
+/// Yul preserves distinct AST occurrences for source annotations while using
+/// syntactic equality to match repeated captures. EVM expression classes
+/// already encode equivalence in their IDs.
+fn sameExpression(classes: anytype, left: ExpressionId, right: ExpressionId) bool {
+    if (@hasDecl(@TypeOf(classes.*), "sameExpression"))
+        return classes.sameExpression(left, right);
+    return left == right;
+}
+
 pub const SimplificationOptions = struct {
     /// Part 5 contains two three-argument replacements that are deliberately
     /// unavailable to the classic libevmasm expression optimizer.
@@ -161,7 +170,7 @@ pub fn simplifyWithOptions(
         }
 
         // Part 3: operations involving the same expression.
-        if (left == right) switch (instruction) {
+        if (sameExpression(classes, left, right)) switch (instruction) {
             .AND, .OR => return left,
             .XOR, .SUB, .LT, .SLT, .GT, .SGT, .MOD => return try classes.makeConstant(0, debug_data),
             .EQ => return try classes.makeConstant(1, debug_data),
@@ -174,28 +183,28 @@ pub fn simplifyWithOptions(
             if (try cancelNestedBinary(classes, .XOR, right, left)) |id| return id;
         }
         if (instruction == .OR) {
-            if (absorbs(classes, left, right, .AND)) return left;
-            if (absorbs(classes, right, left, .AND)) return right;
+            if (absorbedOccurrence(classes, left, right, .AND) != null) return left;
+            if (absorbedOccurrence(classes, right, left, .AND)) |first| return first;
             if (isNegation(classes, left, right) or isNegation(classes, right, left))
                 return try classes.makeConstant(max_word, debug_data);
         }
         if (instruction == .AND) {
-            if (absorbs(classes, left, right, .OR)) return left;
-            if (absorbs(classes, right, left, .OR)) return right;
+            if (absorbedOccurrence(classes, left, right, .OR) != null) return left;
+            if (absorbedOccurrence(classes, right, left, .OR)) |first| return first;
             if (isNegation(classes, left, right) or isNegation(classes, right, left))
                 return try classes.makeConstant(0, debug_data);
         }
 
         // Part 4.5: idempotent nested AND/OR and SIGNEXTEND.
         if (instruction == .AND or instruction == .OR) {
-            if (try dropRepeatedNested(classes, instruction, left, right, debug_data)) |id| return id;
-            if (try dropRepeatedNested(classes, instruction, right, left, debug_data)) |id| return id;
+            if (try dropRepeatedNested(classes, instruction, left, right, false, debug_data)) |id| return id;
+            if (try dropRepeatedNested(classes, instruction, right, left, true, debug_data)) |id| return id;
         }
         if (instruction == .SIGNEXTEND) {
             if (classes.operationArguments(right, .SIGNEXTEND)) |inner| {
                 if (inner.len == 2) {
-                    if (left == inner[0])
-                        return try classes.makeOperation(.SIGNEXTEND, inner, debug_data);
+                    if (sameExpression(classes, left, inner[0]))
+                        return try classes.makeOperation(.SIGNEXTEND, &.{ left, inner[1] }, debug_data);
                     if (left_constant) |outer_byte| if (classes.knownConstantValue(inner[0])) |inner_byte|
                         return try classes.makeOperation(
                             .SIGNEXTEND,
@@ -315,7 +324,7 @@ pub fn simplifyWithOptions(
 
             if (classes.operationArguments(left, .SHL)) |lhs_shift|
                 if (classes.operationArguments(right, .SHL)) |rhs_shift|
-                    if (lhs_shift.len == 2 and rhs_shift.len == 2 and lhs_shift[0] == rhs_shift[0]) {
+                    if (lhs_shift.len == 2 and rhs_shift.len == 2 and sameExpression(classes, lhs_shift[0], rhs_shift[0])) {
                         const combined = try classes.makeOperation(.AND, &.{ lhs_shift[1], rhs_shift[1] }, debug_data);
                         return try classes.makeOperation(.SHL, &.{ lhs_shift[0], combined }, debug_data);
                     };
@@ -384,7 +393,7 @@ pub fn simplifyWithOptions(
 
             if (classes.operationArguments(left, .ADD)) |nested| if (splitConstant(classes, nested)) |parts| {
                 const difference = try classes.makeOperation(.SUB, &.{ parts.expression, right }, debug_data);
-                return try classes.makeOperation(.ADD, &.{ difference, try classes.makeConstant(parts.value, debug_data) }, debug_data);
+                return try classes.makeOperation(.ADD, &.{ difference, try classes.materializeConstant(parts.constant_expression, parts.value, debug_data) }, debug_data);
             };
             if (classes.operationArguments(right, .ADD)) |nested| if (splitConstant(classes, nested)) |parts| {
                 const difference = try classes.makeOperation(.SUB, &.{ left, parts.expression }, debug_data);
@@ -395,13 +404,13 @@ pub fn simplifyWithOptions(
                 );
             };
             if (classes.operationArguments(left, .SUB)) |nested| if (nested.len == 2) {
-                if (classes.knownConstantValue(nested[1])) |_| {
+                if (classes.knownConstantValue(nested[1])) |constant| {
                     const difference = try classes.makeOperation(.SUB, &.{ nested[0], right }, debug_data);
-                    return try classes.makeOperation(.SUB, &.{ difference, nested[1] }, debug_data);
+                    return try classes.makeOperation(.SUB, &.{ difference, try classes.materializeConstant(nested[1], constant, debug_data) }, debug_data);
                 }
-                if (classes.knownConstantValue(nested[0])) |_| {
+                if (classes.knownConstantValue(nested[0])) |constant| {
                     const sum = try classes.makeOperation(.ADD, &.{ nested[1], right }, debug_data);
-                    return try classes.makeOperation(.SUB, &.{ nested[0], sum }, debug_data);
+                    return try classes.makeOperation(.SUB, &.{ try classes.materializeConstant(nested[0], constant, debug_data), sum }, debug_data);
                 }
             };
             if (classes.operationArguments(right, .SUB)) |nested| if (nested.len == 2) {
@@ -515,15 +524,16 @@ pub fn simplifyWithOptions(
 
 const ConstantOperand = struct {
     expression: ExpressionId,
+    constant_expression: ExpressionId,
     value: u256,
 };
 
 fn splitConstant(classes: anytype, arguments: []const ExpressionId) ?ConstantOperand {
     if (arguments.len != 2) return null;
     if (classes.knownConstantValue(arguments[1])) |value|
-        return .{ .expression = arguments[0], .value = value };
+        return .{ .expression = arguments[0], .constant_expression = arguments[1], .value = value };
     if (classes.knownConstantValue(arguments[0])) |value|
-        return .{ .expression = arguments[1], .value = value };
+        return .{ .expression = arguments[1], .constant_expression = arguments[0], .value = value };
     return null;
 }
 
@@ -540,19 +550,21 @@ fn cancelNestedBinary(
 ) !?ExpressionId {
     const nested = classes.operationArguments(nested_id, instruction) orelse return null;
     if (nested.len != 2) return null;
-    if (nested[0] == single) return nested[1];
-    if (nested[1] == single) return nested[0];
+    if (sameExpression(classes, nested[0], single)) return nested[1];
+    if (sameExpression(classes, nested[1], single)) return nested[0];
     return null;
 }
 
-fn absorbs(classes: anytype, single: ExpressionId, nested_id: ExpressionId, nested_instruction: Instruction) bool {
-    const nested = classes.operationArguments(nested_id, nested_instruction) orelse return false;
-    return nested.len == 2 and (nested[0] == single or nested[1] == single);
+fn absorbedOccurrence(classes: anytype, single: ExpressionId, nested_id: ExpressionId, nested_instruction: Instruction) ?ExpressionId {
+    const nested = classes.operationArguments(nested_id, nested_instruction) orelse return null;
+    if (nested.len != 2) return null;
+    for (nested) |operand| if (sameExpression(classes, operand, single)) return operand;
+    return null;
 }
 
 fn isNegation(classes: anytype, value: ExpressionId, possible_not: ExpressionId) bool {
     const arguments = classes.operationArguments(possible_not, .NOT) orelse return false;
-    return arguments.len == 1 and arguments[0] == value;
+    return arguments.len == 1 and sameExpression(classes, arguments[0], value);
 }
 
 fn dropRepeatedNested(
@@ -560,14 +572,17 @@ fn dropRepeatedNested(
     instruction: Instruction,
     nested_id: ExpressionId,
     repeated: ExpressionId,
+    repeated_is_first: bool,
     debug_data: DebugData,
 ) !?ExpressionId {
     const nested = classes.operationArguments(nested_id, instruction) orelse return null;
     if (nested.len != 2) return null;
-    return if (nested[0] == repeated or nested[1] == repeated)
-        try classes.makeOperation(instruction, nested, debug_data)
-    else
-        null;
+    // A repeated pattern capture keeps its first occurrence's annotations.
+    // The ordered rules first match the repeated value in the second slot.
+    const repeated_index: usize = if (sameExpression(classes, nested[1], repeated)) 1 else if (sameExpression(classes, nested[0], repeated)) 0 else return null;
+    var operands = [2]ExpressionId{ nested[0], nested[1] };
+    if (repeated_is_first) operands[repeated_index] = repeated;
+    return try classes.makeOperation(instruction, &operands, debug_data);
 }
 
 fn stripRedundantSignExtendMask(
@@ -645,7 +660,7 @@ fn reassociate(
         try classes.makeOperation(instruction, &.{ parts.expression, other }, debug_data);
     return try classes.makeOperation(
         instruction,
-        &.{ inner, try classes.makeConstant(parts.value, debug_data) },
+        &.{ inner, try classes.materializeConstant(parts.constant_expression, parts.value, debug_data) },
         debug_data,
     );
 }

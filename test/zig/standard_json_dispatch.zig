@@ -2451,11 +2451,25 @@ test "parallel progress and optimizer profiling retain parallel output" {
     for ([_][]const u8{
         "Solidity via-IR artifacts",
         "Solidity IR generation",
-        "Yul parse and analysis",
+        "Yul preparation and analysis",
         "Yul optimizer total",
         "Yul assembly",
     }) |metric_name|
         try std.testing.expect(profiler.metricsFor(metric_name) != null);
+    // Compilation has already destroyed generated owners and worker scratch.
+    // The profile retains scalar observations, never pointers into those arenas.
+    for ([_][]const u8{
+        "Generated Yul owner retained bytes",
+        "Backend worker scratch retained bytes",
+        "Backend worker artifact retained bytes",
+    }) |counter_name| {
+        const counter = profiler.counterFor(counter_name) orelse return error.MissingRetentionCounter;
+        try std.testing.expectEqual(@as(usize, 3), counter.sample_count);
+        try std.testing.expect(counter.maximum > 0);
+        try std.testing.expect(counter.total >= counter.maximum);
+    }
+    const report = try profiler.reportJsonAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(report);
 }
 
 const WorkerFailAllocator = struct {
@@ -2546,22 +2560,31 @@ const WorkerFailAllocator = struct {
 };
 
 test "parallel worker allocation failures propagate after outstanding jobs join" {
-    for ([_]usize{ 0, 8 }) |successful_worker_allocations| {
-        var failing = WorkerFailAllocator.init(
-            std.testing.allocator,
-            successful_worker_allocations,
-        );
-        try std.testing.expectError(
-            error.OutOfMemory,
-            compileWithParallelJobs(
-                failing.allocator(),
-                parallel_solidity_input,
-                2,
-                null,
-                null,
-                null,
-            ),
-        );
-        try std.testing.expect(failing.failed);
-    }
+    for ([_]bool{ false, true }) |profile_enabled|
+        for ([_]usize{ 0, 8 }) |successful_worker_allocations| {
+            var failing = WorkerFailAllocator.init(
+                std.testing.allocator,
+                successful_worker_allocations,
+            );
+            var profiler = Profiler.init(std.testing.allocator, std.testing.io);
+            defer profiler.deinit();
+            try std.testing.expectError(
+                error.OutOfMemory,
+                compileWithParallelJobs(
+                    failing.allocator(),
+                    parallel_solidity_input,
+                    2,
+                    if (profile_enabled) &profiler else null,
+                    null,
+                    null,
+                ),
+            );
+            try std.testing.expect(failing.failed);
+            if (profile_enabled) {
+                const counter = profiler.counterFor("Backend worker scratch retained bytes") orelse return error.MissingRetentionCounter;
+                try std.testing.expect(counter.sample_count > 0);
+                const report = try profiler.reportJsonAlloc(std.testing.allocator);
+                defer std.testing.allocator.free(report);
+            }
+        };
 }

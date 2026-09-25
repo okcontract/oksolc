@@ -133,9 +133,9 @@ pub fn validStringLiteral(literal: *const AST.Literal) bool {
     const hint = literal.value.hint() catch return false;
     if (hint) |representation| {
         if (representation.len > 32) return false;
-        var expected = valueOfStringLiteral(std.heap.page_allocator, representation) catch return false;
-        defer expected.deinit(std.heap.page_allocator);
-        return literal.value.numeric_value == expected.numeric_value;
+        var bytes: [32]u8 = @splat(0);
+        @memcpy(bytes[0..representation.len], representation);
+        return literal.value.numeric_value.? == std.mem.readInt(u256, &bytes, .big);
     }
     return true;
 }

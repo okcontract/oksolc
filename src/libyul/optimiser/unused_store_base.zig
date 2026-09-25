@@ -202,6 +202,7 @@ pub fn UnusedStoreBase(comptime Key: type) type {
                 if (case_value.value == null) has_default = true;
                 try self.visitBlock(&case_value.body);
                 try branches.append(self.allocator, self.active_stores);
+                self.active_stores = ActiveStores.init(self.allocator);
                 self.active_stores = try cloneActiveStores(self.allocator, &pre_state);
             }
             if (has_default) {
@@ -325,20 +326,24 @@ pub fn UnusedStoreBase(comptime Key: type) type {
             stores.deinit();
         }
 
+        /// Consumes source on success and failure, leaving a valid empty map.
+        /// Each managed statement set retains its own allocator when moved.
         fn merge(target: *ActiveStores, source: *ActiveStores) !void {
             defer {
-                source.deinit();
-                source.* = undefined;
+                const allocator = source.allocator;
+                deinitActiveStores(source);
+                source.* = ActiveStores.init(allocator);
             }
             var iterator = source.iterator();
             while (iterator.next()) |entry| {
                 const target_entry = try target.getOrPut(entry.key_ptr.*);
-                if (!target_entry.found_existing)
-                    target_entry.value_ptr.* = StatementSet.init(target.allocator);
+                if (!target_entry.found_existing) {
+                    target_entry.value_ptr.* = entry.value_ptr.*;
+                    entry.value_ptr.* = StatementSet.init(entry.value_ptr.allocator);
+                    continue;
+                }
                 var stores = entry.value_ptr.keyIterator();
                 while (stores.next()) |statement| try target_entry.value_ptr.put(statement.*, {});
-                entry.value_ptr.deinit();
-                entry.value_ptr.* = undefined;
             }
         }
 
@@ -347,4 +352,39 @@ pub fn UnusedStoreBase(comptime Key: type) type {
             sources.clearRetainingCapacity();
         }
     };
+}
+
+test "unused store merges move new sets and leave sources empty on failure" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const Base = UnusedStoreBase(u8);
+            var statements: [12]AST.Statement = @splat(.{ .block = .{} });
+            var target = Base.ActiveStores.init(allocator); // zlinter-disable-current-line require_errdefer_dealloc - defer deinitActiveStores releases all nested sets on every exit
+            defer Base.deinitActiveStores(&target);
+            var source = Base.ActiveStores.init(allocator); // zlinter-disable-current-line require_errdefer_dealloc - defer deinitActiveStores releases all nested sets on every exit
+            defer Base.deinitActiveStores(&source);
+            for (0..3) |key| {
+                const entry = try source.getOrPut(@intCast(key));
+                entry.value_ptr.* = Base.StatementSet.init(allocator);
+                for (statements[key * 4 ..][0..4]) |*statement|
+                    try entry.value_ptr.put(statement, {});
+            }
+            const existing = try target.getOrPut(1);
+            existing.value_ptr.* = Base.StatementSet.init(allocator);
+            try existing.value_ptr.put(&statements[0], {});
+            var source_keys = source.getPtr(0).?.keyIterator();
+            const moved_keys = source_keys.next().?;
+            Base.merge(&target, &source) catch |err| {
+                try std.testing.expectEqual(@as(u32, 0), source.count());
+                return err;
+            };
+            try std.testing.expectEqual(@as(u32, 0), source.count());
+            var target_keys = target.getPtr(0).?.keyIterator();
+            try std.testing.expectEqual(moved_keys, target_keys.next().?);
+            try std.testing.expectEqual(@as(u32, 5), target.getPtr(1).?.count());
+            for (0..3) |key| for (statements[key * 4 ..][0..4]) |*statement|
+                try std.testing.expect(target.getPtr(@intCast(key)).?.contains(statement));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }

@@ -33,7 +33,8 @@ pub const ImmutableRefs = struct {
         errdefer allocator.free(identifier);
         var offsets: std.ArrayList(usize) = .empty;
         errdefer offsets.deinit(allocator);
-        try offsets.appendSlice(allocator, self.offsets.items);
+        try offsets.ensureTotalCapacityPrecise(allocator, self.offsets.items.len);
+        offsets.appendSliceAssumeCapacity(self.offsets.items);
         return .{ .identifier = identifier, .offsets = offsets };
     }
 };
@@ -62,7 +63,8 @@ pub const CodeSectionLocation = struct {
     pub fn clone(self: *const CodeSectionLocation, allocator: std.mem.Allocator) !CodeSectionLocation {
         var locations: std.ArrayList(InstructionLocation) = .empty;
         errdefer locations.deinit(allocator);
-        try locations.appendSlice(allocator, self.instruction_locations.items);
+        try locations.ensureTotalCapacityPrecise(allocator, self.instruction_locations.items.len);
+        locations.appendSliceAssumeCapacity(self.instruction_locations.items);
         return .{
             .start = self.start,
             .end = self.end,
@@ -117,22 +119,28 @@ pub const LinkerObject = struct {
     pub fn clone(self: *const LinkerObject, allocator: std.mem.Allocator) !LinkerObject {
         var result: LinkerObject = .{};
         errdefer result.deinit(allocator);
-        try result.bytecode.appendSlice(allocator, self.bytecode.items);
+        try result.bytecode.ensureTotalCapacityPrecise(allocator, self.bytecode.items.len);
+        result.bytecode.appendSliceAssumeCapacity(self.bytecode.items);
+        // Reserve before cloning children: completed children transfer through
+        // non-failing appends and partial results always have one cleanup owner.
+        try result.link_references.ensureTotalCapacityPrecise(allocator, self.link_references.items.len);
         for (self.link_references.items) |reference| {
-            try result.link_references.append(allocator, .{
+            result.link_references.appendAssumeCapacity(.{
                 .offset = reference.offset,
                 .library_name = try allocator.dupe(u8, reference.library_name),
             });
         }
+        try result.immutable_references.ensureTotalCapacityPrecise(allocator, self.immutable_references.items.len);
         for (self.immutable_references.items) |reference| {
-            try result.immutable_references.append(allocator, .{
+            result.immutable_references.appendAssumeCapacity(.{
                 .hash = reference.hash,
                 .references = try reference.references.clone(allocator),
             });
         }
         result.code_section_location = try self.code_section_location.clone(allocator);
+        try result.function_debug_data.ensureTotalCapacityPrecise(allocator, self.function_debug_data.items.len);
         for (self.function_debug_data.items) |entry| {
-            try result.function_debug_data.append(allocator, .{
+            result.function_debug_data.appendAssumeCapacity(.{
                 .name = try allocator.dupe(u8, entry.name),
                 .data = entry.data,
             });
@@ -224,14 +232,17 @@ pub const LinkerObject = struct {
     /// Replaces every resolvable 20-byte placeholder and removes only those
     /// references. Address names and bytes are borrowed for the duration.
     pub fn link(self: *LinkerObject, allocator: std.mem.Allocator, addresses: []const LibraryAddress) LinkError!void {
+        // Reject malformed selected references before freeing any names or
+        // changing bytes. An error leaves the object safe to retry or destroy.
+        for (self.link_references.items) |reference| {
+            if (findLibrary(addresses, reference.library_name) == null) continue;
+            if (reference.offset > self.bytecode.items.len or
+                self.bytecode.items.len - reference.offset < H160.size)
+                return error.ReferenceOutOfBounds;
+        }
         var output_index: usize = 0;
         for (self.link_references.items) |reference| {
             if (findLibrary(addresses, reference.library_name)) |address| {
-                if (reference.offset > self.bytecode.items.len or
-                    self.bytecode.items.len - reference.offset < H160.size)
-                {
-                    return error.ReferenceOutOfBounds;
-                }
                 @memcpy(
                     self.bytecode.items[reference.offset..][0..H160.size],
                     address.bytes(),
@@ -394,4 +405,69 @@ test "append rebases references while clone is independent" {
     defer cloned.deinit(std.testing.allocator);
     cloned.bytecode.items[0] = 0xff;
     try std.testing.expectEqual(@as(u8, 1), first.bytecode.items[0]);
+}
+
+test "linker clone cleans all partial children on allocation failure" {
+    const allocator = std.testing.allocator;
+    var original: LinkerObject = .{};
+    defer original.deinit(allocator);
+    try original.bytecode.appendNTimes(allocator, 0, 40);
+    try original.putLinkReference(allocator, 0, "A");
+    try original.putLinkReference(allocator, 20, "B");
+    try original.putImmutableReference(allocator, 1, "first", &.{ 2, 4 });
+    try original.putImmutableReference(allocator, 2, "second", &.{6});
+    try original.putFunctionDebugData(allocator, "f", .{ .params = 2 });
+    try original.putFunctionDebugData(allocator, "g", .{ .returns = 1 });
+    original.code_section_location.start = 1;
+    original.code_section_location.end = 40;
+    try original.code_section_location.instruction_locations.append(allocator, .{ .start = 1, .end = 2 });
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, source: *const LinkerObject) !void {
+            var copy = try source.clone(failing);
+            defer copy.deinit(failing);
+            try std.testing.expectEqualSlices(u8, source.bytecode.items, copy.bytecode.items);
+            try std.testing.expectEqualStrings("first", copy.immutable_references.items[0].references.identifier);
+            try std.testing.expectEqualSlices(usize, &.{ 2, 4 }, copy.immutable_references.items[0].references.offsets.items);
+            try std.testing.expectEqual(@as(usize, 2), copy.function_debug_data.items[0].data.params);
+            try std.testing.expectEqual(@as(usize, 40), copy.code_section_location.end);
+            copy.bytecode.items[0] = 1;
+            copy.link_references.items[0].library_name[0] = 'C';
+            copy.immutable_references.items[0].references.offsets.items[0] = 8;
+            copy.function_debug_data.items[0].name[0] = 'h';
+            copy.code_section_location.instruction_locations.items[0].end = 9;
+            try std.testing.expectEqual(@as(u8, 0), source.bytecode.items[0]);
+            try std.testing.expectEqualStrings("A", source.link_references.items[0].library_name);
+            try std.testing.expectEqual(@as(usize, 2), source.immutable_references.items[0].references.offsets.items[0]);
+            try std.testing.expectEqualStrings("f", source.function_debug_data.items[0].name);
+            try std.testing.expectEqual(@as(usize, 2), source.code_section_location.instruction_locations.items[0].end);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{&original});
+}
+
+test "linker invalid late reference preserves ownership and permits retry" {
+    const allocator = std.testing.allocator;
+    for ([_]usize{ 21, std.math.maxInt(usize) }) |bad_offset| {
+        var object: LinkerObject = .{};
+        defer object.deinit(allocator);
+        try object.bytecode.appendNTimes(allocator, 0, 40);
+        try object.putLinkReference(allocator, 0, "A");
+        try object.putLinkReference(allocator, 10, "B");
+        try object.putLinkReference(allocator, bad_offset, "A");
+        const original_name = object.link_references.items[0].library_name.ptr;
+        var address = H160.init();
+        @memset(address.mutableBytes(), 0xab);
+        const addresses = [_]LibraryAddress{.{ .name = "A", .address = address }};
+        try std.testing.expectError(error.ReferenceOutOfBounds, object.link(allocator, &addresses));
+        try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 40), object.bytecode.items);
+        try std.testing.expectEqual(@as(usize, 3), object.link_references.items.len);
+        try std.testing.expectEqual(original_name, object.link_references.items[0].library_name.ptr);
+        try std.testing.expectEqualStrings("A", object.link_references.items[0].library_name);
+        const removed = object.link_references.orderedRemove(2);
+        allocator.free(removed.library_name);
+        try object.link(allocator, &addresses);
+        try std.testing.expectEqual(@as(usize, 1), object.link_references.items.len);
+        try std.testing.expectEqualStrings("B", object.link_references.items[0].library_name);
+        try std.testing.expectEqualSlices(u8, address.bytes(), object.bytecode.items[0..20]);
+    }
 }

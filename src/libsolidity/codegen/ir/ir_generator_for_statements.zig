@@ -19,7 +19,6 @@ const TypeBehavior = @import("../../ast/types.zig");
 const TypeProviderModule = @import("../../ast/type_provider.zig");
 const TokenModule = @import("../../../liblangutil/token.zig");
 const SourceLocation = @import("../../../liblangutil/source_location.zig").SourceLocation;
-const CommonData = @import("../../../libsolutil/common_data.zig");
 const Numeric = @import("../../../libsolutil/numeric.zig");
 const Keccak256 = @import("../../../libsolutil/keccak256.zig");
 const FunctionSelector = @import("../../../libsolutil/function_selector.zig");
@@ -36,22 +35,19 @@ const YulAST = @import("../../../libyul/ast.zig");
 const YulAsmPrinter = @import("../../../libyul/asm_printer.zig").AsmPrinter;
 const YulASTCopier = @import("../../../libyul/optimiser/ast_copier.zig").ASTCopier;
 const YulName = @import("../../../libyul/yul_name.zig").YulName;
-const YulUtilities = @import("../../../libyul/utilities.zig");
+
+const Builder = @import("../../../libyul/ast_builder.zig").Builder;
+const Generated = @import("../../../libyul/generated_code.zig");
+const DebugData = @import("../../../liblangutil/debug_data.zig").DebugData;
 
 const max_ast_depth = 4096;
 
 pub const PlaceholderCallback = struct {
     context: *anyopaque,
-    generate_fn: *const fn (
-        *anyopaque,
-        std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8,
+    generate_fn: *const fn (*anyopaque, Builder) GeneratorError!YulAST.Block,
 
-    pub fn generate(
-        self: PlaceholderCallback,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
-        return self.generate_fn(self.context, allocator);
+    pub fn generate(self: PlaceholderCallback, builder: Builder) GeneratorError!YulAST.Block {
+        return self.generate_fn(self.context, builder);
     }
 };
 
@@ -104,7 +100,8 @@ pub const IRGeneratorForStatements = struct {
     utils: *YulUtilFunctionsModule.YulUtilFunctions,
     optimiser_settings: OptimiserSettings,
     placeholder_callback: ?PlaceholderCallback,
-    output: std.ArrayList(u8) = .empty,
+    output: Generated.Buffer,
+    active_location: SourceLocation = .{},
     current_location: SourceLocation = .{},
     last_location: SourceLocation = .{},
     has_last_location: bool = false,
@@ -115,18 +112,18 @@ pub const IRGeneratorForStatements = struct {
         utils: *YulUtilFunctionsModule.YulUtilFunctions,
         optimiser_settings: OptimiserSettings,
         placeholder_callback: ?PlaceholderCallback,
-    ) IRGeneratorForStatements {
+    ) GeneratorError!IRGeneratorForStatements {
         return .{
             .allocator = allocator,
             .context = context,
             .utils = utils,
             .optimiser_settings = optimiser_settings,
             .placeholder_callback = placeholder_callback,
+            .output = .{ .generator = try context.functionCollector().generator(utils.evm_version) },
         };
     }
 
     pub fn deinit(self: *IRGeneratorForStatements) void {
-        self.output.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -148,15 +145,29 @@ pub const IRGeneratorForStatements = struct {
         );
     }
 
-    pub fn codeBorrowed(self: *const IRGeneratorForStatements) []const u8 {
-        return self.output.items;
+    pub fn takeCode(self: *IRGeneratorForStatements) YulAST.Block {
+        return self.output.take();
     }
 
-    pub fn codeAlloc(
-        self: *const IRGeneratorForStatements,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
-        return allocator.dupe(u8, self.output.items);
+    /// The enclosing code's last emitted token supplies the origin when an
+    /// inline ast-id comment consumes a pending source annotation.
+    pub fn inheritSourceLocation(self: *IRGeneratorForStatements, location: SourceLocation) void {
+        std.debug.assert(self.output.block.statements.items.len == 0);
+        if (!self.context.debug_info_selection.none()) self.active_location = location;
+    }
+
+    // Test projection; production generators consume takeCode().
+    fn codeAlloc(self: *const IRGeneratorForStatements, allocator: std.mem.Allocator) GeneratorError![]u8 {
+        var printer = YulAsmPrinter.init(allocator, self.output.generator.dialect, self.context.source_index_to_name, .{ .location = true, .ast_id = true }, null);
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(allocator);
+        for (self.output.block.statements.items) |*statement| {
+            const text = try printer.renderStatement(statement);
+            defer allocator.free(text);
+            try result.appendSlice(allocator, text);
+            try result.append(allocator, '\n');
+        }
+        return result.toOwnedSlice(allocator);
     }
 
     pub fn generate(
@@ -214,7 +225,10 @@ pub const IRGeneratorForStatements = struct {
         errdefer self.context.functionCollector().abortFunction(name);
 
         const type_ref = try variableType(declaration);
-        var generator = IRGeneratorForStatements.init(
+        try self.context.locationCommentContext().markSourceUsed(declaration.location.source_name orelse return error.InvalidAst);
+        const origin = if (self.context.debug_info_selection.none()) SourceLocation{} else declaration.location;
+        const header_builder = self.output.generator.withDebug(if (origin.isValid()) .{ .origin_location = origin } else null);
+        var generator = try IRGeneratorForStatements.init(
             self.allocator,
             self.context,
             self.utils,
@@ -222,31 +236,26 @@ pub const IRGeneratorForStatements = struct {
             null,
         );
         defer generator.deinit();
+        generator.inheritSourceLocation(origin);
         var value = try generator.evaluateExpression(initializer, type_ref);
         defer value.deinit();
-        const value_names = try value.commaSeparatedListAlloc();
-        defer self.allocator.free(value_names);
         var result = try IRVariableModule.IRVariable.init(
             self.allocator,
             "ret",
             type_ref,
         );
         defer result.deinit();
-        const result_names = try result.commaSeparatedListAlloc();
-        defer self.allocator.free(result_names);
-        const location = try Common.dispenseNodeLocationCommentAlloc(
-            self.allocator,
-            declaration,
-            self.context.locationCommentContext(),
-        );
-        defer self.allocator.free(location);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\n{s}\nfunction {s}() -> {s} {{\n{s}\n{s} := {s}\n}}\n",
-            .{ location, name, result_names, generator.codeBorrowed(), result_names, value_names },
-        );
-        defer self.allocator.free(code);
-        try self.context.functionCollector().finishFunction(name, code);
+        var result_names = try result.stackSlotsAlloc();
+        defer result_names.deinit();
+        const body_builder = self.output.generator.withDebug(if (generator.active_location.isValid()) .{ .origin_location = generator.active_location } else null);
+        var body: Generated.Buffer = .{ .generator = body_builder };
+        try body.append(generator.takeCode());
+        try body.add("@0 := @1", .{ result_names.borrowed(), try singleStackSlotExpression(&value) });
+        var definition = try header_builder.functionDefinition("function @0() -> @1 {}", .{ name, result_names.borrowed() });
+        definition.body = body.take();
+        definition.body.debug_data = header_builder.debug_data;
+        try self.context.functionCollector().finishGeneratedFunction(name, definition);
+        self.context.functionCollector().function_origin = generator.active_location;
         return name;
     }
 
@@ -278,9 +287,8 @@ pub const IRGeneratorForStatements = struct {
         defer zero.deinit();
         const zero_function = try self.utils.zeroValueFunction(local.type_ref, true);
         defer self.allocator.free(zero_function);
-        const call = try std.fmt.allocPrint(self.allocator, "{s}()", .{zero_function});
-        defer self.allocator.free(call);
-        try self.defineText(&zero, call);
+        const call = try self.buildExpression("@0()", .{zero_function});
+        try self.defineExpression(&zero, call);
         try self.declareAssign(local, &zero, false);
     }
 
@@ -333,11 +341,11 @@ pub const IRGeneratorForStatements = struct {
             .for_statement => try self.emitForStatement(node, depth + 1),
             .continue_statement => {
                 try self.setLocation(node);
-                try self.append("continue\n");
+                try self.add("continue", .{});
             },
             .break_statement => {
                 try self.setLocation(node);
-                try self.append("break\n");
+                try self.add("break", .{});
             },
             .return_statement => try self.emitReturn(node, depth + 1),
             .placeholder_statement => try self.emitPlaceholder(node),
@@ -380,36 +388,36 @@ pub const IRGeneratorForStatements = struct {
             self.context.setMemoryUnsafeInlineAssemblySeen();
 
         const operations = assembly.operations orelse return error.InvalidAst;
+        const previous_location = self.active_location;
+        try self.setLocation(node);
+        _ = try self.emissionDebug(true);
+        // The old inline printer emitted ast-id comments without source names.
+        // An adjacent root ast-id comment replaces the preceding @src comment.
+        if (operations.root().debug_data) |data| {
+            if (data.ast_id != null) self.active_location = previous_location;
+        }
         var translation_context: InlineAssemblyCopyContext = .{
-            .allocator = self.allocator,
+            .allocator = self.output.generator.allocator(),
+            .origin = self.active_location,
             .generation_context = self.context,
             .references = annotation.external_references.items,
         };
         var copier = YulASTCopier.initWithHooks(
-            self.allocator,
+            self.output.generator.allocator(),
             &translation_context,
             .{
+                .translate_debug_data = InlineAssemblyCopyContext.translateDebugData,
                 .translate_expression = InlineAssemblyCopyContext.translateExpression,
                 .translate_identifier_node = InlineAssemblyCopyContext.translateIdentifierNode,
                 .translate_identifier = InlineAssemblyCopyContext.translateIdentifierName,
             },
         );
-        var translated = copier.translateAst(operations) catch |err| switch (err) {
+        const translated = copier.translateBlock(operations.root()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidAst,
         };
-        defer translated.deinit();
-        const rendered = YulAsmPrinter.formatDefault(
-            self.allocator,
-            &translated,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidAst,
-        };
-        defer self.allocator.free(rendered);
-        try self.setLocation(node);
-        try self.append(rendered);
-        try self.append("\n");
+        try self.output.block.statements.append(self.output.generator.allocator(), .{ .block = translated });
+        _ = try self.emissionDebug(true);
     }
 
     fn emitTryStatement(
@@ -431,34 +439,37 @@ pub const IRGeneratorForStatements = struct {
         defer self.allocator.free(success_condition);
 
         try self.setLocation(node);
-        try self.appendFmt("switch iszero({s})\n", .{success_condition});
-        try self.append("case 0 { // success case\n");
+        const dispatch = try self.beginSwitch(try self.buildExpression("iszero(@0)", .{success_condition}), 2);
+        {
+            const scope = try self.beginCase(dispatch, 0);
+            defer scope.finish();
 
-        const success_clause_node = try ASTImplementation.trySuccessClause(statement);
-        const success_clause = success_clause_node.payload.try_catch_clause;
-        if (success_clause.parameters) |parameters_node| {
-            if (parameters_node.nodeKind() != .parameter_list)
-                return error.InvalidAst;
-            const parameters = parameters_node.payload.parameter_list.parameters;
-            if (parameters.len == 1) {
-                const local = try self.context.addLocalVariable(parameters[0]);
-                try self.assignConverted(local, &external_call, true);
-            } else {
-                for (parameters, 0..) |parameter, index| {
-                    const local = try self.context.addLocalVariable(parameter);
-                    var component = try external_call.tupleComponent(index);
-                    defer component.deinit();
-                    try self.assignConverted(local, &component, true);
+            const success_clause_node = try ASTImplementation.trySuccessClause(statement);
+            const success_clause = success_clause_node.payload.try_catch_clause;
+            if (success_clause.parameters) |parameters_node| {
+                if (parameters_node.nodeKind() != .parameter_list)
+                    return error.InvalidAst;
+                const parameters = parameters_node.payload.parameter_list.parameters;
+                if (parameters.len == 1) {
+                    const local = try self.context.addLocalVariable(parameters[0]);
+                    try self.assignConverted(local, &external_call, true);
+                } else {
+                    for (parameters, 0..) |parameter, index| {
+                        const local = try self.context.addLocalVariable(parameter);
+                        var component = try external_call.tupleComponent(index);
+                        defer component.deinit();
+                        try self.assignConverted(local, &component, true);
+                    }
                 }
             }
+            try self.emitStatement(success_clause.block, depth + 1);
+            try self.setLocation(node);
+            _ = try self.emissionDebug(true);
         }
-        try self.emitStatement(success_clause.block, depth + 1);
-        try self.setLocation(node);
-        try self.append("}\n");
-
-        try self.append("default { // failure case\n");
+        const scope = try self.beginCase(dispatch, null);
+        defer scope.finish();
         try self.emitCatchClauses(node, depth + 1);
-        try self.append("}\n");
+        _ = try self.emissionDebug(true);
     }
 
     fn emitCatchClauses(
@@ -475,45 +486,51 @@ pub const IRGeneratorForStatements = struct {
         try self.setLocation(node);
         const run_fallback = try self.context.newYulVariable();
         defer self.allocator.free(run_fallback);
-        try self.appendFmt("let {s} := 1\n", .{run_fallback});
+        try self.add("let @0 := 1\n", .{run_fallback});
 
-        if (error_clause != null or panic_clause != null) {
+        const case_count = @as(usize, @intFromBool(error_clause != null)) + @intFromBool(panic_clause != null);
+        const dispatch = if (case_count != 0) blk: {
             const selector = try self.utils.returnDataSelectorFunction();
             defer self.allocator.free(selector);
-            try self.appendFmt("switch {s}()\n", .{selector});
-        }
+            break :blk try self.beginSwitch(try self.buildExpression("@0()", .{selector}), case_count);
+        } else null;
 
         if (error_clause) |clause_node| {
             const selector = FunctionSelector.selectorFromSignatureU32("Error(string)");
-            try self.appendFmt("case {d} {{\n", .{selector});
+            const case_scope = try self.beginCase(dispatch.?, selector);
+            defer case_scope.finish();
             try self.setLocation(clause_node);
             const data_variable = try self.context.newYulVariable();
             defer self.allocator.free(data_variable);
             const decoder = try self.utils.tryDecodeErrorMessageFunction();
             defer self.allocator.free(decoder);
-            try self.appendFmt("let {s} := {s}()\n", .{ data_variable, decoder });
-            try self.appendFmt("if {s} {{\n", .{data_variable});
-            try self.appendFmt("{s} := 0\n", .{run_fallback});
-            const clause = clause_node.payload.try_catch_clause;
-            if (clause.parameters) |parameters_node| {
-                if (parameters_node.nodeKind() != .parameter_list or
-                    parameters_node.payload.parameter_list.parameters.len != 1)
-                    return error.InvalidAst;
-                const local = try self.context.addLocalVariable(
-                    parameters_node.payload.parameter_list.parameters[0],
-                );
-                try self.defineText(local, data_variable);
+            try self.add("let @0 := @1()\n", .{ data_variable, decoder });
+            {
+                const scope = try self.beginIf(try self.buildExpression("@0", .{data_variable}));
+                defer scope.finish();
+                try self.add("@0 := 0\n", .{run_fallback});
+                const clause = clause_node.payload.try_catch_clause;
+                if (clause.parameters) |parameters_node| {
+                    if (parameters_node.nodeKind() != .parameter_list or
+                        parameters_node.payload.parameter_list.parameters.len != 1)
+                        return error.InvalidAst;
+                    const local = try self.context.addLocalVariable(
+                        parameters_node.payload.parameter_list.parameters[0],
+                    );
+                    try self.defineExpression(local, try self.buildExpression("@0", .{data_variable}));
+                }
+                try self.emitStatement(clause.block, depth + 1);
+                try self.setLocation(clause_node);
+                _ = try self.emissionDebug(true);
             }
-            try self.emitStatement(clause.block, depth + 1);
-            try self.setLocation(clause_node);
-            try self.append("}\n");
             try self.setLocation(node);
-            try self.append("}\n");
+            _ = try self.emissionDebug(true);
         }
 
         if (panic_clause) |clause_node| {
             const selector = FunctionSelector.selectorFromSignatureU32("Panic(uint256)");
-            try self.appendFmt("case {d} {{\n", .{selector});
+            const case_scope = try self.beginCase(dispatch.?, selector);
+            defer case_scope.finish();
             try self.setLocation(clause_node);
             const success = try self.context.newYulVariable();
             defer self.allocator.free(success);
@@ -521,40 +538,44 @@ pub const IRGeneratorForStatements = struct {
             defer self.allocator.free(code);
             const decoder = try self.utils.tryDecodePanicDataFunction();
             defer self.allocator.free(decoder);
-            try self.appendFmt(
-                "let {s}, {s} := {s}()\n",
+            try self.add(
+                "let @0, @1 := @2()\n",
                 .{ success, code, decoder },
             );
-            try self.appendFmt("if {s} {{\n", .{success});
-            try self.appendFmt("{s} := 0\n", .{run_fallback});
-            const clause = clause_node.payload.try_catch_clause;
-            if (clause.parameters) |parameters_node| {
-                if (parameters_node.nodeKind() != .parameter_list or
-                    parameters_node.payload.parameter_list.parameters.len != 1)
-                    return error.InvalidAst;
-                const local = try self.context.addLocalVariable(
-                    parameters_node.payload.parameter_list.parameters[0],
-                );
-                try self.defineText(local, code);
+            {
+                const scope = try self.beginIf(try self.buildExpression("@0", .{success}));
+                defer scope.finish();
+                try self.add("@0 := 0\n", .{run_fallback});
+                const clause = clause_node.payload.try_catch_clause;
+                if (clause.parameters) |parameters_node| {
+                    if (parameters_node.nodeKind() != .parameter_list or
+                        parameters_node.payload.parameter_list.parameters.len != 1)
+                        return error.InvalidAst;
+                    const local = try self.context.addLocalVariable(
+                        parameters_node.payload.parameter_list.parameters[0],
+                    );
+                    try self.defineExpression(local, try self.buildExpression("@0", .{code}));
+                }
+                try self.emitStatement(clause.block, depth + 1);
+                try self.setLocation(clause_node);
+                _ = try self.emissionDebug(true);
             }
-            try self.emitStatement(clause.block, depth + 1);
-            try self.setLocation(clause_node);
-            try self.append("}\n");
             try self.setLocation(node);
-            try self.append("}\n");
+            _ = try self.emissionDebug(true);
         }
 
         try self.setLocation(node);
-        try self.appendFmt("if {s} {{\n", .{run_fallback});
+        const scope = try self.beginIf(try self.buildExpression("@0", .{run_fallback}));
+        defer scope.finish();
         if (ASTImplementation.tryFallbackClause(statement)) |fallback|
             try self.emitCatchFallback(fallback, depth + 1)
         else {
             const forwarding_revert = try self.utils.forwardingRevertFunction();
             defer self.allocator.free(forwarding_revert);
-            try self.appendFmt("{s}()\n", .{forwarding_revert});
+            try self.add("@0()\n", .{forwarding_revert});
         }
         try self.setLocation(node);
-        try self.append("}\n");
+        _ = try self.emissionDebug(true);
     }
 
     fn emitCatchFallback(
@@ -579,9 +600,8 @@ pub const IRGeneratorForStatements = struct {
             const local = try self.context.addLocalVariable(parameter);
             const extract = try self.utils.extractReturndataFunction();
             defer self.allocator.free(extract);
-            const call = try std.fmt.allocPrint(self.allocator, "{s}()", .{extract});
-            defer self.allocator.free(call);
-            try self.defineText(local, call);
+            const call = try self.buildExpression("@0()", .{extract});
+            try self.defineExpression(local, call);
         }
         try self.emitStatement(clause.block, depth + 1);
     }
@@ -632,22 +652,31 @@ pub const IRGeneratorForStatements = struct {
         const statement = node.payload.if_statement;
         var condition = try self.emitExpression(statement.condition, depth + 1);
         defer condition.deinit();
-        const condition_text = try condition.commaSeparatedListAlloc();
-        defer self.allocator.free(condition_text);
+        const value = try self.variableExpression(&condition);
         try self.setLocation(node);
         if (statement.false_body) |false_body| {
-            try self.appendFmt("switch {s}\ncase 0 {{\n", .{condition_text});
-            try self.emitStatement(false_body, depth + 1);
-            try self.setLocation(node);
-            try self.append("}\ndefault {\n");
-            try self.emitStatement(statement.true_body, depth + 1);
-            try self.setLocation(node);
-            try self.append("}\n");
+            try self.add("switch @0 case 0 {} default {}", .{value});
+            const dispatch = &self.output.block.statements.items[self.output.block.statements.items.len - 1].switch_statement;
+            {
+                const scope = self.enterBody(&dispatch.cases.items[0].body);
+                defer scope.finish();
+                try self.emitStatement(false_body, depth + 1);
+                try self.setLocation(node);
+                _ = try self.emissionDebug(true);
+            }
+            {
+                const scope = self.enterBody(&dispatch.cases.items[1].body);
+                defer scope.finish();
+                try self.emitStatement(statement.true_body, depth + 1);
+                try self.setLocation(node);
+                _ = try self.emissionDebug(true);
+            }
         } else {
-            try self.appendFmt("if {s} {{\n", .{condition_text});
+            const scope = try self.beginIf(value);
+            defer scope.finish();
             try self.emitStatement(statement.true_body, depth + 1);
             try self.setLocation(node);
-            try self.append("}\n");
+            _ = try self.emissionDebug(true);
         }
     }
 
@@ -661,28 +690,32 @@ pub const IRGeneratorForStatements = struct {
         if (statement.is_do_while) {
             const first_run = try self.context.newYulVariable();
             defer self.allocator.free(first_run);
-            try self.appendFmt("let {s} := 1\nfor {{\n}} 1 {{\n}}\n{{\n", .{first_run});
-            try self.appendFmt("if iszero({s}) {{\n", .{first_run});
-            var condition = try self.emitExpression(statement.condition, depth + 1);
-            defer condition.deinit();
-            const condition_text = try condition.commaSeparatedListAlloc();
-            defer self.allocator.free(condition_text);
-            try self.appendFmt("if iszero({s}) {{ break }}\n}}\n{s} := 0\n", .{
-                condition_text,
-                first_run,
-            });
+            try self.add("let @0 := 1 for {} 1 {} {}", .{first_run});
+            const loop = &self.output.block.statements.items[self.output.block.statements.items.len - 1].for_loop;
+            const loop_scope = self.enterBody(&loop.body);
+            defer loop_scope.finish();
+            {
+                const condition_scope = try self.beginIf(try self.buildExpression("iszero(@0)", .{first_run}));
+                defer condition_scope.finish();
+                var condition = try self.emitExpression(statement.condition, depth + 1);
+                defer condition.deinit();
+                try self.add("if iszero(@0) { break }", .{try self.variableExpression(&condition)});
+                _ = try self.emissionDebug(true);
+            }
+            try self.add("@0 := 0", .{first_run});
             try self.emitStatement(statement.body, depth + 1);
-            try self.append("}\n");
+            _ = try self.emissionDebug(true);
             return;
         }
-        try self.append("for {\n} 1 {\n}\n{\n");
+        try self.add("for {} 1 {} {}", .{});
+        const loop = &self.output.block.statements.items[self.output.block.statements.items.len - 1].for_loop;
+        const scope = self.enterBody(&loop.body);
+        defer scope.finish();
         var condition = try self.emitExpression(statement.condition, depth + 1);
         defer condition.deinit();
-        const condition_text = try condition.commaSeparatedListAlloc();
-        defer self.allocator.free(condition_text);
-        try self.appendFmt("if iszero({s}) {{ break }}\n", .{condition_text});
+        try self.add("if iszero(@0) { break }", .{try self.variableExpression(&condition)});
         try self.emitStatement(statement.body, depth + 1);
-        try self.append("}\n");
+        _ = try self.emissionDebug(true);
     }
 
     fn emitForStatement(
@@ -692,33 +725,45 @@ pub const IRGeneratorForStatements = struct {
     ) GeneratorError!void {
         const statement = node.payload.for_statement;
         try self.setLocation(node);
-        try self.append("for {\n");
-        if (statement.initialization_expression) |initialization|
-            try self.emitStatement(initialization, depth + 1);
-        try self.append("} 1 {\n");
-        if (statement.loop_expression) |loop| {
-            const previous = self.context.arithmetic;
-            const annotation = ASTAnnotations.annotationConst(node);
-            const simple_counter = if (annotation) |value| switch (value.*) {
-                .for_statement => |entry| entry.is_simple_counter_loop.value orelse false,
-                else => false,
-            } else false;
-            if (simple_counter and
-                self.optimiser_settings.simple_counter_for_loop_unchecked_increment)
-                self.context.setArithmetic(.Wrapping);
-            defer self.context.setArithmetic(previous);
-            try self.emitStatement(loop, depth + 1);
+        try self.add("for {} 1 {} {}", .{});
+        const loop = &self.output.block.statements.items[self.output.block.statements.items.len - 1].for_loop;
+        {
+            const scope = self.enterBody(&loop.pre);
+            defer scope.finish();
+            if (statement.initialization_expression) |initialization|
+                try self.emitStatement(initialization, depth + 1);
+            _ = try self.emissionDebug(true);
         }
-        try self.append("}\n{\n");
+        loop.condition.?.literal.debug_data = try self.emissionDebug(true);
+        loop.post.debug_data = loop.condition.?.literal.debug_data;
+        {
+            const scope = self.enterBody(&loop.post);
+            defer scope.finish();
+            if (statement.loop_expression) |iteration| {
+                const previous = self.context.arithmetic;
+                const annotation = ASTAnnotations.annotationConst(node);
+                const simple_counter = if (annotation) |value| switch (value.*) {
+                    .for_statement => |entry| entry.is_simple_counter_loop.value orelse false,
+                    else => false,
+                } else false;
+                if (simple_counter and
+                    self.optimiser_settings.simple_counter_for_loop_unchecked_increment)
+                    self.context.setArithmetic(.Wrapping);
+                defer self.context.setArithmetic(previous);
+                try self.emitStatement(iteration, depth + 1);
+            }
+            _ = try self.emissionDebug(true);
+        }
+        loop.body.debug_data = try self.emissionDebug(true);
+        const scope = self.enterBody(&loop.body);
+        defer scope.finish();
         if (statement.condition) |condition_node| {
             var condition = try self.emitExpression(condition_node, depth + 1);
             defer condition.deinit();
-            const condition_text = try condition.commaSeparatedListAlloc();
-            defer self.allocator.free(condition_text);
-            try self.appendFmt("if iszero({s}) {{ break }}\n", .{condition_text});
+            try self.add("if iszero(@0) { break }", .{try self.variableExpression(&condition)});
         }
         try self.emitStatement(statement.body, depth + 1);
-        try self.append("}\n");
+        _ = try self.emissionDebug(true);
     }
 
     fn emitReturn(
@@ -755,7 +800,7 @@ pub const IRGeneratorForStatements = struct {
             }
         }
         try self.setLocation(node);
-        try self.append("leave\n");
+        try self.add("leave", .{});
     }
 
     fn emitPlaceholder(
@@ -764,10 +809,9 @@ pub const IRGeneratorForStatements = struct {
     ) GeneratorError!void {
         const callback = self.placeholder_callback orelse
             return error.MissingPlaceholderCallback;
-        const code = try callback.generate(self.allocator);
-        defer self.allocator.free(code);
         try self.setLocation(node);
-        try self.append(code);
+        const builder = self.output.generator.withDebug(try self.emissionDebug(true));
+        try self.output.append(try callback.generate(builder));
     }
 
     fn emitExpression(
@@ -846,25 +890,19 @@ pub const IRGeneratorForStatements = struct {
                         return error.InvalidAst;
                     const library = ASTImplementation.scope(declaration) orelse
                         return error.InvalidAst;
-                    const symbol = try self.linkerSymbolAlloc(library);
-                    defer self.allocator.free(symbol);
+                    const symbol = try self.linkerSymbol(library);
                     var address = try result.part("address");
                     defer address.deinit();
-                    try self.defineText(&address, symbol);
+                    try self.defineExpression(&address, symbol);
                     const selector_value = try TypeBehavior.externalIdentifier(
                         self.context.type_provider,
                         self.allocator,
                         member_function.*,
                     );
-                    const selector_text = try Numeric.toCompactHexWithPrefixAlloc(
-                        u256,
-                        self.allocator,
-                        selector_value,
-                    );
-                    defer self.allocator.free(selector_text);
+                    const selector_text = try self.numberHex(selector_value);
                     var selector = try result.part("functionSelector");
                     defer selector.deinit();
-                    try self.defineText(&selector, selector_text);
+                    try self.defineExpression(&selector, selector_text);
                 } else if (member_function.kind != .ArrayPush and
                     member_function.kind != .ArrayPop)
                     return error.InvalidAst;
@@ -878,24 +916,24 @@ pub const IRGeneratorForStatements = struct {
         if (owner_type.category() == .TypeType and
             owner_type.payload.TypeType.actual_type.category() == .Enum)
         {
+            // Visit qualifiers such as Library.Enum before emitting the value.
+            // Even a subsequently unused library reference is part of solc's
+            // optimizer input and can affect function-combining decisions.
+            var owner = try self.emitExpression(access.expression, depth + 1);
+            defer owner.deinit();
             const enum_type = owner_type.payload.TypeType.actual_type.payload.Enum;
             const members = enum_type.declaration.payload.enum_definition.members;
             for (members, 0..) |member, index| {
                 const name = (member.declarationConst() orelse
                     return error.InvalidAst).name;
                 if (!std.mem.eql(u8, name, access.member_name)) continue;
-                const expression = try std.fmt.allocPrint(
-                    self.allocator,
-                    "{d}",
-                    .{index},
-                );
-                defer self.allocator.free(expression);
+                const expression = try self.buildExpression("@0", .{index});
                 var result = try self.variableFromExpression(
                     node,
                 );
                 errdefer result.deinit();
                 try self.setLocation(node);
-                try self.defineText(&result, expression);
+                try self.defineExpression(&result, expression);
                 return result;
             }
             return error.InvalidAst;
@@ -916,21 +954,20 @@ pub const IRGeneratorForStatements = struct {
             errdefer result.deinit();
             var address_part = try result.part("address");
             defer address_part.deinit();
-            const owner_text = try owner.commaSeparatedListAlloc();
-            defer self.allocator.free(owner_text);
+            var owner_text_slots = try owner.stackSlotsAlloc();
+            defer owner_text_slots.deinit();
+            const owner_text = owner_text_slots.borrowed();
             const address_text = if (convert_contract_owner) blk: {
                 const conversion = try self.utils.conversionFunction(
                     owner.type_ref,
                     address_part.type_ref,
                 );
                 defer self.allocator.free(conversion);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}({s})",
+                break :blk try self.buildExpression(
+                    "@0(@1)",
                     .{ conversion, owner_text },
                 );
-            } else try self.allocator.dupe(u8, owner_text);
-            defer self.allocator.free(address_text);
+            } else try self.variableExpression(&owner);
             const signature = try callableSignatureAlloc(
                 self.context.type_provider,
                 self.allocator,
@@ -938,17 +975,12 @@ pub const IRGeneratorForStatements = struct {
                 function_type,
             );
             defer self.allocator.free(signature);
-            const selector_text = try Numeric.toCompactHexWithPrefixAlloc(
-                u32,
-                self.allocator,
-                FunctionSelector.selectorFromSignatureU32(signature),
-            );
-            defer self.allocator.free(selector_text);
+            const selector_text = try self.numberHex(FunctionSelector.selectorFromSignatureU32(signature));
             var selector_part = try result.part("functionSelector");
             defer selector_part.deinit();
             try self.setLocation(node);
-            try self.defineText(&address_part, address_text);
-            try self.defineText(&selector_part, selector_text);
+            try self.defineExpression(&address_part, address_text);
+            try self.defineExpression(&selector_part, selector_text);
             return result;
         }
         if (owner_type.category() == .Function and
@@ -984,18 +1016,13 @@ pub const IRGeneratorForStatements = struct {
                 Keccak256.keccak256(signature).toInteger()
             else
                 FunctionSelector.selectorFromSignatureU256(signature);
-            const expression = try Numeric.toCompactHexWithPrefixAlloc(
-                u256,
-                self.allocator,
-                selector_value,
-            );
-            defer self.allocator.free(expression);
+            const expression = try self.numberHex(selector_value);
             var result = try self.variableFromExpression(
                 node,
             );
             errdefer result.deinit();
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (owner_type.category() == .Function and
@@ -1013,13 +1040,12 @@ pub const IRGeneratorForStatements = struct {
                 node,
             );
             errdefer result.deinit();
-            const expression = try self.convertedValueTextAlloc(
+            const expression = try self.convertedValue(
                 &address,
                 result.type_ref,
             );
-            defer self.allocator.free(expression);
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (owner_type.category() == .Address) {
@@ -1039,13 +1065,12 @@ pub const IRGeneratorForStatements = struct {
                     errdefer result.deinit();
                     var address = try result.part("address");
                     defer address.deinit();
-                    const converted_owner = try self.convertedValueTextAlloc(
+                    const converted_owner = try self.convertedValue(
                         &owner,
                         address.type_ref,
                     );
-                    defer self.allocator.free(converted_owner);
                     try self.setLocation(node);
-                    try self.defineText(&address, converted_owner);
+                    try self.defineExpression(&address, converted_owner);
                     return result;
                 },
                 else => {},
@@ -1056,29 +1081,26 @@ pub const IRGeneratorForStatements = struct {
                 return error.UnsupportedExpression;
             var owner = try self.emitExpression(access.expression, depth + 1);
             defer owner.deinit();
-            const owner_text = try self.convertedValueTextAlloc(
+            const owner_text = try self.convertedValue(
                 &owner,
                 self.context.type_provider.address(),
             );
-            defer self.allocator.free(owner_text);
             const expression = if (std.mem.eql(u8, access.member_name, "balance"))
-                try std.fmt.allocPrint(self.allocator, "balance({s})", .{owner_text})
+                try self.buildExpression("balance(@0)", .{owner_text})
             else if (std.mem.eql(u8, access.member_name, "codehash"))
-                try std.fmt.allocPrint(self.allocator, "extcodehash({s})", .{owner_text})
+                try self.buildExpression("extcodehash(@0)", .{owner_text})
             else blk: {
                 const external_code = try self.utils.externalCodeFunction();
                 defer self.allocator.free(external_code);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}({s})",
+                break :blk try self.buildExpression(
+                    "@0(@1)",
                     .{ external_code, owner_text },
                 );
             };
-            defer self.allocator.free(expression);
             var result = try self.variableFromExpression(node);
             errdefer result.deinit();
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (owner_type.category() == .Struct) {
@@ -1108,48 +1130,44 @@ pub const IRGeneratorForStatements = struct {
                 {
                     var owner = try self.emitExpression(code_access.expression, depth + 1);
                     defer owner.deinit();
-                    const owner_text = try self.convertedValueTextAlloc(
+                    const owner_text = try self.convertedValue(
                         &owner,
                         self.context.type_provider.address(),
                     );
-                    defer self.allocator.free(owner_text);
-                    const expression = try std.fmt.allocPrint(
-                        self.allocator,
-                        "extcodesize({s})",
+                    const expression = try self.buildExpression(
+                        "extcodesize(@0)",
                         .{owner_text},
                     );
-                    defer self.allocator.free(expression);
                     var result = try self.variableFromExpression(
                         node,
                     );
                     errdefer result.deinit();
                     try self.setLocation(node);
-                    try self.defineText(&result, expression);
+                    try self.defineExpression(&result, expression);
                     return result;
                 }
             }
             var owner = try self.emitExpression(access.expression, depth + 1);
             defer owner.deinit();
-            const owner_text = try owner.commaSeparatedListAlloc();
-            defer self.allocator.free(owner_text);
+            var owner_text_slots = try owner.stackSlotsAlloc();
+            defer owner_text_slots.deinit();
+            const owner_text = owner_text_slots.borrowed();
             const array_type = if (owner_type.category() == .Array)
                 owner_type
             else
                 owner_type.payload.ArraySlice.array_type;
             const length = try self.utils.arrayLengthFunction(array_type);
             defer self.allocator.free(length);
-            const expression = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})",
+            const expression = try self.buildExpression(
+                "@0(@1)",
                 .{ length, owner_text },
             );
-            defer self.allocator.free(expression);
             var result = try self.variableFromExpression(
                 node,
             );
             errdefer result.deinit();
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (owner_type.category() == .FixedBytes and
@@ -1157,16 +1175,11 @@ pub const IRGeneratorForStatements = struct {
         {
             var owner = try self.emitExpression(access.expression, depth + 1);
             defer owner.deinit();
-            const expression = try std.fmt.allocPrint(
-                self.allocator,
-                "{d}",
-                .{owner_type.payload.FixedBytes.bytes},
-            );
-            defer self.allocator.free(expression);
+            const expression = try self.buildExpression("@0", .{owner_type.payload.FixedBytes.bytes});
             var result = try self.variableFromExpression(node);
             errdefer result.deinit();
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (owner_type.category() == .TypeType)
@@ -1206,11 +1219,7 @@ pub const IRGeneratorForStatements = struct {
                 );
             } else try self.allocator.dupe(u8, creation_object);
             defer self.allocator.free(object_path);
-            const quoted_object = try CommonData.escapeAndQuoteStringAlloc(
-                self.allocator,
-                object_path,
-            );
-            defer self.allocator.free(quoted_object);
+            const quoted_object = object_path;
             const allocation = try self.utils.allocationFunction();
             defer self.allocator.free(allocation);
             const size = try self.context.newYulVariable();
@@ -1219,24 +1228,14 @@ pub const IRGeneratorForStatements = struct {
                 node,
             );
             errdefer result.deinit();
-            const result_text = try result.commaSeparatedListAlloc();
-            defer self.allocator.free(result_text);
+            var result_text_slots = try result.stackSlotsAlloc();
+            defer result_text_slots.deinit();
+            const result_text = result_text_slots.borrowed();
             if (result_text.len == 0) return error.InvalidAst;
             try self.setLocation(node);
-            try self.appendFmt(
-                "let {s} := datasize({s})\nlet {s} := {s}(add({s}, 32))\nmstore({s}, {s})\ndatacopy(add({s}, 32), dataoffset({s}), {s})\n",
-                .{
-                    size,
-                    quoted_object,
-                    result_text,
-                    allocation,
-                    size,
-                    result_text,
-                    size,
-                    result_text,
-                    quoted_object,
-                    size,
-                },
+            try self.add(
+                "let @0 := datasize(@1)\nlet @2 := @3(add(@0, 32))\nmstore(@2, @0)\ndatacopy(add(@2, 32), dataoffset(@1), @0)\n",
+                .{ size, quoted_object, result_text, allocation },
             );
             return result;
         }
@@ -1253,14 +1252,12 @@ pub const IRGeneratorForStatements = struct {
                 node,
             );
             errdefer result.deinit();
-            const expression = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}()",
+            const expression = try self.buildExpression(
+                "@0()",
                 .{copy},
             );
-            defer self.allocator.free(expression);
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (std.mem.eql(u8, access.member_name, "interfaceId")) {
@@ -1275,18 +1272,13 @@ pub const IRGeneratorForStatements = struct {
                 self.allocator,
                 contract_type.declaration,
             );
-            const expression = try Numeric.toCompactHexWithPrefixAlloc(
-                u256,
-                self.allocator,
-                @as(u256, interface_id) << 224,
-            );
-            defer self.allocator.free(expression);
+            const expression = try self.numberHex(@as(u256, interface_id) << 224);
             var result = try self.variableFromExpression(
                 node,
             );
             errdefer result.deinit();
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (std.mem.eql(u8, access.member_name, "min") or
@@ -1294,24 +1286,17 @@ pub const IRGeneratorForStatements = struct {
             return self.emitMetaTypeBound(node, magic, access.member_name);
         if (std.mem.eql(u8, access.member_name, "sig")) {
             const mask = @as(u256, 0xffffffff) << 224;
-            const mask_text = try Numeric.toCompactHexWithPrefixAlloc(
-                u256,
-                self.allocator,
-                mask,
-            );
-            defer self.allocator.free(mask_text);
-            const expression = try std.fmt.allocPrint(
-                self.allocator,
-                "and(calldataload(0), {s})",
+            const mask_text = try self.numberHex(mask);
+            const expression = try self.buildExpression(
+                "and(calldataload(0), @0)",
                 .{mask_text},
             );
-            defer self.allocator.free(expression);
             var result = try self.variableFromExpression(
                 node,
             );
             errdefer result.deinit();
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (std.mem.eql(u8, access.member_name, "data")) {
@@ -1324,46 +1309,47 @@ pub const IRGeneratorForStatements = struct {
             var length = try result.part("length");
             defer length.deinit();
             try self.setLocation(node);
-            try self.defineText(&offset, "0");
-            try self.defineText(&length, "calldatasize()");
+            try self.defineExpression(&offset, try self.buildExpression("0", .{}));
+            try self.defineExpression(&length, try self.buildExpression("calldatasize()", .{}));
             return result;
         }
-        const expression = if (std.mem.eql(u8, access.member_name, "coinbase"))
-            "coinbase()"
+        const opcode = if (std.mem.eql(u8, access.member_name, "coinbase"))
+            "coinbase"
         else if (std.mem.eql(u8, access.member_name, "timestamp"))
-            "timestamp()"
+            "timestamp"
         else if (std.mem.eql(u8, access.member_name, "difficulty") or
             std.mem.eql(u8, access.member_name, "prevrandao"))
             if (self.context.evm_version.hasPrevRandao())
-                "prevrandao()"
+                "prevrandao"
             else
-                "difficulty()"
+                "difficulty"
         else if (std.mem.eql(u8, access.member_name, "number"))
-            "number()"
+            "number"
         else if (std.mem.eql(u8, access.member_name, "gaslimit"))
-            "gaslimit()"
+            "gaslimit"
         else if (std.mem.eql(u8, access.member_name, "sender"))
-            "caller()"
+            "caller"
         else if (std.mem.eql(u8, access.member_name, "value"))
-            "callvalue()"
+            "callvalue"
         else if (std.mem.eql(u8, access.member_name, "origin"))
-            "origin()"
+            "origin"
         else if (std.mem.eql(u8, access.member_name, "gasprice"))
-            "gasprice()"
+            "gasprice"
         else if (std.mem.eql(u8, access.member_name, "chainid"))
-            "chainid()"
+            "chainid"
         else if (std.mem.eql(u8, access.member_name, "basefee"))
-            "basefee()"
+            "basefee"
         else if (std.mem.eql(u8, access.member_name, "blobbasefee"))
-            "blobbasefee()"
+            "blobbasefee"
         else
             return error.UnsupportedExpression;
+        const expression = try self.buildExpression("@0()", .{opcode});
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         if (try TypeBehavior.sizeOnStack(result.type_ref) != 1)
             return error.UnsupportedExpression;
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -1407,6 +1393,8 @@ pub const IRGeneratorForStatements = struct {
                     return result;
                 }
 
+                var owner = try self.emitExpression(access.expression, depth + 1);
+                defer owner.deinit();
                 if (declaration) |referenced|
                     if (referenced.nodeKind() == .variable_declaration)
                         return self.emitVariableReference(node, referenced);
@@ -1436,34 +1424,23 @@ pub const IRGeneratorForStatements = struct {
                             const function = declaration orelse return error.InvalidAst;
                             if (function.nodeKind() != .function_definition)
                                 return error.InvalidAst;
-                            var owner = try self.emitExpression(
-                                access.expression,
-                                depth + 1,
-                            );
-                            defer owner.deinit();
                             var address = try result.part("address");
                             defer address.deinit();
                             var selector = try result.part("functionSelector");
                             defer selector.deinit();
-                            const owner_text = try self.convertedValueTextAlloc(
+                            const owner_text = try self.convertedValue(
                                 &owner,
                                 address.type_ref,
                             );
-                            defer self.allocator.free(owner_text);
                             const selector_value = try TypeBehavior.externalIdentifier(
                                 self.context.type_provider,
                                 self.allocator,
                                 function_type.*,
                             );
-                            const selector_text = try Numeric.toCompactHexWithPrefixAlloc(
-                                u256,
-                                self.allocator,
-                                selector_value,
-                            );
-                            defer self.allocator.free(selector_text);
+                            const selector_text = try self.numberHex(selector_value);
                             try self.setLocation(node);
-                            try self.defineText(&address, owner_text);
-                            try self.defineText(&selector, selector_text);
+                            try self.defineExpression(&address, owner_text);
+                            try self.defineExpression(&selector, selector_text);
                             return result;
                         },
                         else => return error.InvalidAst,
@@ -1527,10 +1504,9 @@ pub const IRGeneratorForStatements = struct {
                 if (referenced.payload.contract_definition.contract_kind == .Library) {
                     var address = try result.part("address");
                     defer address.deinit();
-                    const symbol = try self.linkerSymbolAlloc(referenced);
-                    defer self.allocator.free(symbol);
+                    const symbol = try self.linkerSymbol(referenced);
                     try self.setLocation(node);
-                    try self.defineText(&address, symbol);
+                    try self.defineExpression(&address, symbol);
                 } else try self.setLocation(node);
                 return result;
             },
@@ -1576,14 +1552,14 @@ pub const IRGeneratorForStatements = struct {
                 const slot = try self.context.newYulVariable();
                 defer self.allocator.free(slot);
                 try self.setLocation(node);
-                try self.appendFmt(
-                    "let {s} := add({s}, {d})\n",
+                try self.add(
+                    "let @0 := add(@1, @2)\n",
                     .{ slot, base_text, member_offset.slot },
                 );
                 return IRLValueModule.IRLValue.initStorage(
                     self.allocator,
                     member_type,
-                    slot,
+                    try self.buildExpression("@0", .{slot}),
                     .{ .constant = member_offset.byte_offset },
                     false,
                 );
@@ -1600,14 +1576,14 @@ pub const IRGeneratorForStatements = struct {
                 const address = try self.context.newYulVariable();
                 defer self.allocator.free(address);
                 try self.setLocation(node);
-                try self.appendFmt(
-                    "let {s} := add({s}, {d})\n",
+                try self.add(
+                    "let @0 := add(@1, @2)\n",
                     .{ address, base_text, member_offset },
                 );
                 return IRLValueModule.IRLValue.initMemory(
                     self.allocator,
                     member_type,
-                    address,
+                    try self.buildExpression("@0", .{address}),
                     false,
                 );
             },
@@ -1637,8 +1613,8 @@ pub const IRGeneratorForStatements = struct {
         const address = try self.context.newYulVariable();
         defer self.allocator.free(address);
         try self.setLocation(node);
-        try self.appendFmt(
-            "let {s} := add({s}, {d})\n",
+        try self.add(
+            "let @0 := add(@1, @2)\n",
             .{ address, base_text, member_offset },
         );
         var result = try self.variableFromExpression(
@@ -1648,25 +1624,22 @@ pub const IRGeneratorForStatements = struct {
         const expression = if (TypeBehavior.isDynamicallyEncoded(result.type_ref)) blk: {
             const tail = try self.utils.accessCalldataTailFunction(result.type_ref);
             defer self.allocator.free(tail);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s}, {s})",
+            break :blk try self.buildExpression(
+                "@0(@1, @2)",
                 .{ tail, base_text, address },
             );
         } else if (result.type_ref.category() == .Array or
             result.type_ref.category() == .Struct)
-            try self.allocator.dupe(u8, address)
+            try self.buildExpression("@0", .{address})
         else blk: {
             const read = try self.utils.readFromCalldata(result.type_ref);
             defer self.allocator.free(read);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})",
+            break :blk try self.buildExpression(
+                "@0(@1)",
                 .{ read, address },
             );
         };
-        defer self.allocator.free(expression);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -1708,16 +1681,11 @@ pub const IRGeneratorForStatements = struct {
             },
             else => return error.UnsupportedExpression,
         };
-        const expression = try Numeric.toCompactHexWithPrefixAlloc(
-            u256,
-            self.allocator,
-            value,
-        );
-        defer self.allocator.free(expression);
+        const expression = try self.numberHex(value);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -1763,47 +1731,42 @@ pub const IRGeneratorForStatements = struct {
         if (array.reference.location != .CallData) return error.InvalidAst;
         var base = try self.emitExpression(access.base, depth + 1);
         defer base.deinit();
-        const base_text = try base.commaSeparatedListAlloc();
-        defer self.allocator.free(base_text);
+        var base_text_slots = try base.stackSlotsAlloc();
+        defer base_text_slots.deinit();
+        const base_text = base_text_slots.borrowed();
         var index = try self.emitExpression(index_node, depth + 1);
         defer index.deinit();
         // Upstream requests the bounds-checked access helper before rendering
         // the converted index expression. The collector preserves that order.
         const index_function = try self.utils.calldataArrayIndexAccessFunction(array_type);
         defer self.allocator.free(index_function);
-        const index_text = try self.convertedValueTextAlloc(
+        const index_text = try self.convertedValue(
             &index,
             self.context.type_provider.uint256(),
         );
-        defer self.allocator.free(index_text);
-        const address = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s}, {s})",
+        const address = try self.buildExpression(
+            "@0(@1, @2)",
             .{ index_function, base_text, index_text },
         );
-        defer self.allocator.free(address);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         const expression = if (array.isByteArrayOrString()) blk: {
             const cleanup = try self.utils.cleanupFunction(array.base_type);
             defer self.allocator.free(cleanup);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}(calldataload({s}))",
+            break :blk try self.buildExpression(
+                "@0(calldataload(@1))",
                 .{ cleanup, address },
             );
         } else if (TypeBehavior.isValueType(array.base_type)) blk: {
             const read = try self.utils.readFromCalldata(array.base_type);
             defer self.allocator.free(read);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})",
+            break :blk try self.buildExpression(
+                "@0(@1)",
                 .{ read, address },
             );
-        } else try self.allocator.dupe(u8, address);
-        defer self.allocator.free(expression);
+        } else address;
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -1841,17 +1804,15 @@ pub const IRGeneratorForStatements = struct {
         defer self.allocator.free(shift);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}(byte({s}, {s}))",
+        const expression = try self.buildExpression(
+            "@0(byte(@1, @2))",
             .{ shift, index_text, base_text },
         );
-        defer self.allocator.free(expression);
-        try self.appendFmt(
-            "if iszero(lt({s}, {d})) {{ {s}() }}\n",
+        try self.add(
+            "if iszero(lt(@0, @1)) { @2() }\n",
             .{ index_text, fixed_bytes.bytes, panic },
         );
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -1893,7 +1854,7 @@ pub const IRGeneratorForStatements = struct {
         if (start_value) |*value|
             try self.assignConverted(&slice_start, value, true)
         else
-            try self.defineText(&slice_start, "0");
+            try self.defineExpression(&slice_start, try self.buildExpression("0", .{}));
 
         const end_name = try self.context.newYulVariable();
         defer self.allocator.free(end_name);
@@ -1911,23 +1872,22 @@ pub const IRGeneratorForStatements = struct {
             try self.declareAssign(&slice_end, &length, true);
         }
 
-        const base_text = try base.commaSeparatedListAlloc();
-        defer self.allocator.free(base_text);
+        var base_text_slots = try base.stackSlotsAlloc();
+        defer base_text_slots.deinit();
+        const base_text = base_text_slots.borrowed();
         const start_text = try slice_start.nameAlloc();
         defer self.allocator.free(start_text);
         const end_text = try slice_end.nameAlloc();
         defer self.allocator.free(end_text);
         const range = try self.utils.calldataArrayIndexRangeAccess(array_type);
         defer self.allocator.free(range);
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s}, {s}, {s})",
+        const expression = try self.buildExpression(
+            "@0(@1, @2, @3)",
             .{ range, base_text, start_text, end_text },
         );
-        defer self.allocator.free(expression);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -1944,15 +1904,15 @@ pub const IRGeneratorForStatements = struct {
             errdefer result.deinit();
             const name = node.payload.identifier.name;
             const expression = if (std.mem.eql(u8, name, "this"))
-                "address()"
+                try self.buildExpression("address()", .{})
             else if (std.mem.eql(u8, name, "now"))
-                "timestamp()"
+                try self.buildExpression("timestamp()", .{})
             else if (try TypeBehavior.sizeOnStack(result.type_ref) == 0)
                 return result
             else
                 return error.InvalidAst;
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (declaration.nodeKind() == .function_definition) {
@@ -1978,10 +1938,9 @@ pub const IRGeneratorForStatements = struct {
             if (declaration.payload.contract_definition.contract_kind == .Library) {
                 var address = try result.part("address");
                 defer address.deinit();
-                const symbol = try self.linkerSymbolAlloc(declaration);
-                defer self.allocator.free(symbol);
+                const symbol = try self.linkerSymbol(declaration);
                 try self.setLocation(node);
-                try self.defineText(&address, symbol);
+                try self.defineExpression(&address, symbol);
             }
             return result;
         }
@@ -2016,9 +1975,8 @@ pub const IRGeneratorForStatements = struct {
             errdefer result.deinit();
             const function = try self.constantValueFunction(declaration);
             defer self.allocator.free(function);
-            const call = try std.fmt.allocPrint(self.allocator, "{s}()", .{function});
-            defer self.allocator.free(call);
-            try self.defineText(&result, call);
+            const call = try self.buildExpression("@0()", .{function});
+            try self.defineExpression(&result, call);
             return result;
         }
 
@@ -2066,9 +2024,8 @@ pub const IRGeneratorForStatements = struct {
         try self.setLocation(node);
         if (result.type_ref.category() == .StringLiteral)
             return result;
-        const value = try literalValueAlloc(self.allocator, node, result.type_ref);
-        defer self.allocator.free(value);
-        try self.defineText(&result, value);
+        const value = try self.literalValue(node, result.type_ref);
+        try self.defineExpression(&result, value);
         return result;
     }
 
@@ -2092,10 +2049,9 @@ pub const IRGeneratorForStatements = struct {
         errdefer result.deinit();
 
         if (common_type.category() == .RationalNumber) {
-            const folded = try literalValueAlloc(self.allocator, node, result.type_ref);
-            defer self.allocator.free(folded);
+            const folded = try self.literalValue(node, result.type_ref);
             try self.setLocation(node);
-            try self.defineText(&result, folded);
+            try self.defineExpression(&result, folded);
             return result;
         }
 
@@ -2106,15 +2062,16 @@ pub const IRGeneratorForStatements = struct {
             try self.assignConverted(&result, &left, true);
             const result_name = try result.nameAlloc();
             defer self.allocator.free(result_name);
-            if (operation.operator == .Or)
-                try self.appendFmt("if iszero({s}) {{\n", .{result_name})
+            const scope = try self.beginIf(if (operation.operator == .Or)
+                try self.buildExpression("iszero(@0)", .{result_name})
             else
-                try self.appendFmt("if {s} {{\n", .{result_name});
+                try self.buildExpression("@0", .{result_name}));
+            defer scope.finish();
             var right = try self.emitExpression(operation.right, depth + 1);
             defer right.deinit();
             try self.setLocation(node);
             try self.assignConverted(&result, &right, false);
-            try self.append("}\n");
+            _ = try self.emissionDebug(true);
             return result;
         }
 
@@ -2189,19 +2146,16 @@ pub const IRGeneratorForStatements = struct {
             defer self.allocator.free(right_text);
             const expression = if (self.context.arithmetic == .Checked and
                 base_source_type.category() == .RationalNumber)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}({s})",
+                try self.buildExpression(
+                    "@0(@1)",
                     .{ function, right_text },
                 )
             else
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}({s}, {s})",
+                try self.buildExpression(
+                    "@0(@1, @2)",
                     .{ function, left_text, right_text },
                 );
-            defer self.allocator.free(expression);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         if (TokenModule.isShiftOp(operation.operator)) {
@@ -2243,24 +2197,22 @@ pub const IRGeneratorForStatements = struct {
                 break :blk &converted_right_storage.?;
             };
 
-            const expression = try self.shiftExpressionAlloc(
+            const expression = try self.shiftExpression(
                 operation.operator,
                 converted_left,
                 converted_right,
             );
-            defer self.allocator.free(expression);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
-        const expression = try self.binaryExpressionAlloc(
+        const expression = try self.binaryExpression(
             operation.operator,
             common_type,
             &left,
             &right,
         );
-        defer self.allocator.free(expression);
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -2281,10 +2233,9 @@ pub const IRGeneratorForStatements = struct {
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         if (result.type_ref.category() == .RationalNumber) {
-            const folded = try literalValueAlloc(self.allocator, node, result.type_ref);
-            defer self.allocator.free(folded);
+            const folded = try self.literalValue(node, result.type_ref);
             try self.setLocation(node);
-            try self.defineText(&result, folded);
+            try self.defineExpression(&result, folded);
             return result;
         }
         if (operation.operator == .Inc or operation.operator == .Dec or
@@ -2298,11 +2249,10 @@ pub const IRGeneratorForStatements = struct {
                     .storage => |*storage| {
                         const clear = try self.utils.storageSetToZeroFunction(lvalue.type_ref);
                         defer self.allocator.free(clear);
-                        const offset = try storage.offsetStringAlloc(self.allocator);
-                        defer self.allocator.free(offset);
-                        try self.appendFmt(
-                            "{s}({s}, {s})\n",
-                            .{ clear, storage.slot, offset },
+                        const offset = try storage.offset.expression(self.output.generator);
+                        try self.add(
+                            "@0(@1, @2)\n",
+                            .{ clear, try storage.slotExpression(self.output.generator), offset },
                         );
                         return result;
                     },
@@ -2312,11 +2262,10 @@ pub const IRGeneratorForStatements = struct {
                             .Transient,
                         );
                         defer self.allocator.free(clear);
-                        const offset = try storage.offsetStringAlloc(self.allocator);
-                        defer self.allocator.free(offset);
-                        try self.appendFmt(
-                            "{s}({s}, {s})\n",
-                            .{ clear, storage.slot, offset },
+                        const offset = try storage.offset.expression(self.output.generator);
+                        try self.add(
+                            "@0(@1, @2)\n",
+                            .{ clear, try storage.slotExpression(self.output.generator), offset },
                         );
                         return result;
                     },
@@ -2333,13 +2282,11 @@ pub const IRGeneratorForStatements = struct {
                 defer zero.deinit();
                 const zero_function = try self.utils.zeroValueFunction(lvalue.type_ref, true);
                 defer self.allocator.free(zero_function);
-                const call = try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}()",
+                const call = try self.buildExpression(
+                    "@0()",
                     .{zero_function},
                 );
-                defer self.allocator.free(call);
-                try self.defineText(&zero, call);
+                try self.defineExpression(&zero, call);
                 try self.writeToLValue(&lvalue, &zero);
                 return result;
             }
@@ -2366,15 +2313,14 @@ pub const IRGeneratorForStatements = struct {
             else
                 try self.utils.decrementWrappingFunction(integer.*);
             defer self.allocator.free(function);
-            const original_text = try original.commaSeparatedListAlloc();
-            defer self.allocator.free(original_text);
-            const call = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})",
+            var original_text_slots = try original.stackSlotsAlloc();
+            defer original_text_slots.deinit();
+            const original_text = original_text_slots.borrowed();
+            const call = try self.buildExpression(
+                "@0(@1)",
                 .{ function, original_text },
             );
-            defer self.allocator.free(call);
-            try self.defineText(&modified, call);
+            try self.defineExpression(&modified, call);
             try self.writeToLValue(&lvalue, &modified);
             try self.declareAssign(
                 &result,
@@ -2385,24 +2331,23 @@ pub const IRGeneratorForStatements = struct {
         }
         var operand = try self.emitExpression(operation.sub_expression, depth + 1);
         defer operand.deinit();
-        const operand_text = try operand.commaSeparatedListAlloc();
-        defer self.allocator.free(operand_text);
+        var operand_text_slots = try operand.stackSlotsAlloc();
+        defer operand_text_slots.deinit();
+        const operand_text = operand_text_slots.borrowed();
         const expression = switch (operation.operator) {
             .Not => blk: {
                 const cleanup = try self.utils.cleanupFunction(result.type_ref);
                 defer self.allocator.free(cleanup);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}(iszero({s}))",
+                break :blk try self.buildExpression(
+                    "@0(iszero(@1))",
                     .{ cleanup, operand_text },
                 );
             },
             .BitNot => blk: {
                 const cleanup = try self.utils.cleanupFunction(result.type_ref);
                 defer self.allocator.free(cleanup);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}(not({s}))",
+                break :blk try self.buildExpression(
+                    "@0(not(@1))",
                     .{ cleanup, operand_text },
                 );
             },
@@ -2414,17 +2359,15 @@ pub const IRGeneratorForStatements = struct {
                 else
                     try self.utils.negateNumberWrappingFunction(integer.*);
                 defer self.allocator.free(function);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}({s})",
+                break :blk try self.buildExpression(
+                    "@0(@1)",
                     .{ function, operand_text },
                 );
             },
             else => return error.UnsupportedExpression,
         };
-        defer self.allocator.free(expression);
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -2456,7 +2399,7 @@ pub const IRGeneratorForStatements = struct {
         else
             right.type_ref;
         const needs_value_conversion = !TypeBehavior.equals(value_type, right.type_ref);
-        if (!needs_value_conversion) try self.append("\n");
+        if (!needs_value_conversion) _ = try self.emissionDebug(true);
         try self.setLocation(node);
         var converted: IRVariableModule.IRVariable = undefined;
         var has_converted = false;
@@ -2491,14 +2434,13 @@ pub const IRGeneratorForStatements = struct {
 
         var left = try self.readFromLValue(&lvalue);
         defer left.deinit();
-        const expression = try self.binaryExpressionAlloc(
+        const expression = try self.binaryExpression(
             binary_operator,
             result.type_ref,
             &left,
             value,
         );
-        defer self.allocator.free(expression);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         try self.writeToLValue(&lvalue, &result);
         return result;
     }
@@ -2513,24 +2455,32 @@ pub const IRGeneratorForStatements = struct {
         defer condition.deinit();
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
+        try self.setLocation(node);
         try self.declare(&result);
-        const condition_text = try self.convertedValueTextAlloc(
+        const condition_text = try self.convertedValue(
             &condition,
             self.context.type_provider.boolean(),
         );
-        defer self.allocator.free(condition_text);
         try self.setLocation(node);
-        try self.appendFmt("switch {s}\ncase 0 {{\n", .{condition_text});
-        var false_value = try self.emitExpression(conditional.false_expression, depth + 1);
-        defer false_value.deinit();
-        try self.setLocation(node);
-        try self.assignConverted(&result, &false_value, false);
-        try self.append("}\ndefault {\n");
-        var true_value = try self.emitExpression(conditional.true_expression, depth + 1);
-        defer true_value.deinit();
-        try self.setLocation(node);
-        try self.assignConverted(&result, &true_value, false);
-        try self.append("}\n");
+        const dispatch = try self.beginSwitch(condition_text, 2);
+        {
+            const scope = try self.beginCase(dispatch, 0);
+            defer scope.finish();
+            var false_value = try self.emitExpression(conditional.false_expression, depth + 1);
+            defer false_value.deinit();
+            try self.setLocation(node);
+            try self.assignConverted(&result, &false_value, false);
+            _ = try self.emissionDebug(true);
+        }
+        {
+            const scope = try self.beginCase(dispatch, null);
+            defer scope.finish();
+            var true_value = try self.emitExpression(conditional.true_expression, depth + 1);
+            defer true_value.deinit();
+            try self.setLocation(node);
+            try self.assignConverted(&result, &true_value, false);
+            _ = try self.emissionDebug(true);
+        }
         return result;
     }
 
@@ -2555,14 +2505,12 @@ pub const IRGeneratorForStatements = struct {
             defer position.deinit();
             const position_text = try position.nameAlloc();
             defer self.allocator.free(position_text);
-            const allocation = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({d})",
+            const allocation = try self.buildExpression(
+                "@0(@1)",
                 .{ allocate, tuple.components.len },
             );
-            defer self.allocator.free(allocation);
             try self.setLocation(node);
-            try self.defineText(&result, allocation);
+            try self.defineExpression(&result, allocation);
             const stride = try TypeBehavior.memoryStride(array.*);
             for (tuple.components, 0..) |maybe_component, index| {
                 const component = maybe_component orelse return error.InvalidAst;
@@ -2570,13 +2518,14 @@ pub const IRGeneratorForStatements = struct {
                 defer value.deinit();
                 var converted = try self.convert(&value, array.base_type);
                 defer converted.deinit();
-                const converted_text = try converted.commaSeparatedListAlloc();
-                defer self.allocator.free(converted_text);
+                var converted_text_slots = try converted.stackSlotsAlloc();
+                defer converted_text_slots.deinit();
+                const converted_text = converted_text_slots.borrowed();
                 const write = try self.utils.writeToMemoryFunction(array.base_type);
                 defer self.allocator.free(write);
                 try self.setLocation(node);
-                try self.appendFmt(
-                    "{s}(add({s}, {d}), {s})\n",
+                try self.add(
+                    "@0(add(@1, @2), @3)\n",
                     .{ write, position_text, @as(u256, index) * stride, converted_text },
                 );
             }
@@ -2641,16 +2590,15 @@ pub const IRGeneratorForStatements = struct {
                 result.type_ref,
             );
             defer self.allocator.free(conversion);
-            const value_text = try value.commaSeparatedListAlloc();
-            defer self.allocator.free(value_text);
-            const expression = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})",
+            var value_text_slots = try value.stackSlotsAlloc();
+            defer value_text_slots.deinit();
+            const value_text = value_text_slots.borrowed();
+            const expression = try self.buildExpression(
+                "@0(@1)",
                 .{ conversion, value_text },
             );
-            defer self.allocator.free(expression);
             try self.setLocation(node);
-            try self.defineText(&result, expression);
+            try self.defineExpression(&result, expression);
             return result;
         }
         switch (function_type.kind) {
@@ -2738,7 +2686,10 @@ pub const IRGeneratorForStatements = struct {
             var self_value = try bound_callee.?.part("self");
             defer self_value.deinit();
             try self_value.appendStackSlots(self.allocator, &arguments);
-        } else if (declaration == null) {
+        } else if (declaration == null or call.expression.nodeKind() != .identifier) {
+            // A resolved callee can still have a qualifier to evaluate. In
+            // particular, Library.function emits the library reference before
+            // its arguments even when the call itself is statically resolved.
             bound_callee = try self.emitExpression(call.expression, depth + 1);
         }
         var evaluated = try self.evaluateArguments(call.arguments, depth + 1);
@@ -2752,6 +2703,9 @@ pub const IRGeneratorForStatements = struct {
         const parameter_types = function_type.parameterTypes();
         if (sorted_arguments.len != parameter_types.len)
             return error.InvalidAst;
+        // endVisit(FunctionCall) restores the call's location before emitting
+        // implicit conversions. Void calls themselves emit no new annotation.
+        try self.setLocation(node);
         for (sorted_arguments, parameter_types) |argument_node, target_type| {
             const argument = try evaluated.find(argument_node);
             if (TypeBehavior.equals(argument.type_ref, target_type)) {
@@ -2769,14 +2723,12 @@ pub const IRGeneratorForStatements = struct {
             try self.assignConverted(&converted, argument, true);
             try converted.appendStackSlots(self.allocator, &arguments);
         }
-        const joined = try joinAlloc(self.allocator, arguments.items, ", ");
-        defer self.allocator.free(joined);
+        const joined = arguments.items;
         const expression = if (declaration) |definition| blk: {
             const function_name = try self.context.enqueueFunctionForCodeGeneration(definition);
             defer self.allocator.free(function_name);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s})",
+            break :blk try self.buildExpression(
+                "@0(@1)",
                 .{ function_name, joined },
             );
         } else blk: {
@@ -2789,22 +2741,16 @@ pub const IRGeneratorForStatements = struct {
             try self.context.internalFunctionCalledThroughDispatch(arity);
             const dispatch = try Common.internalDispatchAlloc(self.allocator, arity);
             defer self.allocator.free(dispatch);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s}{s}{s})",
-                .{
-                    dispatch,
-                    identifier,
-                    if (joined.len == 0) "" else ", ",
-                    joined,
-                },
+            break :blk try self.buildExpression(
+                "@0(@1, @2)",
+                .{ dispatch, identifier, joined },
             );
         };
-        defer self.allocator.free(expression);
+
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -2842,19 +2788,18 @@ pub const IRGeneratorForStatements = struct {
             try self.assignConverted(&converted_length, &length, true);
             break :blk &converted_length;
         };
-        const length_text = try value.commaSeparatedListAlloc();
-        defer self.allocator.free(length_text);
+        var length_text_slots = try value.stackSlotsAlloc();
+        defer length_text_slots.deinit();
+        const length_text = length_text_slots.borrowed();
         const allocate = try self.utils.allocateAndInitializeMemoryArrayFunction(
             result.type_ref,
         );
         defer self.allocator.free(allocate);
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s})",
+        const expression = try self.buildExpression(
+            "@0(@1)",
             .{ allocate, length_text },
         );
-        defer self.allocator.free(expression);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -2907,18 +2852,15 @@ pub const IRGeneratorForStatements = struct {
             packed_encoder,
         );
         defer self.allocator.free(concat);
-        const arguments = try joinAlloc(self.allocator, argument_slots.items, ", ");
-        defer self.allocator.free(arguments);
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s})",
+        const arguments = argument_slots.items;
+        const expression = try self.buildExpression(
+            "@0(@1)",
             .{ concat, arguments },
         );
-        defer self.allocator.free(expression);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -2933,6 +2875,7 @@ pub const IRGeneratorForStatements = struct {
         const call = node.payload.function_call;
         var evaluated = try self.evaluateArguments(call.arguments, depth + 1);
         defer evaluated.deinit();
+        try self.setLocation(node);
         const is_packed = function_type.kind == .ABIEncodePacked;
         const has_selector = function_type.kind == .ABIEncodeWithSelector or
             function_type.kind == .ABIEncodeCall or
@@ -3000,8 +2943,7 @@ pub const IRGeneratorForStatements = struct {
         if (argument_types.items.len != target_types.items.len)
             return error.InvalidAst;
 
-        var selector: ?[]u8 = null;
-        defer if (selector) |value| self.allocator.free(value);
+        var selector: ?YulAST.Expression = null;
         if (function_type.kind == .ABIEncodeCall) {
             const selector_type = (try expressionType(call.arguments[0])).asFunction() orelse
                 return error.InvalidAst;
@@ -3012,30 +2954,24 @@ pub const IRGeneratorForStatements = struct {
                     selector_type.*,
                 );
                 defer self.allocator.free(signature);
-                selector = try Numeric.toCompactHexWithPrefixAlloc(
-                    u256,
-                    self.allocator,
-                    FunctionSelector.selectorFromSignatureU256(signature),
-                );
+                selector = try self.numberHex(FunctionSelector.selectorFromSignatureU256(signature));
             } else {
                 const function_value = try evaluated.find(call.arguments[0]);
                 var selector_part = try function_value.part("functionSelector");
                 defer selector_part.deinit();
-                selector = try self.convertedValueTextAlloc(
+                var converted = try self.convert(
                     &selector_part,
                     try self.context.type_provider.fixedBytes(4),
                 );
+                defer converted.deinit();
+                selector = try self.variableExpression(&converted);
             }
         } else if (function_type.kind == .ABIEncodeWithSignature) {
             if (call.arguments.len == 0) return error.InvalidAst;
             const signature_type = try expressionType(call.arguments[0]);
             if (signature_type.category() == .StringLiteral) {
-                selector = try Numeric.toCompactHexWithPrefixAlloc(
-                    u256,
-                    self.allocator,
-                    FunctionSelector.selectorFromSignatureU256(
-                        signature_type.payload.StringLiteral.value,
-                    ),
+                selector = try self.numberHex(
+                    FunctionSelector.selectorFromSignatureU256(signature_type.payload.StringLiteral.value),
                 );
             } else {
                 const checkpoint = try self.context.newYulVariable();
@@ -3043,20 +2979,16 @@ pub const IRGeneratorForStatements = struct {
                 const allocate_checkpoint = try self.utils.allocateUnboundedFunction();
                 defer self.allocator.free(allocate_checkpoint);
                 try self.setLocation(node);
-                try self.appendFmt(
-                    "let {s} := {s}()\n",
+                try self.add(
+                    "let @0 := @1()\n",
                     .{ checkpoint, allocate_checkpoint },
                 );
                 const signature_value = try evaluated.find(call.arguments[0]);
-                const converted_name = try self.context.newYulVariable();
-                defer self.allocator.free(converted_name);
-                var converted = try IRVariableModule.IRVariable.init(
-                    self.allocator,
-                    converted_name,
+                var converted = try self.convert(
+                    signature_value,
                     self.context.type_provider.bytesMemory(),
                 );
                 defer converted.deinit();
-                try self.assignConverted(&converted, signature_value, true);
                 var position = try converted.part("mpos");
                 defer position.deinit();
                 const position_text = try position.nameAlloc();
@@ -3078,13 +3010,11 @@ pub const IRGeneratorForStatements = struct {
                     bytes32,
                 );
                 defer hash.deinit();
-                const hash_expression = try std.fmt.allocPrint(
-                    self.allocator,
-                    "keccak256({s}({s}), {s}({s}))",
-                    .{ data_area, position_text, length, position_text },
+                const hash_expression = try self.buildExpression(
+                    "keccak256(@0(@1), @2(@1))",
+                    .{ data_area, position_text, length },
                 );
-                defer self.allocator.free(hash_expression);
-                try self.defineText(&hash, hash_expression);
+                try self.defineExpression(&hash, hash_expression);
                 const selector_name = try self.context.newYulVariable();
                 defer self.allocator.free(selector_name);
                 var selector_value = try IRVariableModule.IRVariable.init(
@@ -3094,21 +3024,23 @@ pub const IRGeneratorForStatements = struct {
                 );
                 defer selector_value.deinit();
                 try self.assignConverted(&selector_value, &hash, true);
-                selector = try selector_value.nameAlloc();
+                selector = try self.variableExpression(&selector_value);
                 const finalize_checkpoint = try self.utils.finalizeAllocationFunction();
                 defer self.allocator.free(finalize_checkpoint);
-                try self.appendFmt(
-                    "{s}({s}, 0)\n",
+                try self.add(
+                    "@0(@1, 0)\n",
                     .{ finalize_checkpoint, checkpoint },
                 );
             }
         } else if (function_type.kind == .ABIEncodeWithSelector) {
             if (call.arguments.len == 0) return error.InvalidAst;
             const selector_value = try evaluated.find(call.arguments[0]);
-            selector = try self.convertedValueTextAlloc(
+            var converted = try self.convert(
                 selector_value,
                 try self.context.type_provider.fixedBytes(4),
             );
+            defer converted.deinit();
+            selector = try self.variableExpression(&converted);
         }
 
         const allocate = try self.utils.allocateUnboundedFunction();
@@ -3134,8 +3066,7 @@ pub const IRGeneratorForStatements = struct {
         defer self.allocator.free(encoder);
         const finalize = try self.utils.finalizeAllocationFunction();
         defer self.allocator.free(finalize);
-        const arguments = try joinAlloc(self.allocator, argument_slots.items, ", ");
-        defer self.allocator.free(arguments);
+        const arguments = argument_slots.items;
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         var result_position = try result.part("mpos");
@@ -3143,30 +3074,17 @@ pub const IRGeneratorForStatements = struct {
         const data = try result_position.nameAlloc();
         defer self.allocator.free(data);
         try self.setLocation(node);
-        try self.appendFmt(
-            "let {s} := {s}()\nlet {s} := add({s}, 0x20)\n",
-            .{ data, allocate, memory_position, data },
+        try self.add(
+            "let @0 := @1()\nlet @2 := add(@0, 0x20)\n",
+            .{ data, allocate, memory_position },
         );
-        if (selector) |selector_text| try self.appendFmt(
-            "mstore({s}, {s})\n{s} := add({s}, 4)\n",
-            .{ memory_position, selector_text, memory_position, memory_position },
+        if (selector) |selector_text| try self.add(
+            "mstore(@0, @1)\n@0 := add(@0, 4)\n",
+            .{ memory_position, selector_text },
         );
-        try self.appendFmt(
-            "let {s} := {s}({s}{s}{s})\nmstore({s}, sub({s}, add({s}, 0x20)))\n{s}({s}, sub({s}, {s}))\n",
-            .{
-                memory_end,
-                encoder,
-                memory_position,
-                if (arguments.len == 0) "" else ", ",
-                arguments,
-                data,
-                memory_end,
-                data,
-                finalize,
-                data,
-                memory_end,
-                data,
-            },
+        try self.add(
+            "let @0 := @1(@2, @3)\nmstore(@4, sub(@0, add(@4, 0x20)))\n@5(@4, sub(@0, @4))\n",
+            .{ memory_end, encoder, memory_position, arguments, data, finalize },
         );
         return result;
     }
@@ -3242,12 +3160,6 @@ pub const IRGeneratorForStatements = struct {
                     defer argument.deinit();
                     try argument.appendStackSlots(self.allocator, &sorted_argument_slots);
                 }
-                const sorted_arguments = try joinAlloc(
-                    self.allocator,
-                    sorted_argument_slots.items,
-                    ", ",
-                );
-                defer self.allocator.free(sorted_arguments);
                 var call_argument_slots: std.ArrayList([]u8) = .empty;
                 defer deinitStrings(self.allocator, &call_argument_slots);
                 for (error_call.arguments) |argument_node| {
@@ -3257,12 +3169,7 @@ pub const IRGeneratorForStatements = struct {
                     defer argument.deinit();
                     try argument.appendStackSlots(self.allocator, &call_argument_slots);
                 }
-                const call_arguments = try joinAlloc(
-                    self.allocator,
-                    call_argument_slots.items,
-                    ", ",
-                );
-                defer self.allocator.free(call_arguments);
+                const call_arguments = call_argument_slots.items;
                 var abi = self.context.abiFunctions();
                 const encoder = try abi.tupleEncoder(
                     sorted_argument_types.items,
@@ -3283,7 +3190,7 @@ pub const IRGeneratorForStatements = struct {
                     signature,
                     sorted_argument_types.items,
                     error_function.parameterTypes(),
-                    sorted_arguments,
+                    sorted_argument_slots.items,
                     encoder,
                 );
                 defer self.allocator.free(helper);
@@ -3292,14 +3199,9 @@ pub const IRGeneratorForStatements = struct {
                 // site passes source-order values. ZIG-UPSTREAM-001 records
                 // the resulting swapped custom-error payload as an upstream
                 // defect, retained for compatibility.
-                try self.appendFmt(
-                    "{s}({s}{s}{s})\n",
-                    .{
-                        helper,
-                        condition_name,
-                        if (call_arguments.len == 0) "" else ", ",
-                        call_arguments,
-                    },
+                try self.add(
+                    "@0(@1, @2)\n",
+                    .{ helper, condition_name, call_arguments },
                 );
                 return self.variableFromExpression(node);
             };
@@ -3308,12 +3210,7 @@ pub const IRGeneratorForStatements = struct {
                 const message = try evaluated.find(message_node);
                 var slots = try message.stackSlotsAlloc();
                 defer slots.deinit();
-                const arguments = try joinAlloc(
-                    self.allocator,
-                    slots.borrowed(),
-                    ", ",
-                );
-                defer self.allocator.free(arguments);
+                const arguments = slots.borrowed();
                 const given_types = [_]*const Types.Type{message_type};
                 const target_types = [_]*const Types.Type{
                     self.context.type_provider.stringMemory(),
@@ -3328,18 +3225,13 @@ pub const IRGeneratorForStatements = struct {
                 defer self.allocator.free(encoder);
                 const helper = try self.utils.requireOrAssertWithMessageFunction(
                     message_type,
-                    arguments,
+                    slots.borrowed(),
                     encoder,
                 );
                 defer self.allocator.free(helper);
-                try self.appendFmt(
-                    "{s}({s}{s}{s})\n",
-                    .{
-                        helper,
-                        condition_name,
-                        if (arguments.len == 0) "" else ", ",
-                        arguments,
-                    },
+                try self.add(
+                    "@0(@1, @2)\n",
+                    .{ helper, condition_name, arguments },
                 );
                 return self.variableFromExpression(node);
             }
@@ -3349,7 +3241,7 @@ pub const IRGeneratorForStatements = struct {
             function_type.kind == .Assert,
         );
         defer self.allocator.free(helper);
-        try self.appendFmt("{s}({s})\n", .{ helper, condition_name });
+        try self.add("@0(@1)\n", .{ helper, condition_name });
         return self.variableFromExpression(node);
     }
 
@@ -3366,14 +3258,12 @@ pub const IRGeneratorForStatements = struct {
         defer evaluated.deinit();
         try self.setLocation(node);
         if (call.arguments.len == 0 or self.context.revert_strings == .Strip) {
-            try self.append("revert(0, 0)\n");
+            try self.add("revert(0, 0)", .{});
             return self.variableFromExpression(node);
         }
         const argument = try evaluated.find(call.arguments[0]);
         var slots = try argument.stackSlotsAlloc();
         defer slots.deinit();
-        const argument_names = try joinAlloc(self.allocator, slots.borrowed(), ", ");
-        defer self.allocator.free(argument_names);
         const given_types = [_]*const Types.Type{argument.type_ref};
         const target_types = [_]*const Types.Type{
             self.context.type_provider.stringMemory(),
@@ -3393,14 +3283,13 @@ pub const IRGeneratorForStatements = struct {
         const revert_code = try self.utils.revertWithError(
             "Error(string)",
             &target_types,
-            argument_names,
+            slots.borrowed(),
             encoder,
             position,
             end,
         );
-        defer self.allocator.free(revert_code);
-        try self.append(revert_code);
-        try self.append("\n");
+        try self.appendYulBlock(revert_code);
+        _ = try self.emissionDebug(true);
         return self.variableFromExpression(node);
     }
 
@@ -3420,15 +3309,9 @@ pub const IRGeneratorForStatements = struct {
             self.context.type_provider.bytesCalldata()
         else
             self.context.type_provider.bytesMemory();
-        const converted_name = try self.context.newYulVariable();
-        defer self.allocator.free(converted_name);
-        var converted = try IRVariableModule.IRVariable.init(
-            self.allocator,
-            converted_name,
-            canonical_type,
-        );
+        try self.setLocation(node);
+        var converted = try self.convert(&input, canonical_type);
         defer converted.deinit();
-        try self.assignConverted(&converted, &input, true);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         const target_types = try tupleTargetTypesAlloc(
@@ -3442,7 +3325,7 @@ pub const IRGeneratorForStatements = struct {
             reference.location != .CallData,
         );
         defer self.allocator.free(decoder);
-        const bounds = if (reference.location == .CallData) blk: {
+        const bounds: [2]YulAST.Expression = if (reference.location == .CallData) blk: {
             var offset = try converted.part("offset");
             defer offset.deinit();
             var length = try converted.part("length");
@@ -3451,11 +3334,10 @@ pub const IRGeneratorForStatements = struct {
             defer self.allocator.free(offset_text);
             const length_text = try length.nameAlloc();
             defer self.allocator.free(length_text);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}, add({s}, {s})",
-                .{ offset_text, offset_text, length_text },
-            );
+            break :blk .{
+                try self.buildExpression("@0", .{offset_text}),
+                try self.buildExpression("add(@0, @1)", .{ offset_text, length_text }),
+            };
         } else blk: {
             var position = try converted.part("mpos");
             defer position.deinit();
@@ -3463,21 +3345,18 @@ pub const IRGeneratorForStatements = struct {
             defer self.allocator.free(position_text);
             const length = try self.utils.arrayLengthFunction(canonical_type);
             defer self.allocator.free(length);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "add({s}, 32), add(add({s}, 32), {s}({s}))",
-                .{ position_text, position_text, length, position_text },
-            );
+            break :blk .{
+                try self.buildExpression("add(@0, 32)", .{position_text}),
+                try self.buildExpression("add(add(@0, 32), @1(@0))", .{ position_text, length }),
+            };
         };
-        defer self.allocator.free(bounds);
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s})",
-            .{ decoder, bounds },
+
+        const expression = try self.buildExpression(
+            "@0(@1)",
+            .{ decoder, &bounds },
         );
-        defer self.allocator.free(expression);
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -3543,18 +3422,18 @@ pub const IRGeneratorForStatements = struct {
         defer result_position.deinit();
         const result_text = try result_position.nameAlloc();
         defer self.allocator.free(result_text);
-        const allocation = try std.fmt.allocPrint(self.allocator, "{s}()", .{allocate});
-        defer self.allocator.free(allocation);
+        const allocation = try self.buildExpression("@0()", .{allocate});
         try self.setLocation(node);
-        try self.defineText(&result, allocation);
+        try self.defineExpression(&result, allocation);
         const members = structure.declaration.payload.struct_definition.members;
         if (members.len != sorted.len) return error.InvalidAst;
         for (members, sorted, constructor.parameterTypes()) |member, argument_node, target_type| {
             const value = try evaluated.find(argument_node);
             var converted = try self.convert(value, target_type);
             defer converted.deinit();
-            const converted_text = try converted.commaSeparatedListAlloc();
-            defer self.allocator.free(converted_text);
+            var converted_text_slots = try converted.stackSlotsAlloc();
+            defer converted_text_slots.deinit();
+            const converted_text = converted_text_slots.borrowed();
             const write = try self.utils.writeToMemoryFunction(target_type);
             defer self.allocator.free(write);
             const member_name = member.payload.variable_declaration.declaration.name;
@@ -3562,8 +3441,8 @@ pub const IRGeneratorForStatements = struct {
                 structure,
                 member_name,
             );
-            try self.appendFmt(
-                "{s}(add({s}, {d}), {s})\n",
+            try self.add(
+                "@0(add(@1, @2), @3)\n",
                 .{ write, result_text, offset, converted_text },
             );
         }
@@ -3737,14 +3616,10 @@ pub const IRGeneratorForStatements = struct {
         defer self.allocator.free(encoder);
         const forwarding_revert = try self.utils.forwardingRevertFunction();
         defer self.allocator.free(forwarding_revert);
-        const arguments = try joinAlloc(
-            self.allocator,
-            argument_slots.items,
-            ", ",
-        );
-        defer self.allocator.free(arguments);
-        const return_values = try result.commaSeparatedListAlloc();
-        defer self.allocator.free(return_values);
+        const arguments = argument_slots.items;
+        var return_values_slots = try result.stackSlotsAlloc();
+        defer return_values_slots.deinit();
+        const return_values = return_values_slots.borrowed();
         const position = try self.context.newYulVariable();
         defer self.allocator.free(position);
         const end = try self.context.newYulVariable();
@@ -3775,132 +3650,94 @@ pub const IRGeneratorForStatements = struct {
         const gas = if (function_type.options.gas_set) blk: {
             var gas_part = try callee.part("gas");
             defer gas_part.deinit();
-            break :blk try gas_part.nameAlloc();
+            break :blk try self.variableExpression(&gas_part);
         } else if (self.context.evm_version.canOverchargeGasForCall())
-            try self.allocator.dupe(u8, "gas()")
+            try self.buildExpression("gas()", .{})
         else blk: {
             var retained = GasCosts.callGas(self.context.evm_version) + 10;
             if (function_type.options.value_set)
                 retained += GasCosts.call_value_transfer_gas;
             if (!check_extcodesize)
                 retained += GasCosts.call_new_account_gas;
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "sub(gas(), {d})",
+            break :blk try self.buildExpression(
+                "sub(gas(), @0)",
                 .{retained},
             );
         };
-        defer self.allocator.free(gas);
+
         const value = if (function_type.options.value_set) blk: {
             var value_part = try callee.part("value");
             defer value_part.deinit();
-            break :blk try value_part.nameAlloc();
-        } else try self.allocator.dupe(u8, "0");
-        defer self.allocator.free(value);
+            break :blk try self.variableExpression(&value_part);
+        } else try self.buildExpression("0", .{});
 
         try self.setLocation(node);
         if (!self.context.evm_version.canOverchargeGasForCall() and
             !function_type.options.gas_set and estimated_return_size > 0)
-            try self.appendFmt(
-                "mstore(add({s}() , {d}), 0)\n",
+            try self.add(
+                "mstore(add(@0() , @1), 0)\n",
                 .{ allocate, estimated_return_size },
             );
         if (check_extcodesize)
-            try self.appendFmt(
-                "if iszero(extcodesize({s})) {{ {s}() }}\n",
+            try self.add(
+                "if iszero(extcodesize(@0)) { @1() }\n",
                 .{ address_text, revert_no_code },
             );
-        try self.appendFmt(
-            "let {s} := {s}()\nmstore({s}, {s}({s}))\nlet {s} := {s}(add({s}, 4){s}{s})\n",
-            .{
-                position,
-                allocate,
-                position,
-                shift_selector,
-                selector_text,
-                end,
-                encoder,
-                position,
-                if (arguments.len == 0) "" else ", ",
-                arguments,
-            },
+        try self.add(
+            "let @0 := @1()\nmstore(@0, @2(@3))\nlet @4 := @5(add(@0, 4), @6)\n",
+            .{ position, allocate, shift_selector, selector_text, end, encoder, arguments },
         );
         if (function_type.kind == .DelegateCall or use_static_call)
-            try self.appendFmt(
-                "let {s} := {s}({s}, {s}, {s}, sub({s}, {s}), {s}, {d})\n",
-                .{
-                    success,
-                    opcode,
-                    gas,
-                    address_text,
-                    position,
-                    end,
-                    position,
-                    position,
-                    estimated_return_size,
-                },
+            try self.add(
+                "let @0 := @1(@2, @3, @4, sub(@5, @4), @4, @6)\n",
+                .{ success, opcode, gas, address_text, position, end, estimated_return_size },
             )
         else
-            try self.appendFmt(
-                "let {s} := call({s}, {s}, {s}, {s}, sub({s}, {s}), {s}, {d})\n",
-                .{
-                    success,
-                    gas,
-                    address_text,
-                    value,
-                    position,
-                    end,
-                    position,
-                    position,
-                    estimated_return_size,
-                },
+            try self.add(
+                "let @0 := call(@1, @2, @3, @4, sub(@5, @4), @4, @6)\n",
+                .{ success, gas, address_text, value, position, end, estimated_return_size },
             );
         if (!is_try_call)
-            try self.appendFmt(
-                "if iszero({s}) {{ {s}() }}\n",
+            try self.add(
+                "if iszero(@0) { @1() }\n",
                 .{ success, forwarding_revert },
             );
         if (return_values.len != 0) try self.declare(&result);
-        try self.appendFmt("if {s} {{\n", .{success});
+        const success_scope = try self.beginIf(try self.buildExpression("@0", .{success}));
+        defer success_scope.finish();
         if (return_info.dynamic_return_size) {
             if (!self.context.evm_version.supportsReturndata())
                 return error.InvalidAst;
-            try self.appendFmt(
-                "let {s} := returndatasize()\nreturndatacopy({s}, 0, {s})\n",
-                .{ return_data_size, position, return_data_size },
+            try self.add(
+                "let @0 := returndatasize()\nreturndatacopy(@1, 0, @0)\n",
+                .{ return_data_size, position },
             );
         } else {
-            try self.appendFmt(
-                "let {s} := {d}\n",
+            try self.add(
+                "let @0 := @1\n",
                 .{ return_data_size, estimated_return_size },
             );
             if (self.context.evm_version.supportsReturndata())
-                try self.appendFmt(
-                    "if gt({s}, returndatasize()) {{ {s} := returndatasize() }}\n",
-                    .{ return_data_size, return_data_size },
+                try self.add(
+                    "if gt(@0, returndatasize()) { @0 := returndatasize() }\n",
+                    .{return_data_size},
                 );
         }
-        try self.appendFmt(
-            "{s}({s}, {s})\n",
+        try self.add(
+            "@0(@1, @2)\n",
             .{ finalize, position, return_data_size },
         );
         if (return_values.len == 0)
-            try self.appendFmt(
-                "{s}({s}, add({s}, {s}))\n",
-                .{ decoder, position, position, return_data_size },
+            try self.add(
+                "@0(@1, add(@1, @2))\n",
+                .{ decoder, position, return_data_size },
             )
         else
-            try self.appendFmt(
-                "{s} := {s}({s}, add({s}, {s}))\n",
-                .{
-                    return_values,
-                    decoder,
-                    position,
-                    position,
-                    return_data_size,
-                },
+            try self.add(
+                "@0 := @1(@2, add(@2, @3))\n",
+                .{ return_values, decoder, position, return_data_size },
             );
-        try self.append("}\n");
+        _ = try self.emissionDebug(true);
         return result;
     }
 
@@ -3924,8 +3761,9 @@ pub const IRGeneratorForStatements = struct {
         defer callee.deinit();
         var argument = try self.emitExpression(call.arguments[0], depth + 1);
         defer argument.deinit();
-        const argument_text = try argument.commaSeparatedListAlloc();
-        defer self.allocator.free(argument_text);
+        var argument_text_slots = try argument.stackSlotsAlloc();
+        defer argument_text_slots.deinit();
+        const argument_text = argument_text_slots.borrowed();
         const allocate = try self.utils.allocateUnboundedFunction();
         defer self.allocator.free(allocate);
         const position = try self.context.newYulVariable();
@@ -3958,8 +3796,9 @@ pub const IRGeneratorForStatements = struct {
         defer return_data.deinit();
         const success = try success_value.nameAlloc();
         defer self.allocator.free(success);
-        const return_data_text = try return_data.commaSeparatedListAlloc();
-        defer self.allocator.free(return_data_text);
+        var return_data_text_slots = try return_data.stackSlotsAlloc();
+        defer return_data_text_slots.deinit();
+        const return_data_text = return_data_text_slots.borrowed();
         const extract = try self.utils.extractReturndataFunction();
         defer self.allocator.free(extract);
         var address = try callee.part("address");
@@ -3969,67 +3808,50 @@ pub const IRGeneratorForStatements = struct {
         const gas = if (function_type.options.gas_set) blk: {
             var gas_part = try callee.part("gas");
             defer gas_part.deinit();
-            break :blk try gas_part.nameAlloc();
+            break :blk try self.variableExpression(&gas_part);
         } else if (self.context.evm_version.canOverchargeGasForCall())
-            try self.allocator.dupe(u8, "gas()")
+            try self.buildExpression("gas()", .{})
         else blk: {
             var retained = GasCosts.callGas(self.context.evm_version) + 10 +
                 GasCosts.call_new_account_gas;
             if (function_type.options.value_set)
                 retained += GasCosts.call_value_transfer_gas;
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "sub(gas(), {d})",
+            break :blk try self.buildExpression(
+                "sub(gas(), @0)",
                 .{retained},
             );
         };
-        defer self.allocator.free(gas);
+
         const value = if (function_type.options.value_set) blk: {
             var value_part = try callee.part("value");
             defer value_part.deinit();
-            break :blk try value_part.nameAlloc();
-        } else try self.allocator.dupe(u8, "0");
-        defer self.allocator.free(value);
+            break :blk try self.variableExpression(&value_part);
+        } else try self.buildExpression("0", .{});
+
         try self.setLocation(node);
         if (direct_memory)
-            try self.appendFmt(
-                "let {s} := add({s}, 0x20)\nlet {s} := mload({s})\n",
-                .{ position, argument_text, length, argument_text },
+            try self.add(
+                "let @0 := add(@1, 0x20)\nlet @2 := mload(@1)\n",
+                .{ position, argument_text, length },
             )
         else
-            try self.appendFmt(
-                "let {s} := {s}()\nlet {s} := sub({s}({s}{s}{s}), {s})\n",
-                .{
-                    position,
-                    allocate,
-                    length,
-                    encoder,
-                    position,
-                    if (argument_text.len == 0) "" else ", ",
-                    argument_text,
-                    position,
-                },
+            try self.add(
+                "let @0 := @1()\nlet @2 := sub(@3(@0, @4), @0)\n",
+                .{ position, allocate, length, encoder, argument_text },
             );
         switch (function_type.kind) {
-            .BareCall => try self.appendFmt(
-                "let {s} := call({s}, {s}, {s}, {s}, {s}, 0, 0)\n",
+            .BareCall => try self.add(
+                "let @0 := call(@1, @2, @3, @4, @5, 0, 0)\n",
                 .{ success, gas, address_text, value, position, length },
             ),
-            .BareDelegateCall, .BareStaticCall => try self.appendFmt(
-                "let {s} := {s}({s}, {s}, {s}, {s}, 0, 0)\n",
-                .{
-                    success,
-                    if (function_type.kind == .BareStaticCall) "staticcall" else "delegatecall",
-                    gas,
-                    address_text,
-                    position,
-                    length,
-                },
+            .BareDelegateCall, .BareStaticCall => try self.add(
+                "let @0 := @1(@2, @3, @4, @5, 0, 0)\n",
+                .{ success, if (function_type.kind == .BareStaticCall) "staticcall" else "delegatecall", gas, address_text, position, length },
             ),
             else => return error.InvalidAst,
         }
-        try self.appendFmt(
-            "let {s} := {s}()\n",
+        try self.add(
+            "let @0 := @1()\n",
             .{ return_data_text, extract },
         );
         return result;
@@ -4050,11 +3872,15 @@ pub const IRGeneratorForStatements = struct {
         if (array_type.asArray() == null) return error.InvalidAst;
         const helper = try self.utils.storageArrayPopFunction(array_type);
         defer self.allocator.free(helper);
-        const self_text = try callee.commaSeparatedListAlloc();
-        defer self.allocator.free(self_text);
+        var self_text_slots = try callee.stackSlotsAlloc();
+        defer self_text_slots.deinit();
+        const self_text = self_text_slots.borrowed();
+        const expression = try self.buildExpression("@0(@1)", .{ helper, self_text });
+        var result = try self.variableFromExpression(node);
+        errdefer result.deinit();
         try self.setLocation(node);
-        try self.appendFmt("{s}({s})\n", .{ helper, self_text });
-        return self.variableFromExpression(node);
+        try self.defineExpression(&result, expression);
+        return result;
     }
 
     fn emitArrayPush(
@@ -4097,19 +3923,16 @@ pub const IRGeneratorForStatements = struct {
             prepared.type_ref,
         );
         defer self.allocator.free(helper);
-        const self_text = try callee.commaSeparatedListAlloc();
-        defer self.allocator.free(self_text);
-        const argument_text = try prepared.commaSeparatedListAlloc();
-        defer self.allocator.free(argument_text);
+        var self_text_slots = try callee.stackSlotsAlloc();
+        defer self_text_slots.deinit();
+        const self_text = self_text_slots.borrowed();
+        var argument_text_slots = try prepared.stackSlotsAlloc();
+        defer argument_text_slots.deinit();
+        const argument_text = argument_text_slots.borrowed();
         try self.setLocation(node);
-        try self.appendFmt(
-            "{s}({s}{s}{s})\n",
-            .{
-                helper,
-                self_text,
-                if (argument_text.len == 0) "" else ", ",
-                argument_text,
-            },
+        try self.add(
+            "@0(@1, @2)\n",
+            .{ helper, self_text, argument_text },
         );
         return self.variableFromExpression(node);
     }
@@ -4127,8 +3950,9 @@ pub const IRGeneratorForStatements = struct {
         const array = array_type.asArray() orelse return error.InvalidAst;
         var callee = try self.emitExpression(node.payload.function_call.expression, depth + 1);
         defer callee.deinit();
-        const self_text = try callee.commaSeparatedListAlloc();
-        defer self.allocator.free(self_text);
+        var self_text_slots = try callee.stackSlotsAlloc();
+        defer self_text_slots.deinit();
+        const self_text = self_text_slots.borrowed();
         const slot = try self.context.newYulVariable();
         defer self.allocator.free(slot);
         const offset = try self.context.newYulVariable();
@@ -4136,15 +3960,15 @@ pub const IRGeneratorForStatements = struct {
         const helper = try self.utils.storageArrayPushZeroFunction(array_type);
         defer self.allocator.free(helper);
         try self.setLocation(node);
-        try self.appendFmt(
-            "let {s}, {s} := {s}({s})\n",
+        try self.add(
+            "let @0, @1 := @2(@3)\n",
             .{ slot, offset, helper, self_text },
         );
         return IRLValueModule.IRLValue.initStorage(
             self.allocator,
             array.base_type,
-            slot,
-            try IRLValueModule.Offset.initRuntime(self.allocator, offset),
+            try self.buildExpression("@0", .{slot}),
+            .{ .runtime = try self.output.generator.name(offset) },
             false,
         );
     }
@@ -4168,11 +3992,10 @@ pub const IRGeneratorForStatements = struct {
         defer address.deinit();
         const address_text = try address.nameAlloc();
         defer self.allocator.free(address_text);
-        const value = try self.convertedValueTextAlloc(
+        const value = try self.convertedValue(
             &argument,
             function_type.parameterTypes()[0],
         );
-        defer self.allocator.free(value);
         const gas = try self.context.newYulVariable();
         defer self.allocator.free(gas);
         var result = try self.variableFromExpression(node);
@@ -4180,18 +4003,18 @@ pub const IRGeneratorForStatements = struct {
         const success = if (function_type.kind == .Transfer)
             try self.context.newYulVariable()
         else
-            try result.commaSeparatedListAlloc();
+            try result.nameAlloc();
         defer self.allocator.free(success);
         const forwarding = try self.utils.forwardingRevertFunction();
         defer self.allocator.free(forwarding);
         try self.setLocation(node);
-        try self.appendFmt(
-            "let {s} := 0\nif iszero({s}) {{ {s} := {d} }}\nlet {s} := call({s}, {s}, {s}, 0, 0, 0, 0)\n",
-            .{ gas, value, gas, GasCosts.call_stipend, success, gas, address_text, value },
+        try self.add(
+            "let @0 := 0\nif iszero(@1) { @0 := @2 }\nlet @3 := call(@0, @4, @1, 0, 0, 0, 0)\n",
+            .{ gas, value, GasCosts.call_stipend, success, address_text },
         );
         if (function_type.kind == .Transfer)
-            try self.appendFmt(
-                "if iszero({s}) {{ {s}() }}\n",
+            try self.add(
+                "if iszero(@0) { @1() }\n",
                 .{ success, forwarding },
             );
         return result;
@@ -4215,13 +4038,11 @@ pub const IRGeneratorForStatements = struct {
             const digest = Keccak256.keccak256(
                 argument.type_ref.payload.StringLiteral.value,
             );
-            const expression = try std.fmt.allocPrint(
-                self.allocator,
-                "0x{s}",
-                .{&digest.hex()},
-            );
-            defer self.allocator.free(expression);
-            try self.defineText(&result, expression);
+            const expression: YulAST.Expression = .{ .literal = .{ .kind = .Number, .value = .{
+                .numeric_value = digest.toInteger(),
+                .string_value = try std.fmt.allocPrint(self.output.generator.allocator(), "0x{s}", .{&digest.hex()}),
+            } } };
+            try self.defineExpression(&result, expression);
             return result;
         }
         var converted: ?IRVariableModule.IRVariable = null;
@@ -4250,13 +4071,11 @@ pub const IRGeneratorForStatements = struct {
             self.context.type_provider.bytesMemory(),
         );
         defer self.allocator.free(length);
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "keccak256({s}({s}), {s}({s}))",
-            .{ data_area, position_text, length, position_text },
+        const expression = try self.buildExpression(
+            "keccak256(@0(@1), @2(@1))",
+            .{ data_area, position_text, length },
         );
-        defer self.allocator.free(expression);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -4280,13 +4099,8 @@ pub const IRGeneratorForStatements = struct {
                 self.context.type_provider,
                 node,
             )) orelse return error.InvalidAst;
-            const expression = try Numeric.toCompactHexWithPrefixAlloc(
-                u256,
-                self.allocator,
-                value,
-            );
-            defer self.allocator.free(expression);
-            try self.defineText(&result, expression);
+            const expression = try self.numberHex(value);
+            try self.defineExpression(&result, expression);
             return result;
         }
         const converted_name = try self.context.newYulVariable();
@@ -4312,13 +4126,11 @@ pub const IRGeneratorForStatements = struct {
         defer self.allocator.free(length);
         const erc7201 = try self.utils.erc7201();
         defer self.allocator.free(erc7201);
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s}({s}), {s}({s}))",
-            .{ erc7201, data_area, namespace, length, namespace },
+        const expression = try self.buildExpression(
+            "@0(@1(@2), @3(@2))",
+            .{ erc7201, data_area, namespace, length },
         );
-        defer self.allocator.free(expression);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -4386,54 +4198,42 @@ pub const IRGeneratorForStatements = struct {
                 false,
             );
         defer self.allocator.free(encoder);
-        const arguments = try joinAlloc(self.allocator, argument_slots.items, ", ");
-        defer self.allocator.free(arguments);
+        const arguments = argument_slots.items;
         const success = try self.context.newYulVariable();
         defer self.allocator.free(success);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
-        const result_text = try result.commaSeparatedListAlloc();
-        defer self.allocator.free(result_text);
+        var result_text_slots = try result.stackSlotsAlloc();
+        defer result_text_slots.deinit();
+        const result_text = result_text_slots.borrowed();
         const forwarding = try self.utils.forwardingRevertFunction();
         defer self.allocator.free(forwarding);
         const gas = if (self.context.evm_version.canOverchargeGasForCall())
-            try self.allocator.dupe(u8, "gas()")
+            try self.buildExpression("gas()", .{})
         else
-            try std.fmt.allocPrint(
-                self.allocator,
-                "sub(gas(), {d})",
-                .{
-                    GasCosts.callGas(self.context.evm_version) + 10 +
-                        GasCosts.call_new_account_gas,
-                },
+            try self.buildExpression(
+                "sub(gas(), @0)",
+                .{GasCosts.callGas(self.context.evm_version) + 10 +
+                    GasCosts.call_new_account_gas},
             );
-        defer self.allocator.free(gas);
         try self.setLocation(node);
-        try self.appendFmt(
-            "let {s} := {s}()\nlet {s} := {s}({s}{s}{s})\n",
-            .{
-                position,
-                allocate,
-                end,
-                encoder,
-                position,
-                if (arguments.len == 0) "" else ", ",
-                arguments,
-            },
+        try self.add(
+            "let @0 := @1()\nlet @2 := @3(@0, @4)\n",
+            .{ position, allocate, end, encoder, arguments },
         );
-        if (function_type.kind == .ECRecover) try self.append("mstore(0, 0)\n");
+        if (function_type.kind == .ECRecover) try self.add("mstore(0, 0)", .{});
         if (self.context.evm_version.hasStaticCall())
-            try self.appendFmt(
-                "let {s} := staticcall({s}, {d}, {s}, sub({s}, {s}), 0, 32)\n",
-                .{ success, gas, address, position, end, position },
+            try self.add(
+                "let @0 := staticcall(@1, @2, @3, sub(@4, @3), 0, 32)\n",
+                .{ success, gas, address, position, end },
             )
         else
-            try self.appendFmt(
-                "let {s} := call({s}, {d}, 0, {s}, sub({s}, {s}), 0, 32)\n",
-                .{ success, gas, address, position, end, position },
+            try self.add(
+                "let @0 := call(@1, @2, 0, @3, sub(@4, @3), 0, 32)\n",
+                .{ success, gas, address, position, end },
             );
-        try self.appendFmt(
-            "if iszero({s}) {{ {s}() }}\nlet {s} := {s}(mload(0))\n",
+        try self.add(
+            "if iszero(@0) { @1() }\nlet @2 := @3(mload(0))\n",
             .{ success, forwarding, result_text, shift },
         );
         return result;
@@ -4485,11 +4285,7 @@ pub const IRGeneratorForStatements = struct {
             contract,
         );
         defer self.allocator.free(object_name);
-        const quoted_object = try CommonData.escapeAndQuoteStringAlloc(
-            self.allocator,
-            object_name,
-        );
-        defer self.allocator.free(quoted_object);
+        const quoted_object = object_name;
         const memory_position = try self.context.newYulVariable();
         defer self.allocator.free(memory_position);
         const memory_end = try self.context.newYulVariable();
@@ -4506,14 +4302,13 @@ pub const IRGeneratorForStatements = struct {
             false,
         );
         defer self.allocator.free(encoder);
-        const arguments = try joinAlloc(self.allocator, argument_slots.items, ", ");
-        defer self.allocator.free(arguments);
+        const arguments = argument_slots.items;
         const value = if (function_type.options.value_set) blk: {
             var part = try callee.part("value");
             defer part.deinit();
-            break :blk try part.nameAlloc();
-        } else try self.allocator.dupe(u8, "0");
-        defer self.allocator.free(value);
+            break :blk try self.variableExpression(&part);
+        } else try self.buildExpression("0", .{});
+
         const salt = if (function_type.options.salt_set) blk: {
             var part = try callee.part("salt");
             defer part.deinit();
@@ -4522,8 +4317,9 @@ pub const IRGeneratorForStatements = struct {
         defer self.allocator.free(salt);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
-        const address = try result.commaSeparatedListAlloc();
-        defer self.allocator.free(address);
+        var address_slots = try result.stackSlotsAlloc();
+        defer address_slots.deinit();
+        const address = address_slots.borrowed();
         if (address.len == 0) return error.InvalidAst;
         const is_try_call = (try functionCallAnnotation(node)).try_call;
         const success = if (is_try_call)
@@ -4541,46 +4337,28 @@ pub const IRGeneratorForStatements = struct {
             try self.utils.forwardingRevertFunction();
         defer self.allocator.free(forwarding);
         try self.setLocation(node);
-        try self.appendFmt(
-            "let {s} := {s}()\nlet {s} := add({s}, datasize({s}))\nif or(gt({s}, 0xffffffffffffffff), lt({s}, {s})) {{ {s}() }}\ndatacopy({s}, dataoffset({s}), datasize({s}))\n{s} := {s}({s}{s}{s})\n",
-            .{
-                memory_position,
-                allocate,
-                memory_end,
-                memory_position,
-                quoted_object,
-                memory_end,
-                memory_end,
-                memory_position,
-                panic,
-                memory_position,
-                quoted_object,
-                quoted_object,
-                memory_end,
-                encoder,
-                memory_end,
-                if (arguments.len == 0) "" else ", ",
-                arguments,
-            },
+        try self.add(
+            "let @0 := @1()\nlet @2 := add(@0, datasize(@3))\nif or(gt(@2, 0xffffffffffffffff), lt(@2, @0)) { @4() }\ndatacopy(@0, dataoffset(@3), datasize(@3))\n@2 := @5(@2, @6)\n",
+            .{ memory_position, allocate, memory_end, quoted_object, panic, encoder, arguments },
         );
         if (function_type.options.salt_set)
-            try self.appendFmt(
-                "let {s} := create2({s}, {s}, sub({s}, {s}), {s})\n",
-                .{ address, value, memory_position, memory_end, memory_position, salt },
+            try self.add(
+                "let @0 := create2(@1, @2, sub(@3, @2), @4)\n",
+                .{ address, value, memory_position, memory_end, salt },
             )
         else
-            try self.appendFmt(
-                "let {s} := create({s}, {s}, sub({s}, {s}))\n",
-                .{ address, value, memory_position, memory_end, memory_position },
+            try self.add(
+                "let @0 := create(@1, @2, sub(@3, @2))\n",
+                .{ address, value, memory_position, memory_end },
             );
         if (is_try_call)
-            try self.appendFmt(
-                "let {s} := iszero(iszero({s}))\n",
+            try self.add(
+                "let @0 := iszero(iszero(@1))\n",
                 .{ success, address },
             )
         else
-            try self.appendFmt(
-                "if iszero({s}) {{ {s}() }}\n",
+            try self.add(
+                "if iszero(@0) { @1() }\n",
                 .{ address, forwarding },
             );
         return result;
@@ -4613,36 +4391,31 @@ pub const IRGeneratorForStatements = struct {
         switch (function_type.kind) {
             .GasLeft => {
                 if (sorted_arguments.len != 0) return error.InvalidAst;
-                try self.defineText(&result, "gas()");
+                try self.defineExpression(&result, try self.buildExpression("gas()", .{}));
             },
             .BlockHash, .BlobHash => {
                 if (sorted_arguments.len != 1) return error.InvalidAst;
-                const argument = try self.convertedValueTextAlloc(
+                const argument = try self.convertedValue(
                     try evaluated.find(sorted_arguments[0]),
                     function_type.parameter_types[0],
                 );
-                defer self.allocator.free(argument);
                 const expression = if (function_type.kind == .BlockHash)
-                    try std.fmt.allocPrint(self.allocator, "blockhash({s})", .{argument})
+                    try self.buildExpression("blockhash(@0)", .{argument})
                 else
-                    try std.fmt.allocPrint(self.allocator, "blobhash({s})", .{argument});
-                defer self.allocator.free(expression);
-                try self.defineText(&result, expression);
+                    try self.buildExpression("blobhash(@0)", .{argument});
+                try self.defineExpression(&result, expression);
             },
             .Selfdestruct => {
                 if (sorted_arguments.len != 1) return error.InvalidAst;
-                const argument = try self.convertedValueTextAlloc(
+                const argument = try self.convertedValue(
                     try evaluated.find(sorted_arguments[0]),
                     function_type.parameterTypes()[0],
                 );
-                defer self.allocator.free(argument);
-                const expression = try std.fmt.allocPrint(
-                    self.allocator,
-                    "selfdestruct({s})",
+                const expression = try self.buildExpression(
+                    "selfdestruct(@0)",
                     .{argument},
                 );
-                defer self.allocator.free(expression);
-                try self.defineText(&result, expression);
+                try self.defineExpression(&result, expression);
             },
             .AddMod, .MulMod => {
                 if (sorted_arguments.len != 3) return error.InvalidAst;
@@ -4659,38 +4432,34 @@ pub const IRGeneratorForStatements = struct {
                     try evaluated.find(sorted_arguments[2]),
                     true,
                 );
-                const modulus_text = try modulus.commaSeparatedListAlloc();
-                defer self.allocator.free(modulus_text);
+                var modulus_text_slots = try modulus.stackSlotsAlloc();
+                defer modulus_text_slots.deinit();
+                const modulus_text = modulus_text_slots.borrowed();
                 const panic = try self.utils.panicFunction(.division_by_zero);
                 defer self.allocator.free(panic);
-                try self.appendFmt(
-                    "if iszero({s}) {{ {s}() }}\n",
+                try self.add(
+                    "if iszero(@0) { @1() }\n",
                     .{ modulus_text, panic },
                 );
-                const left = try self.convertedValueTextAlloc(
+                const left = try self.convertedValue(
                     try evaluated.find(sorted_arguments[0]),
                     function_type.parameter_types[0],
                 );
-                defer self.allocator.free(left);
-                const right = try self.convertedValueTextAlloc(
+                const right = try self.convertedValue(
                     try evaluated.find(sorted_arguments[1]),
                     function_type.parameter_types[1],
                 );
-                defer self.allocator.free(right);
                 const expression = if (function_type.kind == .AddMod)
-                    try std.fmt.allocPrint(
-                        self.allocator,
-                        "addmod({s}, {s}, {s})",
+                    try self.buildExpression(
+                        "addmod(@0, @1, @2)",
                         .{ left, right, modulus_text },
                     )
                 else
-                    try std.fmt.allocPrint(
-                        self.allocator,
-                        "mulmod({s}, {s}, {s})",
+                    try self.buildExpression(
+                        "mulmod(@0, @1, @2)",
                         .{ left, right, modulus_text },
                     );
-                defer self.allocator.free(expression);
-                try self.defineText(&result, expression);
+                try self.defineExpression(&result, expression);
             },
             else => return error.UnsupportedFunctionCall,
         }
@@ -4740,19 +4509,16 @@ pub const IRGeneratorForStatements = struct {
             );
             defer self.allocator.free(signature);
             const digest = Keccak256.keccak256(signature);
-            const topic = try Numeric.toCompactHexWithPrefixAlloc(
-                u256,
-                self.allocator,
-                digest.toInteger(),
-            );
-            defer self.allocator.free(topic);
+            const topic = try self.numberHex(digest.toInteger());
             const topic_name = try self.context.newYulVariable();
             defer self.allocator.free(topic_name);
             try self.setLocation(node);
-            try self.appendFmt("let {s} := {s}\n", .{ topic_name, topic });
+            try self.add("let @0 := @1\n", .{ topic_name, topic });
+            const topic_slot = try self.allocator.dupe(u8, topic_name);
+            errdefer self.allocator.free(topic_slot);
             try indexed_arguments.append(
                 self.allocator,
-                try self.allocator.dupe(u8, topic_name),
+                topic_slot,
             );
         }
 
@@ -4771,8 +4537,9 @@ pub const IRGeneratorForStatements = struct {
             if (parameter.nodeKind() != .variable_declaration)
                 return error.InvalidAst;
             if (parameter.payload.variable_declaration.indexed) {
-                const value_text = try value.commaSeparatedListAlloc();
-                defer self.allocator.free(value_text);
+                var value_text_slots = try value.stackSlotsAlloc();
+                defer value_text_slots.deinit();
+                const value_text = value_text_slots.borrowed();
                 const topic_name = try self.context.newYulVariable();
                 defer self.allocator.free(topic_name);
                 if (target_type.asReference() != null) {
@@ -4794,8 +4561,8 @@ pub const IRGeneratorForStatements = struct {
                         packed_encoder,
                     );
                     defer self.allocator.free(hash);
-                    try self.appendFmt(
-                        "let {s} := {s}({s})\n",
+                    try self.add(
+                        "let @0 := @1(@2)\n",
                         .{ topic_name, hash, value_text },
                     );
                 } else if (target_type.asFunction()) |indexed_function| {
@@ -4805,8 +4572,8 @@ pub const IRGeneratorForStatements = struct {
                         return error.InvalidAst;
                     const combine = try self.utils.combineExternalFunctionIdFunction();
                     defer self.allocator.free(combine);
-                    try self.appendFmt(
-                        "let {s} := {s}({s})\n",
+                    try self.add(
+                        "let @0 := @1(@2)\n",
                         .{ topic_name, combine, value_text },
                     );
                 } else {
@@ -4817,14 +4584,27 @@ pub const IRGeneratorForStatements = struct {
                         target_type,
                     );
                     defer self.allocator.free(conversion);
-                    try self.appendFmt(
-                        "let {s} := {s}({s})\n",
-                        .{ topic_name, conversion, value_text },
+                    // Scalar topics retain their type's stack-slot names.
+                    // In particular, contract values use the _address part;
+                    // dropping it changes solc's optimizer input.
+                    var topic = try IRVariableModule.IRVariable.init(
+                        self.allocator,
+                        topic_name,
+                        target_type,
                     );
+                    defer topic.deinit();
+                    try topic.appendStackSlots(self.allocator, &indexed_arguments);
+                    try self.add(
+                        "let @0 := @1(@2)\n",
+                        .{ indexed_arguments.items[indexed_arguments.items.len - 1], conversion, value_text },
+                    );
+                    continue;
                 }
+                const topic_slot = try self.allocator.dupe(u8, topic_name);
+                errdefer self.allocator.free(topic_slot);
                 try indexed_arguments.append(
                     self.allocator,
-                    try self.allocator.dupe(u8, topic_name),
+                    topic_slot,
                 );
                 continue;
             }
@@ -4850,36 +4630,19 @@ pub const IRGeneratorForStatements = struct {
             false,
         );
         defer self.allocator.free(encoder);
-        const data_arguments = try joinAlloc(
-            self.allocator,
-            non_indexed_arguments.items,
-            ", ",
-        );
-        defer self.allocator.free(data_arguments);
-        const topics = try joinAlloc(
-            self.allocator,
-            indexed_arguments.items,
-            ", ",
-        );
-        defer self.allocator.free(topics);
+        const data_arguments = non_indexed_arguments.items;
+        const topics = indexed_arguments.items;
         try self.setLocation(node);
-        try self.appendFmt(
-            "{{\nlet {s} := {s}()\nlet {s} := {s}({s}{s}{s})\nlog{d}({s}, sub({s}, {s}){s}{s})\n}}\n",
-            .{
-                position,
-                allocate,
-                end,
-                encoder,
-                position,
-                if (data_arguments.len == 0) "" else ", ",
-                data_arguments,
-                indexed_arguments.items.len,
-                position,
-                end,
-                position,
-                if (topics.len == 0) "" else ", ",
-                topics,
-            },
+        try self.add(
+            "{\nlet @0 := @1()\nlet @2 := @3(@0, @4)\n@5(@0, sub(@2, @0), @6)\n}\n",
+            .{ position, allocate, end, encoder, data_arguments, switch (indexed_arguments.items.len) {
+                0 => "log0",
+                1 => "log1",
+                2 => "log2",
+                3 => "log3",
+                4 => "log4",
+                else => return error.InvalidAst,
+            }, topics },
         );
         return self.variableFromExpression(node);
     }
@@ -4951,19 +4714,16 @@ pub const IRGeneratorForStatements = struct {
             false,
         );
         defer self.allocator.free(encoder);
-        const argument_text = try joinAlloc(self.allocator, arguments.items, ", ");
-        defer self.allocator.free(argument_text);
         const revert = try self.utils.revertWithError(
             signature,
             function_type.parameter_types,
-            argument_text,
+            arguments.items,
             encoder,
             position,
             end,
         );
-        defer self.allocator.free(revert);
         try self.setLocation(error_call);
-        try self.append(revert);
+        try self.appendYulBlock(revert);
     }
 
     fn emitUserDefinedBinaryOperation(
@@ -4985,28 +4745,24 @@ pub const IRGeneratorForStatements = struct {
         defer left.deinit();
         var right = try self.emitExpression(right_node, depth + 1);
         defer right.deinit();
-        const left_text = try self.convertedValueTextAlloc(
+        const left_text = try self.convertedValue(
             &left,
             try variableType(parameters[0]),
         );
-        defer self.allocator.free(left_text);
-        const right_text = try self.convertedValueTextAlloc(
+        const right_text = try self.convertedValue(
             &right,
             try variableType(parameters[1]),
         );
-        defer self.allocator.free(right_text);
         const function_name = try self.context.enqueueFunctionForCodeGeneration(function);
         defer self.allocator.free(function_name);
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s}, {s})",
+        const expression = try self.buildExpression(
+            "@0(@1, @2)",
             .{ function_name, left_text, right_text },
         );
-        defer self.allocator.free(expression);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -5026,23 +4782,20 @@ pub const IRGeneratorForStatements = struct {
 
         var operand = try self.emitExpression(operand_node, depth + 1);
         defer operand.deinit();
-        const operand_text = try self.convertedValueTextAlloc(
+        const operand_text = try self.convertedValue(
             &operand,
             try variableType(parameters[0]),
         );
-        defer self.allocator.free(operand_text);
         const function_name = try self.context.enqueueFunctionForCodeGeneration(function);
         defer self.allocator.free(function_name);
-        const expression = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s})",
+        const expression = try self.buildExpression(
+            "@0(@1)",
             .{ function_name, operand_text },
         );
-        defer self.allocator.free(expression);
         var result = try self.variableFromExpression(node);
         errdefer result.deinit();
         try self.setLocation(node);
-        try self.defineText(&result, expression);
+        try self.defineExpression(&result, expression);
         return result;
     }
 
@@ -5074,6 +4827,8 @@ pub const IRGeneratorForStatements = struct {
                 return error.UnsupportedLValue;
             },
             .tuple_expression => |tuple| blk: {
+                if (tuple.components.len == 1)
+                    break :blk try self.resolveLValue(tuple.components[0] orelse return error.InvalidAst, depth + 1);
                 const type_ref = try expressionType(node);
                 const components = try self.allocator.alloc(
                     ?*IRLValueModule.IRLValue,
@@ -5143,12 +4898,14 @@ pub const IRGeneratorForStatements = struct {
         const base_type = try expressionType(access.base);
         var base = try self.emitExpression(access.base, depth + 1);
         defer base.deinit();
-        const base_text = try base.commaSeparatedListAlloc();
-        defer self.allocator.free(base_text);
+        var base_text_slots = try base.stackSlotsAlloc();
+        defer base_text_slots.deinit();
+        const base_text = base_text_slots.borrowed();
         var key = try self.emitExpression(index, depth + 1);
         defer key.deinit();
-        const key_text = try key.commaSeparatedListAlloc();
-        defer self.allocator.free(key_text);
+        var key_text_slots = try key.stackSlotsAlloc();
+        defer key_text_slots.deinit();
+        const key_text = key_text_slots.borrowed();
         return switch (base_type.payload) {
             .Mapping => |mapping| blk: {
                 const packed_encoder: ?[]u8 = if (TypeBehavior.isDynamicallySized(
@@ -5174,14 +4931,14 @@ pub const IRGeneratorForStatements = struct {
                 const slot = try self.context.newYulVariable();
                 defer self.allocator.free(slot);
                 try self.setLocation(node);
-                try self.appendFmt(
-                    "let {s} := {s}({s}, {s})\n",
+                try self.add(
+                    "let @0 := @1(@2, @3)\n",
                     .{ slot, index_function, base_text, key_text },
                 );
                 break :blk IRLValueModule.IRLValue.initStorage(
                     self.allocator,
                     mapping.value_type,
-                    slot,
+                    try self.buildExpression("@0", .{slot}),
                     .{ .constant = 0 },
                     false,
                 );
@@ -5206,15 +4963,15 @@ pub const IRGeneratorForStatements = struct {
                     const offset = try self.context.newYulVariable();
                     defer self.allocator.free(offset);
                     try self.setLocation(node);
-                    try self.appendFmt(
-                        "let {s}, {s} := {s}({s}, {s})\n",
+                    try self.add(
+                        "let @0, @1 := @2(@3, @4)\n",
                         .{ slot, offset, index_function, base_slot_text, index_text },
                     );
                     break :blk IRLValueModule.IRLValue.initStorage(
                         self.allocator,
                         try expressionType(node),
-                        slot,
-                        try IRLValueModule.Offset.initRuntime(self.allocator, offset),
+                        try self.buildExpression("@0", .{slot}),
+                        .{ .runtime = try self.output.generator.name(offset) },
                         false,
                     );
                 },
@@ -5227,17 +4984,15 @@ pub const IRGeneratorForStatements = struct {
                         base_type,
                     );
                     defer self.allocator.free(index_function);
-                    const index_text = try self.convertedValueTextAlloc(
+                    const index_text = try self.convertedValue(
                         &key,
                         self.context.type_provider.uint256(),
                     );
-                    defer self.allocator.free(index_text);
-                    const address = try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}({s}, {s})",
+                    const address = try self.buildExpression(
+                        "@0(@1, @2)",
                         .{ index_function, memory_text, index_text },
                     );
-                    defer self.allocator.free(address);
+                    try self.setLocation(node);
                     break :blk IRLValueModule.IRLValue.initMemory(
                         self.allocator,
                         try expressionType(node),
@@ -5253,7 +5008,7 @@ pub const IRGeneratorForStatements = struct {
 
     fn readFromLValue(
         self: *IRGeneratorForStatements,
-        lvalue: *const IRLValueModule.IRLValue,
+        lvalue: *IRLValueModule.IRLValue,
     ) GeneratorError!IRVariableModule.IRVariable {
         const raw_name = try self.context.newYulVariable();
         defer self.allocator.free(raw_name);
@@ -5267,7 +5022,7 @@ pub const IRGeneratorForStatements = struct {
             .stack => |*stack| try self.declareAssign(&result, stack, true),
             .storage => |*storage| {
                 if (!TypeBehavior.isValueType(lvalue.type_ref)) {
-                    try self.defineText(&result, storage.slot);
+                    try self.defineExpression(&result, try storage.slotExpression(self.output.generator));
                     return result;
                 }
                 const reader = switch (storage.offset) {
@@ -5284,22 +5039,17 @@ pub const IRGeneratorForStatements = struct {
                     ),
                 };
                 defer self.allocator.free(reader);
-                const offset = try storage.offsetStringAlloc(self.allocator);
-                defer self.allocator.free(offset);
                 const expression = switch (storage.offset) {
-                    .constant => try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}({s})",
-                        .{ reader, storage.slot },
+                    .constant => try self.buildExpression(
+                        "@0(@1)",
+                        .{ reader, try storage.slotExpression(self.output.generator) },
                     ),
-                    .runtime => try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}({s}, {s})",
-                        .{ reader, storage.slot, offset },
+                    .runtime => try self.buildExpression(
+                        "@0(@1, @2)",
+                        .{ reader, try storage.slotExpression(self.output.generator), try storage.offset.expression(self.output.generator) },
                     ),
                 };
-                defer self.allocator.free(expression);
-                try self.defineText(&result, expression);
+                try self.defineExpression(&result, expression);
             },
             .transient_storage => |*storage| {
                 if (!TypeBehavior.isValueType(lvalue.type_ref))
@@ -5318,39 +5068,31 @@ pub const IRGeneratorForStatements = struct {
                     ),
                 };
                 defer self.allocator.free(reader);
-                const offset = try storage.offsetStringAlloc(self.allocator);
-                defer self.allocator.free(offset);
                 const expression = switch (storage.offset) {
-                    .constant => try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}({s})",
-                        .{ reader, storage.slot },
+                    .constant => try self.buildExpression(
+                        "@0(@1)",
+                        .{ reader, try storage.slotExpression(self.output.generator) },
                     ),
-                    .runtime => try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}({s}, {s})",
-                        .{ reader, storage.slot, offset },
+                    .runtime => try self.buildExpression(
+                        "@0(@1, @2)",
+                        .{ reader, try storage.slotExpression(self.output.generator), try storage.offset.expression(self.output.generator) },
                     ),
                 };
-                defer self.allocator.free(expression);
-                try self.defineText(&result, expression);
+                try self.defineExpression(&result, expression);
             },
-            .memory => |memory| {
+            .memory => |*memory| {
                 const expression = if (TypeBehavior.isValueType(lvalue.type_ref)) blk: {
                     const reader = try self.utils.readFromMemory(lvalue.type_ref);
                     defer self.allocator.free(reader);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}({s})",
-                        .{ reader, memory.address },
+                    break :blk try self.buildExpression(
+                        "@0(@1)",
+                        .{ reader, try memory.addressExpression(self.output.generator) },
                     );
-                } else try std.fmt.allocPrint(
-                    self.allocator,
-                    "mload({s})",
-                    .{memory.address},
+                } else try self.buildExpression(
+                    "mload(@0)",
+                    .{try memory.addressExpression(self.output.generator)},
                 );
-                defer self.allocator.free(expression);
-                try self.defineText(&result, expression);
+                try self.defineExpression(&result, expression);
             },
             .immutable => |maybe_declaration| {
                 const declaration = maybe_declaration orelse return error.InvalidAst;
@@ -5358,21 +5100,17 @@ pub const IRGeneratorForStatements = struct {
                     const reader = try self.utils.readFromMemoryFunction(lvalue.type_ref);
                     defer self.allocator.free(reader);
                     const offset = try self.context.immutableMemoryOffset(declaration);
-                    const expression = try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}({d})",
+                    const expression = try self.buildExpression(
+                        "@0(@1)",
                         .{ reader, offset },
                     );
-                    defer self.allocator.free(expression);
-                    try self.defineText(&result, expression);
+                    try self.defineExpression(&result, expression);
                 } else {
-                    const expression = try std.fmt.allocPrint(
-                        self.allocator,
-                        "loadimmutable(\"{d}\")",
-                        .{try self.compatibilityId(declaration)},
+                    const expression = try self.buildExpression(
+                        "loadimmutable(@0)",
+                        .{try self.numericLabel(try self.compatibilityId(declaration))},
                     );
-                    defer self.allocator.free(expression);
-                    try self.defineText(&result, expression);
+                    try self.defineExpression(&result, expression);
                 }
             },
             else => return error.UnsupportedLValue,
@@ -5382,7 +5120,7 @@ pub const IRGeneratorForStatements = struct {
 
     fn writeToLValue(
         self: *IRGeneratorForStatements,
-        lvalue: *const IRLValueModule.IRLValue,
+        lvalue: *IRLValueModule.IRLValue,
         value: *const IRVariableModule.IRVariable,
     ) GeneratorError!void {
         switch (lvalue.kind) {
@@ -5399,19 +5137,19 @@ pub const IRGeneratorForStatements = struct {
                     offset,
                 );
                 defer self.allocator.free(update);
-                const value_arguments = try value.commaSeparatedListPrefixedAlloc();
-                defer self.allocator.free(value_arguments);
+                var value_slots = try value.stackSlotsAlloc();
+                defer value_slots.deinit();
+                const value_arguments = value_slots.borrowed();
                 if (storage.offset == .runtime) {
-                    const offset_text = try storage.offsetStringAlloc(self.allocator);
-                    defer self.allocator.free(offset_text);
-                    try self.appendFmt(
-                        "{s}({s}, {s}{s})\n",
-                        .{ update, storage.slot, offset_text, value_arguments },
+                    const offset_text = try storage.offset.expression(self.output.generator);
+                    try self.add(
+                        "@0(@1, @2, @3)\n",
+                        .{ update, try storage.slotExpression(self.output.generator), offset_text, value_arguments },
                     );
                 } else {
-                    try self.appendFmt(
-                        "{s}({s}{s})\n",
-                        .{ update, storage.slot, value_arguments },
+                    try self.add(
+                        "@0(@1, @2)\n",
+                        .{ update, try storage.slotExpression(self.output.generator), value_arguments },
                     );
                 }
             },
@@ -5427,23 +5165,23 @@ pub const IRGeneratorForStatements = struct {
                     offset,
                 );
                 defer self.allocator.free(update);
-                const value_arguments = try value.commaSeparatedListPrefixedAlloc();
-                defer self.allocator.free(value_arguments);
+                var value_slots = try value.stackSlotsAlloc();
+                defer value_slots.deinit();
+                const value_arguments = value_slots.borrowed();
                 if (storage.offset == .runtime) {
-                    const offset_text = try storage.offsetStringAlloc(self.allocator);
-                    defer self.allocator.free(offset_text);
-                    try self.appendFmt(
-                        "{s}({s}, {s}{s})\n",
-                        .{ update, storage.slot, offset_text, value_arguments },
+                    const offset_text = try storage.offset.expression(self.output.generator);
+                    try self.add(
+                        "@0(@1, @2, @3)\n",
+                        .{ update, try storage.slotExpression(self.output.generator), offset_text, value_arguments },
                     );
                 } else {
-                    try self.appendFmt(
-                        "{s}({s}{s})\n",
-                        .{ update, storage.slot, value_arguments },
+                    try self.add(
+                        "@0(@1, @2)\n",
+                        .{ update, try storage.slotExpression(self.output.generator), value_arguments },
                     );
                 }
             },
-            .memory => |memory| {
+            .memory => |*memory| {
                 if (TypeBehavior.isValueType(lvalue.type_ref)) {
                     const prepared_name = try self.context.newYulVariable();
                     defer self.allocator.free(prepared_name);
@@ -5454,19 +5192,20 @@ pub const IRGeneratorForStatements = struct {
                     );
                     defer prepared.deinit();
                     try self.assignConverted(&prepared, value, true);
-                    const prepared_text = try prepared.commaSeparatedListAlloc();
-                    defer self.allocator.free(prepared_text);
+                    var prepared_text_slots = try prepared.stackSlotsAlloc();
+                    defer prepared_text_slots.deinit();
+                    const prepared_text = prepared_text_slots.borrowed();
                     if (memory.byte_array_element)
-                        try self.appendFmt(
-                            "mstore8({s}, byte(0, {s}))\n",
-                            .{ memory.address, prepared_text },
+                        try self.add(
+                            "mstore8(@0, byte(0, @1))\n",
+                            .{ try memory.addressExpression(self.output.generator), prepared_text },
                         )
                     else {
                         const write = try self.utils.writeToMemoryFunction(lvalue.type_ref);
                         defer self.allocator.free(write);
-                        try self.appendFmt(
-                            "{s}({s}, {s})\n",
-                            .{ write, memory.address, prepared_text },
+                        try self.add(
+                            "@0(@1, @2)\n",
+                            .{ write, try memory.addressExpression(self.output.generator), prepared_text },
                         );
                     }
                 } else if (value.type_ref.category() == .StringLiteral) {
@@ -5478,9 +5217,9 @@ pub const IRGeneratorForStatements = struct {
                         value.type_ref.payload.StringLiteral.value,
                     );
                     defer self.allocator.free(copy);
-                    try self.appendFmt(
-                        "{s}({s}, {s}())\n",
-                        .{ write, memory.address, copy },
+                    try self.add(
+                        "@0(@1, @2())\n",
+                        .{ write, try memory.addressExpression(self.output.generator), copy },
                     );
                 } else {
                     const value_reference = value.type_ref.asReference() orelse
@@ -5488,25 +5227,25 @@ pub const IRGeneratorForStatements = struct {
                     const value_text = if (value_reference.location == .Memory) blk: {
                         var position = try value.part("mpos");
                         defer position.deinit();
-                        break :blk try position.nameAlloc();
+                        break :blk try self.variableExpression(&position);
                     } else blk: {
                         const conversion = try self.utils.conversionFunction(
                             value.type_ref,
                             lvalue.type_ref,
                         );
                         defer self.allocator.free(conversion);
-                        const values = try value.commaSeparatedListAlloc();
-                        defer self.allocator.free(values);
-                        break :blk try std.fmt.allocPrint(
-                            self.allocator,
-                            "{s}({s})",
+                        var values_slots = try value.stackSlotsAlloc();
+                        defer values_slots.deinit();
+                        const values = values_slots.borrowed();
+                        break :blk try self.buildExpression(
+                            "@0(@1)",
                             .{ conversion, values },
                         );
                     };
-                    defer self.allocator.free(value_text);
-                    try self.appendFmt(
-                        "mstore({s}, {s})\n",
-                        .{ memory.address, value_text },
+
+                    try self.add(
+                        "mstore(@0, @1)\n",
+                        .{ try memory.addressExpression(self.output.generator), value_text },
                     );
                 }
             },
@@ -5523,14 +5262,12 @@ pub const IRGeneratorForStatements = struct {
                 );
                 defer prepared.deinit();
                 try self.assignConverted(&prepared, value, true);
-                const prepared_text = try prepared.commaSeparatedListAlloc();
-                defer self.allocator.free(prepared_text);
-                try self.appendFmt(
-                    "mstore({d}, {s})\n",
-                    .{
-                        try self.context.immutableMemoryOffset(declaration),
-                        prepared_text,
-                    },
+                var prepared_text_slots = try prepared.stackSlotsAlloc();
+                defer prepared_text_slots.deinit();
+                const prepared_text = prepared_text_slots.borrowed();
+                try self.add(
+                    "mstore(@0, @1)\n",
+                    .{ try self.context.immutableMemoryOffset(declaration), prepared_text },
                 );
             },
             .tuple => |tuple| {
@@ -5554,12 +5291,7 @@ pub const IRGeneratorForStatements = struct {
         if (declaration.nodeKind() != .variable_declaration)
             return error.InvalidAst;
         const location = try self.context.storageLocationOfStateVariable(declaration);
-        const slot = try Numeric.toCompactHexWithPrefixAlloc(
-            u256,
-            self.allocator,
-            location.storage_offset,
-        );
-        defer self.allocator.free(slot);
+        const slot = try self.numberHex(location.storage_offset);
         return IRLValueModule.IRLValue.initStorage(
             self.allocator,
             type_ref,
@@ -5569,20 +5301,20 @@ pub const IRGeneratorForStatements = struct {
         );
     }
 
-    fn binaryExpressionAlloc(
+    fn binaryExpression(
         self: *IRGeneratorForStatements,
         operator: AST.Token,
         common_type: *const Types.Type,
         left: *const IRVariableModule.IRVariable,
         right: *const IRVariableModule.IRVariable,
-    ) GeneratorError![]u8 {
+    ) GeneratorError!YulAST.Expression {
         if (TokenModule.isShiftOp(operator))
-            return self.shiftExpressionAlloc(operator, left, right);
+            return self.shiftExpression(operator, left, right);
         if (TokenModule.isCompareOp(operator)) {
-            const clean_left = try self.cleanedValueTextAlloc(left, common_type);
-            defer self.allocator.free(clean_left);
-            const clean_right = try self.cleanedValueTextAlloc(right, common_type);
-            defer self.allocator.free(clean_right);
+            const clean_left = try self.cleanedValue(left, common_type);
+
+            const clean_right = try self.cleanedValue(right, common_type);
+
             if (common_type.asFunction()) |function_type| {
                 if (function_type.kind == .External) {
                     if (operator != .Equal and operator != .NotEqual)
@@ -5605,22 +5337,14 @@ pub const IRGeneratorForStatements = struct {
                     defer self.allocator.free(right_selector_name);
                     const equal = try self.utils.externalFunctionPointersEqualFunction();
                     defer self.allocator.free(equal);
-                    const comparison = try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}({s}, {s}, {s}, {s})",
-                        .{
-                            equal,
-                            left_address_name,
-                            left_selector_name,
-                            right_address_name,
-                            right_selector_name,
-                        },
+                    const comparison = try self.buildExpression(
+                        "@0(@1, @2, @3, @4)",
+                        .{ equal, left_address_name, left_selector_name, right_address_name, right_selector_name },
                     );
                     if (operator == .Equal) return comparison;
-                    defer self.allocator.free(comparison);
-                    return std.fmt.allocPrint(
-                        self.allocator,
-                        "iszero({s})",
+
+                    return self.buildExpression(
+                        "iszero(@0)",
                         .{comparison},
                     );
                 }
@@ -5628,35 +5352,29 @@ pub const IRGeneratorForStatements = struct {
             const signed = common_type.asInteger() != null and
                 common_type.payload.Integer.isSigned();
             return switch (operator) {
-                .Equal => std.fmt.allocPrint(
-                    self.allocator,
-                    "eq({s}, {s})",
+                .Equal => self.buildExpression(
+                    "eq(@0, @1)",
                     .{ clean_left, clean_right },
                 ),
-                .NotEqual => std.fmt.allocPrint(
-                    self.allocator,
-                    "iszero(eq({s}, {s}))",
+                .NotEqual => self.buildExpression(
+                    "iszero(eq(@0, @1))",
                     .{ clean_left, clean_right },
                 ),
-                .GreaterThan => std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}gt({s}, {s})",
-                    .{ if (signed) "s" else "", clean_left, clean_right },
+                .GreaterThan => self.buildExpression(
+                    "@0(@1, @2)",
+                    .{ if (signed) "sgt" else "gt", clean_left, clean_right },
                 ),
-                .LessThan => std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}lt({s}, {s})",
-                    .{ if (signed) "s" else "", clean_left, clean_right },
+                .LessThan => self.buildExpression(
+                    "@0(@1, @2)",
+                    .{ if (signed) "slt" else "lt", clean_left, clean_right },
                 ),
-                .GreaterThanOrEqual => std.fmt.allocPrint(
-                    self.allocator,
-                    "iszero({s}lt({s}, {s}))",
-                    .{ if (signed) "s" else "", clean_left, clean_right },
+                .GreaterThanOrEqual => self.buildExpression(
+                    "iszero(@0(@1, @2))",
+                    .{ if (signed) "slt" else "lt", clean_left, clean_right },
                 ),
-                .LessThanOrEqual => std.fmt.allocPrint(
-                    self.allocator,
-                    "iszero({s}gt({s}, {s}))",
-                    .{ if (signed) "s" else "", clean_left, clean_right },
+                .LessThanOrEqual => self.buildExpression(
+                    "iszero(@0(@1, @2))",
+                    .{ if (signed) "sgt" else "gt", clean_left, clean_right },
                 ),
                 else => unreachable,
             };
@@ -5664,15 +5382,15 @@ pub const IRGeneratorForStatements = struct {
         const convert_operands = TokenModule.isArithmeticOp(operator) or
             operator == .BitOr or operator == .BitXor or operator == .BitAnd;
         const left_text = if (convert_operands)
-            try self.convertedValueTextAlloc(left, common_type)
+            try self.convertedValue(left, common_type)
         else
-            try left.commaSeparatedListAlloc();
-        defer self.allocator.free(left_text);
+            try self.variableExpression(left);
+
         const right_text = if (convert_operands)
-            try self.convertedValueTextAlloc(right, common_type)
+            try self.convertedValue(right, common_type)
         else
-            try right.commaSeparatedListAlloc();
-        defer self.allocator.free(right_text);
+            try self.variableExpression(right);
+
         if (TokenModule.isArithmeticOp(operator)) {
             const integer = common_type.asInteger() orelse
                 return error.UnsupportedExpression;
@@ -5697,39 +5415,35 @@ pub const IRGeneratorForStatements = struct {
                 else => return error.UnsupportedExpression,
             };
             defer self.allocator.free(function);
-            return std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s}, {s})",
+            return self.buildExpression(
+                "@0(@1, @2)",
                 .{ function, left_text, right_text },
             );
         }
 
         return switch (operator) {
-            .BitOr => std.fmt.allocPrint(
-                self.allocator,
-                "or({s}, {s})",
+            .BitOr => self.buildExpression(
+                "or(@0, @1)",
                 .{ left_text, right_text },
             ),
-            .BitXor => std.fmt.allocPrint(
-                self.allocator,
-                "xor({s}, {s})",
+            .BitXor => self.buildExpression(
+                "xor(@0, @1)",
                 .{ left_text, right_text },
             ),
-            .BitAnd => std.fmt.allocPrint(
-                self.allocator,
-                "and({s}, {s})",
+            .BitAnd => self.buildExpression(
+                "and(@0, @1)",
                 .{ left_text, right_text },
             ),
             else => error.UnsupportedExpression,
         };
     }
 
-    fn shiftExpressionAlloc(
+    fn shiftExpression(
         self: *IRGeneratorForStatements,
         operator: AST.Token,
         value: *const IRVariableModule.IRVariable,
         amount: *const IRVariableModule.IRVariable,
-    ) GeneratorError![]u8 {
+    ) GeneratorError!YulAST.Expression {
         const amount_type = amount.type_ref.asInteger() orelse
             return error.UnsupportedExpression;
         if (amount_type.isSigned()) return error.InvalidAst;
@@ -5749,9 +5463,8 @@ pub const IRGeneratorForStatements = struct {
         defer self.allocator.free(value_name);
         const amount_name = try amount.nameAlloc();
         defer self.allocator.free(amount_name);
-        return std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s}, {s})",
+        return self.buildExpression(
+            "@0(@1, @2)",
             .{ helper, value_name, amount_name },
         );
     }
@@ -5779,17 +5492,16 @@ pub const IRGeneratorForStatements = struct {
         } else return error.InvalidAst;
         var function_identifier = try result.part("functionIdentifier");
         defer function_identifier.deinit();
-        const value = try std.fmt.allocPrint(self.allocator, "{d}", .{identifier});
-        defer self.allocator.free(value);
+        const value = try self.buildExpression("@0", .{identifier});
         try self.setLocation(location_node);
-        try self.defineText(&function_identifier, value);
+        try self.defineExpression(&function_identifier, value);
         try self.context.addToInternalDispatch(function);
     }
 
-    fn linkerSymbolAlloc(
+    fn linkerSymbol(
         self: *IRGeneratorForStatements,
         library: *const AST.Node,
-    ) GeneratorError![]u8 {
+    ) GeneratorError!YulAST.Expression {
         if (library.nodeKind() != .contract_definition or
             library.payload.contract_definition.contract_kind != .Library)
             return error.InvalidAst;
@@ -5798,23 +5510,16 @@ pub const IRGeneratorForStatements = struct {
             library,
         );
         defer self.allocator.free(qualified);
-        const quoted = try CommonData.escapeAndQuoteStringAlloc(
-            self.allocator,
-            qualified,
-        );
-        defer self.allocator.free(quoted);
-        return std.fmt.allocPrint(self.allocator, "linkersymbol({s})", .{quoted});
+        return self.buildExpression("linkersymbol(@0)", .{qualified});
     }
 
-    fn convertedValueTextAlloc(
+    fn convertedValue(
         self: *IRGeneratorForStatements,
         value: *const IRVariableModule.IRVariable,
         target_type: *const Types.Type,
-    ) GeneratorError![]u8 {
-        const text = try value.commaSeparatedListAlloc();
-        defer self.allocator.free(text);
+    ) GeneratorError!YulAST.Expression {
         if (TypeBehavior.equals(value.type_ref, target_type))
-            return self.allocator.dupe(u8, text);
+            return self.variableExpression(value);
         if (try TypeBehavior.sizeOnStack(value.type_ref) != 1 or
             try TypeBehavior.sizeOnStack(target_type) != 1)
             return error.UnsupportedConversion;
@@ -5823,10 +5528,9 @@ pub const IRGeneratorForStatements = struct {
             target_type,
         );
         defer self.allocator.free(conversion);
-        return std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s})",
-            .{ conversion, text },
+        return self.buildExpression(
+            "@0(@1)",
+            .{ conversion, try self.variableExpression(value) },
         );
     }
 
@@ -5849,22 +5553,21 @@ pub const IRGeneratorForStatements = struct {
         return converted;
     }
 
-    fn cleanedValueTextAlloc(
+    fn cleanedValue(
         self: *IRGeneratorForStatements,
         value: *const IRVariableModule.IRVariable,
         target_type: *const Types.Type,
-    ) GeneratorError![]u8 {
-        const text = try value.commaSeparatedListAlloc();
-        defer self.allocator.free(text);
+    ) GeneratorError!YulAST.Expression {
+        var slots = try value.stackSlotsAlloc();
+        defer slots.deinit();
         const function = if (TypeBehavior.equals(value.type_ref, target_type))
             try self.utils.cleanupFunction(target_type)
         else
             try self.utils.conversionFunction(value.type_ref, target_type);
         defer self.allocator.free(function);
-        return std.fmt.allocPrint(
-            self.allocator,
-            "{s}({s})",
-            .{ function, text },
+        return self.buildExpression(
+            "@0(@1)",
+            .{ function, slots.borrowed() },
         );
     }
 
@@ -5880,11 +5583,12 @@ pub const IRGeneratorForStatements = struct {
         defer right_slots.deinit();
         if (left_slots.items.len != right_slots.items.len)
             return error.StackLayoutMismatch;
-        for (left_slots.items, right_slots.items) |left_slot, right_slot|
-            try self.appendFmt(
-                "{s}{s} := {s}\n",
-                .{ if (declare_value) "let " else "", left_slot, right_slot },
-            );
+        for (left_slots.items, right_slots.items) |left_slot, right_slot| {
+            if (declare_value)
+                try self.add("let @0 := @1", .{ left_slot, right_slot })
+            else
+                try self.add("@0 := @1", .{ left_slot, right_slot });
+        }
     }
 
     fn assignConverted(
@@ -5900,42 +5604,40 @@ pub const IRGeneratorForStatements = struct {
             left.type_ref,
         );
         defer self.allocator.free(conversion);
-        const left_slots = try left.commaSeparatedListAlloc();
-        defer self.allocator.free(left_slots);
-        const right_slots = try right.commaSeparatedListAlloc();
-        defer self.allocator.free(right_slots);
-        try self.appendFmt(
-            "{s}{s}{s}{s}({s})\n",
-            .{
-                if (left_slots.len == 0) "" else if (declare_value) "let " else "",
-                left_slots,
-                if (left_slots.len == 0) "" else " := ",
-                conversion,
-                right_slots,
-            },
-        );
+        var left_slots = try left.stackSlotsAlloc();
+        defer left_slots.deinit();
+        var right_slots = try right.stackSlotsAlloc();
+        defer right_slots.deinit();
+        if (left_slots.items.len == 0)
+            try self.add("@0(@1)", .{ conversion, right_slots.borrowed() })
+        else if (declare_value)
+            try self.add("let @0 := @1(@2)", .{ left_slots.borrowed(), conversion, right_slots.borrowed() })
+        else
+            try self.add("@0 := @1(@2)", .{ left_slots.borrowed(), conversion, right_slots.borrowed() });
     }
 
     fn declare(
         self: *IRGeneratorForStatements,
         variable: *const IRVariableModule.IRVariable,
     ) GeneratorError!void {
-        const slots = try variable.commaSeparatedListAlloc();
-        defer self.allocator.free(slots);
-        if (slots.len != 0) try self.appendFmt("let {s}\n", .{slots});
+        var slots = try variable.stackSlotsAlloc();
+        defer slots.deinit();
+        if (slots.items.len != 0) try self.add("let @0", .{slots.borrowed()});
     }
 
-    fn defineText(
+    fn defineExpression(
         self: *IRGeneratorForStatements,
         variable: *const IRVariableModule.IRVariable,
-        expression: []const u8,
+        expression: YulAST.Expression,
     ) GeneratorError!void {
-        const slots = try variable.commaSeparatedListAlloc();
-        defer self.allocator.free(slots);
-        if (slots.len == 0) {
-            try self.appendFmt("{s}\n", .{expression});
+        var slots = try variable.stackSlotsAlloc();
+        defer slots.deinit();
+        if (slots.items.len == 0) {
+            // Void calls consume the requested location without publishing it.
+            const builder = self.output.generator.withDebug(try self.emissionDebug(false));
+            try self.output.block.statements.append(builder.allocator(), builder.expressionStatement(expression));
         } else {
-            try self.appendFmt("let {s} := {s}\n", .{ slots, expression });
+            try self.add("let @0 := @1", .{ slots.borrowed(), expression });
         }
     }
 
@@ -5946,35 +5648,103 @@ pub const IRGeneratorForStatements = struct {
         self.current_location = node.location;
     }
 
-    fn append(self: *IRGeneratorForStatements, code: []const u8) !void {
-        try self.appendLocationComment();
-        try self.output.appendSlice(self.allocator, code);
+    const BodyScope = struct {
+        emitter: *IRGeneratorForStatements,
+        parent: Generated.Buffer,
+        target: *YulAST.Block,
+
+        fn finish(self: BodyScope) void {
+            self.target.* = self.emitter.output.take();
+            self.emitter.output = self.parent;
+        }
+    };
+
+    fn enterBody(self: *IRGeneratorForStatements, target: *YulAST.Block) BodyScope {
+        const parent = self.output;
+        self.output = .{ .generator = parent.generator, .block = target.* };
+        return .{ .emitter = self, .parent = parent, .target = target };
     }
 
-    fn appendFmt(
-        self: *IRGeneratorForStatements,
-        comptime format: []const u8,
-        arguments: anytype,
-    ) !void {
-        try self.appendLocationComment();
-        try self.output.print(self.allocator, format, arguments);
+    fn beginSwitch(self: *IRGeneratorForStatements, value: YulAST.Expression, case_count: usize) GeneratorError!*YulAST.Switch {
+        const builder = self.output.generator.withDebug(try self.emissionDebug(true));
+        var statement = try builder.switchStatement(value, &.{});
+        try statement.switch_statement.cases.ensureTotalCapacityPrecise(builder.allocator(), case_count);
+        try self.output.block.statements.append(builder.allocator(), statement);
+        return &self.output.block.statements.items[self.output.block.statements.items.len - 1].switch_statement;
     }
 
-    fn appendLocationComment(self: *IRGeneratorForStatements) GeneratorError!void {
-        if (self.current_location.isValid() and
+    fn beginCase(self: *IRGeneratorForStatements, dispatch: *YulAST.Switch, value: ?u256) GeneratorError!BodyScope {
+        const builder = self.output.generator.withDebug(try self.emissionDebug(true));
+        const literal = if (value) |number| (try builder.expression("@0", .{number})).literal else null;
+        dispatch.cases.appendAssumeCapacity(try builder.case(literal, .{ .debug_data = builder.debug_data }));
+        return self.enterBody(&dispatch.cases.items[dispatch.cases.items.len - 1].body);
+    }
+
+    fn beginIf(self: *IRGeneratorForStatements, condition: YulAST.Expression) GeneratorError!BodyScope {
+        try self.add("if @0 {}", .{condition});
+        const statement = &self.output.block.statements.items[self.output.block.statements.items.len - 1];
+        return self.enterBody(&statement.if_statement.body);
+    }
+
+    fn numericLabel(self: *IRGeneratorForStatements, value: anytype) GeneratorError!YulAST.Expression {
+        return .{ .literal = .{ .kind = .String, .value = .{
+            .string_value = try std.fmt.allocPrint(self.output.generator.allocator(), "{d}", .{value}),
+        } } };
+    }
+
+    fn numberHex(self: *IRGeneratorForStatements, value: u256) GeneratorError!YulAST.Expression {
+        return .{ .literal = .{ .kind = .Number, .value = .{
+            .numeric_value = value,
+            .string_value = try Numeric.toCompactHexWithPrefixAlloc(u256, self.output.generator.allocator(), value),
+        } } };
+    }
+
+    fn literalValue(self: *IRGeneratorForStatements, node: *const AST.Node, type_ref: *const Types.Type) GeneratorError!YulAST.Expression {
+        switch (type_ref.payload) {
+            .RationalNumber => |rational| {
+                if (rational.denominator.compareUnsigned(1) != .eq) return error.InvalidLiteral;
+                return self.numberHex(rational.numerator.toU256Wrapping());
+            },
+            .Bool => return self.numberHex(if (node.nodeKind() == .literal and node.payload.literal.token == .TrueLiteral) 1 else 0),
+            .Address, .Integer => if (node.nodeKind() == .literal) {
+                const token = try duplicateWithoutUnderscores(self.allocator, node.payload.literal.value);
+                defer self.allocator.free(token);
+                return self.output.generator.numberToken(token);
+            },
+            else => {},
+        }
+        return error.InvalidLiteral;
+    }
+
+    fn buildExpression(self: *IRGeneratorForStatements, comptime source: []const u8, arguments: anytype) GeneratorError!YulAST.Expression {
+        return self.output.generator.expression(source, arguments);
+    }
+
+    fn variableExpression(_: *IRGeneratorForStatements, variable: *const IRVariableModule.IRVariable) GeneratorError!YulAST.Expression {
+        return singleStackSlotExpression(variable);
+    }
+
+    fn add(self: *IRGeneratorForStatements, comptime source: []const u8, arguments: anytype) GeneratorError!void {
+        const builder = self.output.generator.withDebug(try self.emissionDebug(true));
+        try self.output.append(try builder.statements(source, arguments));
+    }
+
+    fn appendYulBlock(self: *IRGeneratorForStatements, block: YulAST.Block) GeneratorError!void {
+        try self.add("{ @0 }", .{block});
+    }
+
+    fn emissionDebug(self: *IRGeneratorForStatements, publish: bool) GeneratorError!?DebugData {
+        if (publish and self.current_location.isValid() and
             (!self.has_last_location or !self.last_location.eql(self.current_location)))
         {
-            const comment = try Common.dispenseLocationCommentAlloc(
-                self.allocator,
-                self.current_location,
-                self.context.locationCommentContext(),
-            );
-            defer self.allocator.free(comment);
-            try self.output.appendSlice(self.allocator, comment);
-            try self.output.append(self.allocator, '\n');
+            try self.context.locationCommentContext().markSourceUsed(self.current_location.source_name orelse return error.InvalidAst);
+            // Upstream source comments are disabled only by an empty debug
+            // selection: ast-id alone still preserves Solidity source locations.
+            if (!self.context.debug_info_selection.none()) self.active_location = self.current_location;
         }
         self.last_location = self.current_location;
         self.has_last_location = true;
+        return if (self.active_location.isValid()) .{ .origin_location = self.active_location } else null;
     }
 };
 
@@ -5997,10 +5767,29 @@ fn errorPayloadNeedsAllocation(
     return encoded_size > ContextModule.general_purpose_memory_start;
 }
 
+// A single machine word can still have a typed part, such as a memory pointer
+// or an internal function identifier. Resolve the complete stack layout once.
+fn singleStackSlotExpression(variable: *const IRVariableModule.IRVariable) GeneratorError!YulAST.Expression {
+    var slots = try variable.stackSlotsAlloc();
+    defer slots.deinit();
+    if (slots.items.len != 1) return error.StackLayoutMismatch;
+    return .{ .identifier = .{ .name = try YulName.init(slots.items[0]) } };
+}
+
 const InlineAssemblyCopyContext = struct {
     allocator: std.mem.Allocator,
+    origin: SourceLocation,
     generation_context: *ContextModule.IRGenerationContext,
     references: []const ASTAnnotations.InlineAssemblyExternalReference,
+
+    fn translateDebugData(opaque_context: ?*anyopaque, data: ?DebugData) anyerror!?DebugData {
+        const self: *InlineAssemblyCopyContext = @ptrCast(@alignCast(opaque_context.?));
+        return .{
+            .origin_location = self.origin,
+            .native_location = if (data) |value| value.native_location else .{},
+            .ast_id = if (data) |value| value.ast_id else null,
+        };
+    }
 
     fn translateExpression(
         opaque_context: ?*anyopaque,
@@ -6049,25 +5838,28 @@ const InlineAssemblyCopyContext = struct {
         const reference = for (self.references) |*candidate| {
             if (candidate.identifier == identifier) break candidate;
         } else return null;
-        const value = try self.referenceValueAlloc(reference.info);
-        defer self.allocator.free(value);
-        if (value.len == 0) return error.InvalidAst;
-        if (std.ascii.isDigit(value[0]))
-            return .{ .literal = .{
-                .debug_data = identifier.debug_data,
-                .kind = .Number,
-                .value = try YulUtilities.valueOfNumberLiteral(self.allocator, value),
-            } };
-        return .{ .identifier = .{
-            .debug_data = identifier.debug_data,
-            .name = try YulName.init(value),
-        } };
+        var value = try self.referenceValue(reference.info);
+        switch (value) {
+            inline else => |*entry| entry.debug_data = try translateDebugData(self, identifier.debug_data),
+        }
+        return value;
     }
 
-    fn referenceValueAlloc(
+    fn number(self: *InlineAssemblyCopyContext, value: u256, mode: enum { compact, decimal, short }) std.mem.Allocator.Error!YulAST.Expression {
+        return .{ .literal = .{ .kind = .Number, .value = .{
+            .numeric_value = value,
+            .string_value = switch (mode) {
+                .compact => try Numeric.toCompactHexWithPrefixAlloc(u256, self.allocator, value),
+                .decimal => try std.fmt.allocPrint(self.allocator, "{d}", .{value}),
+                .short => try Numeric.formatNumberU256Alloc(self.allocator, value),
+            },
+        } } };
+    }
+
+    fn referenceValue(
         self: *InlineAssemblyCopyContext,
         reference: ASTAnnotations.InlineAssemblyExternalIdentifierInfo,
-    ) anyerror![]u8 {
+    ) anyerror!YulAST.Expression {
         var declaration = reference.declaration orelse return error.InvalidAst;
         if (declaration.nodeKind() != .variable_declaration)
             return error.InvalidAst;
@@ -6077,7 +5869,7 @@ const InlineAssemblyCopyContext = struct {
             const local = try self.generation_context.localVariable(declaration);
             if (try TypeBehavior.sizeOnStack(local.type_ref) != 1)
                 return error.InvalidAst;
-            return local.commaSeparatedListAlloc();
+            return singleStackSlotExpression(local);
         }
 
         if (declaration.payload.variable_declaration.mutability == .Constant) {
@@ -6101,7 +5893,7 @@ const InlineAssemblyCopyContext = struct {
                 } else if (type_ref.category() != .Integer) {
                     return error.InvalidAst;
                 }
-                return Numeric.formatNumberU256Alloc(self.allocator, value);
+                return self.number(value, .short);
             }
             if (initializer.nodeKind() != .literal) return error.InvalidAst;
             return switch (initializer_type.payload) {
@@ -6111,11 +5903,7 @@ const InlineAssemblyCopyContext = struct {
                         initializer_type,
                         initializer.payload.literal,
                     );
-                    break :blk Numeric.toCompactHexWithPrefixAlloc(
-                        u256,
-                        self.allocator,
-                        value,
-                    );
+                    break :blk self.number(value, .compact);
                 },
                 .StringLiteral => |literal| blk: {
                     const fixed_bytes = type_ref.asFixedBytes() orelse
@@ -6124,10 +5912,7 @@ const InlineAssemblyCopyContext = struct {
                         return error.InvalidAst;
                     var bytes: [32]u8 = @splat(0);
                     @memcpy(bytes[0..literal.value.len], literal.value);
-                    break :blk Numeric.formatNumberU256Alloc(
-                        self.allocator,
-                        std.mem.readInt(u256, &bytes, .big),
-                    );
+                    break :blk self.number(std.mem.readInt(u256, &bytes, .big), .short);
                 },
                 else => error.InvalidAst,
             };
@@ -6138,9 +5923,9 @@ const InlineAssemblyCopyContext = struct {
                 declaration,
             );
             if (std.mem.eql(u8, reference.suffix, "slot"))
-                return std.fmt.allocPrint(self.allocator, "{d}", .{location.storage_offset});
+                return self.number(location.storage_offset, .decimal);
             if (std.mem.eql(u8, reference.suffix, "offset"))
-                return std.fmt.allocPrint(self.allocator, "{d}", .{location.byte_offset});
+                return self.number(location.byte_offset, .decimal);
             return error.InvalidAst;
         }
 
@@ -6151,11 +5936,11 @@ const InlineAssemblyCopyContext = struct {
             if (std.mem.eql(u8, reference.suffix, "slot")) {
                 var slot = try local.part("slot");
                 defer slot.deinit();
-                return slot.nameAlloc();
+                return singleStackSlotExpression(&slot);
             }
             if (std.mem.eql(u8, reference.suffix, "offset") and
                 !(try local.hasPart("offset")))
-                return self.allocator.dupe(u8, "0");
+                return self.number(0, .decimal);
             return error.InvalidAst;
         }
 
@@ -6166,7 +5951,7 @@ const InlineAssemblyCopyContext = struct {
             const local = try self.generation_context.localVariable(declaration);
             var part = try local.part(reference.suffix);
             defer part.deinit();
-            return part.nameAlloc();
+            return singleStackSlotExpression(&part);
         }
 
         if (type_ref.asFunction()) |function_type| {
@@ -6182,7 +5967,7 @@ const InlineAssemblyCopyContext = struct {
             const local = try self.generation_context.localVariable(declaration);
             var part = try local.part(part_name);
             defer part.deinit();
-            return part.nameAlloc();
+            return singleStackSlotExpression(&part);
         }
         return error.InvalidAst;
     }
@@ -6363,34 +6148,6 @@ fn variableType(variable: *const AST.Node) GeneratorError!*const Types.Type {
     } orelse error.InvalidAst;
 }
 
-fn literalValueAlloc(
-    allocator: std.mem.Allocator,
-    node: *const AST.Node,
-    type_ref: *const Types.Type,
-) GeneratorError![]u8 {
-    switch (type_ref.payload) {
-        .RationalNumber => |rational| {
-            if (rational.denominator.compareUnsigned(1) != .eq)
-                return error.InvalidLiteral;
-            return Numeric.toCompactHexWithPrefixAlloc(
-                u256,
-                allocator,
-                rational.numerator.toU256Wrapping(),
-            );
-        },
-        .Bool => return Numeric.toCompactHexWithPrefixAlloc(
-            u256,
-            allocator,
-            if (node.nodeKind() == .literal and
-                node.payload.literal.token == .TrueLiteral) 1 else 0,
-        ),
-        .Address, .Integer => if (node.nodeKind() == .literal)
-            return duplicateWithoutUnderscores(allocator, node.payload.literal.value),
-        else => {},
-    }
-    return error.InvalidLiteral;
-}
-
 fn duplicateWithoutUnderscores(
     allocator: std.mem.Allocator,
     value: []const u8,
@@ -6405,20 +6162,6 @@ fn duplicateWithoutUnderscores(
     }
     if (length == output.len) return output;
     return allocator.realloc(output, length);
-}
-
-fn joinAlloc(
-    allocator: std.mem.Allocator,
-    values: []const []const u8,
-    separator: []const u8,
-) std.mem.Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    for (values, 0..) |value, index| {
-        if (index != 0) try output.appendSlice(allocator, separator);
-        try output.appendSlice(allocator, value);
-    }
-    return output.toOwnedSlice(allocator);
 }
 
 fn deinitStrings(
@@ -6440,7 +6183,7 @@ fn callableSignatureAlloc(
     return TypeBehavior.externalSignatureAlloc(provider, allocator, callable);
 }
 
-test "inline array reuses an element that already has the target type" {
+test "Yul AST inline array reuses an element that already has the target type" {
     const EVMVersion = @import("../../../liblangutil/evm_version.zig").EVMVersion;
     const DebugInfoSelection = @import("../../../liblangutil/debug_info_selection.zig").DebugInfoSelection;
 
@@ -6500,7 +6243,7 @@ test "inline array reuses an element that already has the target type" {
     );
     defer context.deinit();
     var utils = context.utils();
-    var generator = IRGeneratorForStatements.init(
+    var generator = try IRGeneratorForStatements.init(
         std.testing.allocator,
         &context,
         &utils,
@@ -6510,7 +6253,8 @@ test "inline array reuses an element that already has the target type" {
     defer generator.deinit();
     try generator.generate(&block);
 
-    const code = generator.codeBorrowed();
+    const code = try generator.codeAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(code);
     try std.testing.expect(std.mem.find(
         u8,
         code,
@@ -6519,7 +6263,7 @@ test "inline array reuses an element that already has the target type" {
     try std.testing.expect(std.mem.find(u8, code, "let _") == null);
 }
 
-test "scalar local assignment preserves upstream evaluation order" {
+test "Yul AST scalar local assignment preserves upstream evaluation order" {
     const EVMVersion = @import("../../../liblangutil/evm_version.zig").EVMVersion;
     const DebugInfoSelection = @import("../../../liblangutil/debug_info_selection.zig").DebugInfoSelection;
 
@@ -6647,7 +6391,7 @@ test "scalar local assignment preserves upstream evaluation order" {
     _ = try context.addLocalVariable(&b);
     _ = try context.addLocalVariable(&result_declaration);
     var utils = context.utils();
-    var generator = IRGeneratorForStatements.init(
+    var generator = try IRGeneratorForStatements.init(
         std.testing.allocator,
         &context,
         &utils,
@@ -6657,24 +6401,47 @@ test "scalar local assignment preserves upstream evaluation order" {
     defer generator.deinit();
     try generator.generate(&block);
 
+    const code = try generator.codeAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(code);
     try std.testing.expectEqualStrings(
         \\let _1 := var_a_3
         \\let expr_11 := _1
         \\let _2 := var_b_5
         \\let expr_12 := _2
         \\let expr_13 := checked_add_t_uint256(expr_11, expr_12)
-        \\
         \\var_result_8 := expr_13
         \\let expr_14 := expr_13
         \\
     ,
-        generator.codeBorrowed(),
+        code,
     );
-    const helpers = try context.functionCollector().requestedFunctionsAlloc();
+    const helpers = try context.functionCollector().testFunctionsAlloc();
     defer std.testing.allocator.free(helpers);
     try std.testing.expect(std.mem.find(
         u8,
         helpers,
         "function checked_add_t_uint256",
     ) != null);
+}
+
+test "Yul AST scalar references resolve typed slots and reject tuple arity" {
+    const allocator = std.testing.allocator;
+    const word: Types.Type = .{ .payload = .{ .Integer = .{ .bits = 256, .modifier = .Unsigned } } };
+    const array: Types.Type = .{ .payload = .{ .Array = .{
+        .reference = .{ .location = .Memory },
+        .base_type = &word,
+        .length = 2,
+    } } };
+    var pointer = try IRVariableModule.IRVariable.init(allocator, "buffer", &array);
+    defer pointer.deinit();
+    const value = try singleStackSlotExpression(&pointer);
+    try std.testing.expectEqualStrings("buffer_mpos", try value.identifier.name.str());
+    const pair: Types.Type = .{ .payload = .{ .Tuple = .{ .components = &.{ &word, &word } } } };
+    var tuple = try IRVariableModule.IRVariable.init(allocator, "pair", &pair);
+    defer tuple.deinit();
+    try std.testing.expectError(error.StackLayoutMismatch, singleStackSlotExpression(&tuple));
+    const empty: Types.Type = .{ .payload = .{ .Tuple = .{ .components = &.{} } } };
+    var no_slots = try IRVariableModule.IRVariable.init(allocator, "empty", &empty);
+    defer no_slots.deinit();
+    try std.testing.expectError(error.StackLayoutMismatch, singleStackSlotExpression(&no_slots));
 }

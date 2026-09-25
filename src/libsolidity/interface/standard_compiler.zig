@@ -8,6 +8,7 @@
 //! Experimental SSA-CFG code generation and ethdebug output are unsupported.
 
 const std = @import("std");
+const ArtifactOutput = @import("artifact_output.zig");
 const StandardJson = @import("common").standard_json;
 const SolidityAST = @import("../ast/ast.zig");
 const SolidityASTBehavior = @import("../ast/ast.zig");
@@ -42,6 +43,7 @@ const SolidityIRCommon = @import("../codegen/ir/common.zig");
 const SolidityIRGenerator = @import("../codegen/ir/ir_generator.zig");
 const SolidityParser = @import("../parsing/parser.zig");
 const SolidityCompilerStack = @import("compiler_stack.zig");
+const CodeSizeDiagnostics = @import("code_size_diagnostics.zig");
 const SolidityGasEstimator = @import("gas_estimator.zig");
 const SolidityImportRemapper = @import("import_remapper.zig");
 const SolidityReadFile = @import("read_file.zig");
@@ -221,6 +223,9 @@ fn assembleAndLinkBackend(
     libraries: []const LinkerObjectModule.LibraryAddress,
     backend_cache: ?*BackendArtifactCache,
 ) !YulStackModule.MachineAssemblyPair {
+    const previous_indices = stack.assembly_source_indices;
+    stack.assembly_source_indices = source_indices;
+    defer stack.assembly_source_indices = previous_indices;
     if (backend_cache) |cache| {
         var artifact = try cache.assemble(
             stack,
@@ -272,9 +277,9 @@ pub fn compileSolidityStandardJsonAlloc(
     var output_arena = std.heap.ArenaAllocator.init(compilation_allocator);
     defer output_arena.deinit();
     const arena = output_arena.allocator();
-    var parallel_artifact_arenas: std.ArrayList(std.heap.ArenaAllocator) = .empty;
+    var parallel_artifact_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty;
     defer {
-        for (parallel_artifact_arenas.items) |*artifact_arena|
+        for (parallel_artifact_arenas.items) |artifact_arena|
             artifact_arena.deinit();
         parallel_artifact_arenas.deinit(compilation_allocator);
     }
@@ -648,6 +653,7 @@ pub fn compileSolidityStandardJsonAlloc(
         const type_provider = try semantic.typeProvider();
         const global_context = try semantic.globalContext();
         var artifact_contracts: Json = .{ .object = .empty };
+        var stack_exception = false;
         const frontend_ok = frontend: {
             var probe = ProfilerModule.OptionalProbe.init(profiler, "Solidity frontend and artifacts");
             defer probe.deinit();
@@ -678,9 +684,20 @@ pub fn compileSolidityStandardJsonAlloc(
                 backend_cache,
             ) catch |err| switch (err) {
                 error.FatalDiagnostic => false,
+                error.StackTooDeep => recovered: {
+                    // This exception occurs after successful Solidity analysis.
+                    // Upstream bypasses its accumulated warnings when publishing
+                    // the exception, but retains all analyzed artifacts.
+                    stack_exception = true;
+                    break :recovered true;
+                },
                 else => return err,
             };
         };
+        if (stack_exception) {
+            reporter.clear();
+            discardSolidityCodegenArtifacts(&artifact_contracts);
+        }
         if (!frontend_ok or reporter.hasErrors()) {
             semantic.markFailed();
             for (reporter.diagnostics()) |*diagnostic|
@@ -822,7 +839,7 @@ fn analyzeSolidityFrontend(
     profiler: ?*Profiler,
     progress: ?StandardJson.ProgressReporter,
     io: ?std.Io,
-    parallel_artifact_arenas: *std.ArrayList(std.heap.ArenaAllocator),
+    parallel_artifact_arenas: *std.ArrayList(*std.heap.ArenaAllocator),
     parallel_allocator: std.mem.Allocator,
     object_optimizer: *ObjectOptimizer,
     backend_cache: ?*BackendArtifactCache,
@@ -1354,6 +1371,7 @@ fn analyzeSolidityFrontend(
             source_provider,
             artifact_contracts,
             errors_value,
+            reporter,
             profiler,
             progress,
             io,
@@ -1857,10 +1875,11 @@ fn appendSolidityViaIRArtifacts(
     source_provider: StreamProvider.CharStreamProvider,
     contracts_output: *Json,
     errors_value: *Json,
+    reporter: *Diagnostics.ErrorReporter,
     profiler: ?*Profiler,
     progress: ?StandardJson.ProgressReporter,
     io: ?std.Io,
-    parallel_artifact_arenas: *std.ArrayList(std.heap.ArenaAllocator),
+    parallel_artifact_arenas: *std.ArrayList(*std.heap.ArenaAllocator),
     parallel_allocator: std.mem.Allocator,
     object_optimizer: *ObjectOptimizer,
     backend_cache: ?*BackendArtifactCache,
@@ -1949,15 +1968,21 @@ fn appendSolidityViaIRArtifacts(
             contract_count += 1;
         }
     }
-    var other_yul_sources: SolidityIRGenerator.OtherYulSources = .empty;
+    var other_yul_objects: SolidityIRGenerator.OtherYulObjects = .empty;
     defer {
-        var sources = other_yul_sources.valueIterator();
-        while (sources.next()) |source| scratch_allocator.free(source.*);
-        other_yul_sources.deinit(scratch_allocator);
+        var sources = other_yul_objects.valueIterator();
+        while (sources.next()) |source| {
+            // Each owner is counted once; borrowed dependency edges add no
+            // capacity to its arena. Workers have joined before this teardown.
+            if (profiler) |value|
+                value.recordCounter("Generated Yul owner retained bytes", source.*.arena.queryCapacity());
+            source.*.destroy(scratch_allocator);
+        }
+        other_yul_objects.deinit(scratch_allocator);
     }
 
     if (io) |parallel_io|
-        if (try appendSolidityViaIRArtifactsParallel(
+        if (appendSolidityViaIRArtifactsParallel(
             scratch_allocator,
             allocator,
             type_provider,
@@ -1968,13 +1993,14 @@ fn appendSolidityViaIRArtifacts(
             source_provider,
             contracts_output,
             errors_value,
+            reporter,
             assembly_source_codes,
             assembly_source_indices,
             ir_source_indices,
             metadata_sources,
             metadata_options,
             &contract_sources,
-            &other_yul_sources,
+            &other_yul_objects,
             parallel_io,
             parallel_artifact_arenas,
             parallel_allocator,
@@ -1983,7 +2009,11 @@ fn appendSolidityViaIRArtifacts(
             contract_count,
             object_optimizer,
             backend_cache,
-        )) |parallel_result| return parallel_result;
+        ) catch |err| {
+            if (err == error.StackTooDeep)
+                try completeSolidityMetadata(allocator, scratch_allocator, type_provider, compatibility_ids, parsed_sources, source_order, &settings.projection.output_selection, metadata_sources, metadata_options, contracts_output);
+            return err;
+        }) |parallel_result| return parallel_result;
 
     var completed_contracts: usize = 0;
     for (source_order) |source_index| {
@@ -2060,13 +2090,6 @@ fn appendSolidityViaIRArtifacts(
                 contract_name,
                 "evm.gasEstimates",
                 true,
-            );
-            const wants_method_identifiers = isArtifactRequested(
-                &settings.projection.output_selection,
-                parsed.tree.source_name,
-                contract_name,
-                "evm.methodIdentifiers",
-                false,
             );
             if (!wants_ir and !wants_optimized_ir and !wants_bytecode and
                 !wants_metadata and !wants_assembly and
@@ -2195,7 +2218,7 @@ fn appendSolidityViaIRArtifacts(
             const ir = ir_generation: {
                 var probe = ProfilerModule.OptionalProbe.init(profiler, "Solidity IR generation");
                 defer probe.deinit();
-                break :ir_generation generateSolidityIRCached(
+                break :ir_generation generateSolidityYulCached(
                     scratch_allocator,
                     type_provider,
                     compatibility_ids,
@@ -2207,7 +2230,7 @@ fn appendSolidityViaIRArtifacts(
                     settings,
                     source_provider,
                     cbor_metadata,
-                    &other_yul_sources,
+                    &other_yul_objects,
                     0,
                 ) catch |err| {
                     if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -2232,7 +2255,7 @@ fn appendSolidityViaIRArtifacts(
                 try contract_output.object.put(
                     allocator,
                     "ir",
-                    try ownedString(allocator, ir),
+                    .{ .string = try ir.render(allocator, settings.ir.debug_info, source_provider) },
                 );
 
             var stack = try YulStack.init(
@@ -2247,9 +2270,9 @@ fn appendSolidityViaIRArtifacts(
             stack.setProfiler(profiler);
             const generated_source_name = parsed.tree.source_name;
             const successful = yul_parse: {
-                var probe = ProfilerModule.OptionalProbe.init(profiler, "Yul parse and analysis");
+                var probe = ProfilerModule.OptionalProbe.init(profiler, "Yul preparation and analysis");
                 defer probe.deinit();
-                break :yul_parse try stack.parseAndAnalyze(generated_source_name, ir);
+                break :yul_parse try stack.analyzeGenerated(generated_source_name, ir);
             };
             if (!successful and !stack.hasErrors()) return error.InvalidYulStackState;
             if (!successful or stack.hasErrors()) {
@@ -2267,7 +2290,7 @@ fn appendSolidityViaIRArtifacts(
             {
                 var probe = ProfilerModule.OptionalProbe.init(profiler, "Yul optimizer total");
                 defer probe.deinit();
-                stack.optimize() catch |err| {
+                stack.optimizeTypedSolidity() catch |err| {
                     const message = try std.fmt.allocPrint(
                         allocator,
                         "Yul optimizer failed: {s}",
@@ -2303,6 +2326,15 @@ fn appendSolidityViaIRArtifacts(
                     settings.link.libraries.items,
                     backend_cache,
                 ) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    if (err == error.StackTooDeep and stack.hasErrors()) {
+                        errors_value.array.clearRetainingCapacity();
+                        for (stack.errors()) |*diagnostic|
+                            if (diagnostic.error_type == .YulException)
+                                try appendDiagnosticWithProvider(allocator, errors_value, source_provider, diagnostic, false);
+                        try completeSolidityMetadata(allocator, scratch_allocator, type_provider, compatibility_ids, parsed_sources, source_order, &settings.projection.output_selection, metadata_sources, metadata_options, contracts_output);
+                        return error.StackTooDeep;
+                    }
                     const message = try std.fmt.allocPrint(
                         allocator,
                         "Yul code generation failed: {s}",
@@ -2321,6 +2353,11 @@ fn appendSolidityViaIRArtifacts(
                 };
             };
             defer assembly_pair.deinit();
+            if (wants_bytecode or wants_assembly or wants_legacy_assembly or wants_gas_estimates)
+                try CodeSizeDiagnostics.report(scratch_allocator, reporter, contract.location, settings.frontend.evm_version, .{
+                    .creation = assembly_pair.creation.bytecode.?.bytecode.items.len,
+                    .deployed = assembly_pair.deployed.bytecode.?.bytecode.items.len,
+                });
 
             var machine_output: Json = .{ .object = .empty };
             try appendMachineObject(
@@ -2352,23 +2389,22 @@ fn appendSolidityViaIRArtifacts(
                 parsed.tree.source_name,
                 contract_name,
             )) |generated_contract|
-                try mergeObject(allocator, contract_output, generated_contract);
+                try ArtifactOutput.mergeContract(allocator, contract_output, generated_contract);
 
             if (wants_assembly or wants_legacy_assembly or wants_gas_estimates) {
                 const evm = try ensureObject(allocator, contract_output, "evm");
                 const creation_assembly = assembly_pair.creation.assembly() orelse
                     return error.MissingAssembly;
                 if (wants_assembly) {
-                    const rendered = try creation_assembly.assemblyStringAlloc(
-                        allocator,
-                        settings.ir.debug_info,
-                        assembly_source_codes,
-                    );
-                    defer allocator.free(rendered);
                     try evm.object.put(
                         allocator,
                         "assembly",
-                        try ownedString(allocator, rendered),
+                        .{ .string = try creation_assembly.assemblyStringAllocWithScratch(
+                            allocator,
+                            scratch_allocator,
+                            settings.ir.debug_info,
+                            assembly_source_codes,
+                        ) },
                     );
                 }
                 if (wants_legacy_assembly)
@@ -2396,35 +2432,80 @@ fn appendSolidityViaIRArtifacts(
                     );
             }
 
-            // The machine-artifact merge replaces the frontend-created `evm`
-            // object. Restore this frontend artifact after the code-generation
-            // fields so the output also retains upstream's member order.
-            if (wants_method_identifiers) {
-                const evm = try ensureObject(allocator, contract_output, "evm");
-                if (!evm.object.contains("methodIdentifiers"))
-                    try evm.object.put(
-                        allocator,
-                        "methodIdentifiers",
-                        try solidityMethodIdentifiers(
-                            allocator,
-                            type_provider,
-                            contract,
-                        ),
-                    );
-            }
-
             if (wants_optimized_ir) {
-                const optimized_ir = try stack.print();
-                defer scratch_allocator.free(optimized_ir);
                 try contract_output.object.put(
                     allocator,
                     "irOptimized",
-                    try ownedString(allocator, optimized_ir),
+                    .{ .string = try stack.printAlloc(allocator) },
                 );
             }
         }
     }
     return true;
+}
+
+/// Complete only requested metadata after a stack exception. Successful builds
+/// keep their existing preparation path; failed workers can release their large
+/// artifact arenas instead of retaining them just for small metadata strings.
+fn completeSolidityMetadata(
+    allocator: std.mem.Allocator,
+    scratch_allocator: std.mem.Allocator,
+    type_provider: *SolidityTypeProvider.TypeProvider,
+    compatibility_ids: CompatibilityIdResolver,
+    parsed_sources: []SolidityParser.ParseResult,
+    source_order: []const usize,
+    output_selection: *const OutputSelection,
+    metadata_sources: SolidityCompilerStack.MetadataSources,
+    metadata_options: SolidityCompilerStack.MetadataOptions,
+    contracts_output: *Json,
+) !void {
+    for (source_order) |source_index| {
+        const parsed = &parsed_sources[source_index];
+        const root = parsed.tree.root orelse return error.InvalidSolidityParserState;
+        for (root.payload.source_unit.nodes) |contract| {
+            if (contract.nodeKind() != .contract_definition) continue;
+            const name = contract.payload.contract_definition.declaration.name;
+            if (!isArtifactRequested(output_selection, parsed.tree.source_name, name, "metadata", true)) continue;
+            const output = try ensureArtifactContract(allocator, contracts_output, parsed.tree.source_name, name);
+            if (output.object.contains("metadata")) continue;
+            const metadata = try SolidityCompilerStack.createMetadataAlloc(
+                scratch_allocator,
+                type_provider,
+                compatibility_ids,
+                metadata_sources,
+                metadata_sources.items[source_index].id,
+                &parsed.tree,
+                contract,
+                metadata_options,
+            );
+            defer scratch_allocator.free(metadata);
+            try output.object.put(allocator, "metadata", try ownedString(allocator, metadata));
+        }
+    }
+}
+
+fn discardSolidityCodegenArtifacts(contracts_output: *Json) void {
+    var file_index: usize = 0;
+    while (file_index < contracts_output.object.count()) {
+        const contracts = &contracts_output.object.values()[file_index];
+        var contract_index: usize = 0;
+        while (contract_index < contracts.object.count()) {
+            const output = &contracts.object.values()[contract_index];
+            _ = output.object.orderedRemove("ir");
+            _ = output.object.orderedRemove("irOptimized");
+            if (output.object.getPtr("evm")) |evm| {
+                for ([_][]const u8{ "bytecode", "deployedBytecode", "assembly", "legacyAssembly", "gasEstimates" }) |field|
+                    _ = evm.object.orderedRemove(field);
+                if (evm.object.count() == 0) _ = output.object.orderedRemove("evm");
+            }
+            if (output.object.count() == 0) {
+                _ = contracts.object.orderedRemove(contracts.object.keys()[contract_index]);
+            } else contract_index += 1;
+        }
+        if (contracts.object.count() == 0) {
+            _ = contracts_output.object.orderedRemove(contracts_output.object.keys()[file_index]);
+        } else file_index += 1;
+    }
 }
 
 const ParallelViaIRRequests = struct {
@@ -2435,7 +2516,6 @@ const ParallelViaIRRequests = struct {
     wants_assembly: bool,
     wants_legacy_assembly: bool,
     wants_gas_estimates: bool,
-    wants_method_identifiers: bool,
 
     fn any(self: ParallelViaIRRequests) bool {
         return self.wants_ir or self.wants_optimized_ir or
@@ -2449,11 +2529,6 @@ const ParallelViaIRRequests = struct {
             self.wants_bytecode or self.wants_assembly or
             self.wants_legacy_assembly or self.wants_gas_estimates;
     }
-
-    fn createsEvmObject(self: ParallelViaIRRequests) bool {
-        return self.wants_bytecode or self.wants_assembly or
-            self.wants_legacy_assembly or self.wants_gas_estimates;
-    }
 };
 
 const ParallelViaIRFailure = union(enum) {
@@ -2462,6 +2537,7 @@ const ParallelViaIRFailure = union(enum) {
     optimizer: []const u8,
     assembly: []const u8,
     diagnostics,
+    stack_too_deep,
 };
 
 const ParallelProgress = struct {
@@ -2588,15 +2664,16 @@ test "parallel group cancellation joins an outstanding async worker" {
 }
 
 const ParallelViaIRJob = struct {
-    artifact_arena: std.heap.ArenaAllocator,
+    artifact_arena: *std.heap.ArenaAllocator,
     artifact_arena_transferred: bool = false,
     output: Json = .{ .object = .empty },
     diagnostics: Json = .null,
+    bytecode_sizes: ?CodeSizeDiagnostics.Sizes = null,
     contract: *const SolidityAST.Node,
     compatibility_ids: CompatibilityIdResolver,
     source_name: []const u8,
     contract_name: []const u8,
-    ir: ?[]const u8 = null,
+    ir: ?*const SolidityIRGenerator.GeneratedObject = null,
     requests: ParallelViaIRRequests,
     settings: *const CompilationOptions,
     source_provider: StreamProvider.CharStreamProvider,
@@ -2607,7 +2684,6 @@ const ParallelViaIRJob = struct {
     progress: *ParallelProgress,
     object_optimizer: *ObjectOptimizer,
     backend_cache: ?*BackendArtifactCache,
-    restore_method_identifiers: bool = false,
     failure: ?ParallelViaIRFailure = null,
 
     fn run(self: *ParallelViaIRJob, scratch_allocator: std.mem.Allocator) !void {
@@ -2621,15 +2697,19 @@ const ParallelViaIRJob = struct {
             self.object_optimizer,
         );
         defer stack.deinit();
+        // Backend analyses end before their emitted assembly is published.
+        // Back their per-object arenas directly so child storage is reclaimed
+        // rather than retained in the worker's AST/assembly arena.
+        stack.backend_scratch_backing_allocator = self.parallel_allocator;
         stack.setProfiler(self.profiler);
 
         const successful = yul_parse: {
             var probe = ProfilerModule.OptionalProbe.init(
                 self.profiler,
-                "Yul parse and analysis",
+                "Yul preparation and analysis",
             );
             defer probe.deinit();
-            break :yul_parse try stack.parseAndAnalyze(self.source_name, self.ir.?);
+            break :yul_parse try stack.analyzeGenerated(self.source_name, self.ir.?);
         };
         if (!successful and !stack.hasErrors()) return error.InvalidYulStackState;
         if (!successful or stack.hasErrors()) {
@@ -2652,7 +2732,7 @@ const ParallelViaIRJob = struct {
                 "Yul optimizer total",
             );
             defer probe.deinit();
-            stack.optimize() catch |err| {
+            stack.optimizeTypedSolidity() catch |err| {
                 self.failure = if (err == error.OutOfMemory)
                     .out_of_memory
                 else
@@ -2681,6 +2761,14 @@ const ParallelViaIRJob = struct {
                 self.settings.link.libraries.items,
                 self.backend_cache,
             ) catch |err| {
+                if (err == error.StackTooDeep and stack.hasErrors()) {
+                    self.diagnostics = .{ .array = std.json.Array.init(artifact_allocator) };
+                    for (stack.errors()) |*diagnostic|
+                        if (diagnostic.error_type == .YulException)
+                            try appendDiagnosticWithProvider(artifact_allocator, &self.diagnostics, self.source_provider, diagnostic, false);
+                    self.failure = .stack_too_deep;
+                    return;
+                }
                 self.failure = if (err == error.OutOfMemory)
                     .out_of_memory
                 else
@@ -2689,6 +2777,11 @@ const ParallelViaIRJob = struct {
             };
         };
         defer assembly_pair.deinit();
+        if (self.requests.wants_bytecode or self.requests.wants_assembly or self.requests.wants_legacy_assembly or self.requests.wants_gas_estimates)
+            self.bytecode_sizes = .{
+                .creation = assembly_pair.creation.bytecode.?.bytecode.items.len,
+                .deployed = assembly_pair.deployed.bytecode.?.bytecode.items.len,
+            };
 
         var machine_output: Json = .{ .object = .empty };
         try appendMachineObject(
@@ -2727,16 +2820,15 @@ const ParallelViaIRJob = struct {
             const creation_assembly = assembly_pair.creation.assembly() orelse
                 return error.MissingAssembly;
             if (self.requests.wants_assembly) {
-                const rendered = try creation_assembly.assemblyStringAlloc(
-                    scratch_allocator,
-                    self.settings.ir.debug_info,
-                    self.assembly_source_codes,
-                );
-                defer scratch_allocator.free(rendered);
                 try evm.object.put(
                     artifact_allocator,
                     "assembly",
-                    try ownedString(artifact_allocator, rendered),
+                    .{ .string = try creation_assembly.assemblyStringAllocWithScratch(
+                        artifact_allocator,
+                        scratch_allocator,
+                        self.settings.ir.debug_info,
+                        self.assembly_source_codes,
+                    ) },
                 );
             }
             if (self.requests.wants_legacy_assembly)
@@ -2752,12 +2844,10 @@ const ParallelViaIRJob = struct {
         }
 
         if (self.requests.wants_optimized_ir) {
-            const optimized_ir = try stack.print();
-            defer scratch_allocator.free(optimized_ir);
             try self.output.object.put(
                 artifact_allocator,
                 "irOptimized",
-                try ownedString(artifact_allocator, optimized_ir),
+                .{ .string = try stack.printAlloc(artifact_allocator) },
             );
         }
     }
@@ -2824,13 +2914,6 @@ fn parallelViaIRRequests(
             "evm.gasEstimates",
             true,
         ),
-        .wants_method_identifiers = isArtifactRequested(
-            &settings.projection.output_selection,
-            source_name,
-            contract_name,
-            "evm.methodIdentifiers",
-            false,
-        ),
     };
 }
 
@@ -2844,6 +2927,12 @@ fn runParallelViaIRJob(job: *ParallelViaIRJob) void {
         else
             .internal;
     };
+    if (job.profiler) |profiler| {
+        // job.run has released its logical owners. These are retained arena
+        // capacities before teardown/publication, not live bytes or peak RSS.
+        profiler.recordCounter("Backend worker scratch retained bytes", scratch_arena.queryCapacity());
+        profiler.recordCounter("Backend worker artifact retained bytes", job.artifact_arena.queryCapacity());
+    }
 }
 
 fn appendSolidityViaIRArtifactsParallel(
@@ -2857,15 +2946,16 @@ fn appendSolidityViaIRArtifactsParallel(
     source_provider: StreamProvider.CharStreamProvider,
     contracts_output: *Json,
     errors_value: *Json,
+    reporter: *Diagnostics.ErrorReporter,
     assembly_source_codes: []const EVMAssembly.SourceCode,
     assembly_source_indices: []const EVMAssembly.SourceIndex,
     ir_source_indices: []const AsmPrinter.SourceIndexName,
     metadata_sources: SolidityCompilerStack.MetadataSources,
     metadata_options: SolidityCompilerStack.MetadataOptions,
     contract_sources: *const ContractSourceMap,
-    other_yul_sources: *SolidityIRGenerator.OtherYulSources,
+    other_yul_objects: *SolidityIRGenerator.OtherYulObjects,
     io: std.Io,
-    artifact_arenas: *std.ArrayList(std.heap.ArenaAllocator),
+    artifact_arenas: *std.ArrayList(*std.heap.ArenaAllocator),
     parallel_allocator: std.mem.Allocator,
     profiler: ?*Profiler,
     progress: ?StandardJson.ProgressReporter,
@@ -2928,7 +3018,7 @@ fn appendSolidityViaIRArtifactsParallel(
 
             {
                 var job: ParallelViaIRJob = .{
-                    .artifact_arena = std.heap.ArenaAllocator.init(parallel_allocator),
+                    .artifact_arena = try ArtifactOutput.createArena(allocator, parallel_allocator),
                     .contract = contract,
                     .compatibility_ids = compatibility_ids,
                     .source_name = parsed.tree.source_name,
@@ -2944,7 +3034,10 @@ fn appendSolidityViaIRArtifactsParallel(
                     .object_optimizer = object_optimizer,
                     .backend_cache = backend_cache,
                 };
-                errdefer job.artifact_arena.deinit();
+                // Diagnostics may return false without an error. Keep local
+                // ownership until the job list takes over on every exit path.
+                var owns_artifact_arena = true;
+                defer if (owns_artifact_arena) job.artifact_arena.deinit();
                 const artifact_allocator = job.artifact_arena.allocator();
 
                 const metadata_json = SolidityCompilerStack.createMetadataAlloc(
@@ -2983,6 +3076,7 @@ fn appendSolidityViaIRArtifactsParallel(
                     );
                 if (!requests.needsBackend()) {
                     jobs.appendAssumeCapacity(job);
+                    owns_artifact_arena = false;
                     parallel_progress.complete(contract_name);
                     continue;
                 }
@@ -3001,18 +3095,6 @@ fn appendSolidityViaIRArtifactsParallel(
                             "irOptimized",
                             try ownedString(artifact_allocator, ""),
                         );
-                    if (requests.wants_method_identifiers and requests.createsEvmObject()) {
-                        const evm = try ensureObject(artifact_allocator, &job.output, "evm");
-                        try evm.object.put(
-                            artifact_allocator,
-                            "methodIdentifiers",
-                            try solidityMethodIdentifiers(
-                                artifact_allocator,
-                                type_provider,
-                                contract,
-                            ),
-                        );
-                    }
                     try appendEmptyMachineObject(
                         artifact_allocator,
                         &job.output,
@@ -3045,6 +3127,7 @@ fn appendSolidityViaIRArtifactsParallel(
                     if (requests.wants_legacy_assembly)
                         try evm.?.object.put(artifact_allocator, "legacyAssembly", .null);
                     jobs.appendAssumeCapacity(job);
+                    owns_artifact_arena = false;
                     parallel_progress.complete(contract_name);
                     continue;
                 }
@@ -3078,7 +3161,7 @@ fn appendSolidityViaIRArtifactsParallel(
                         "Solidity IR generation",
                     );
                     defer probe.deinit();
-                    break :ir_generation generateSolidityIRCached(
+                    break :ir_generation generateSolidityYulCached(
                         scratch_allocator,
                         type_provider,
                         compatibility_ids,
@@ -3090,7 +3173,7 @@ fn appendSolidityViaIRArtifactsParallel(
                         settings,
                         source_provider,
                         cbor_metadata,
-                        other_yul_sources,
+                        other_yul_objects,
                         0,
                     ) catch |err| {
                         if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -3115,11 +3198,11 @@ fn appendSolidityViaIRArtifactsParallel(
                     try job.output.object.put(
                         artifact_allocator,
                         "ir",
-                        try ownedString(artifact_allocator, ir),
+                        .{ .string = try ir.render(artifact_allocator, settings.ir.debug_info, source_provider) },
                     );
                 job.ir = ir;
-                job.restore_method_identifiers = requests.wants_method_identifiers;
                 jobs.appendAssumeCapacity(job);
+                owns_artifact_arena = false;
                 group.async(
                     runParallelViaIRJob,
                     .{&jobs.items[jobs.items.len - 1]},
@@ -3169,17 +3252,21 @@ fn appendSolidityViaIRArtifactsParallel(
                 );
                 return false;
             },
-            .diagnostics => {
+            .diagnostics, .stack_too_deep => {
                 try artifact_arenas.append(scratch_allocator, job.artifact_arena);
                 job.artifact_arena_transferred = true;
+                if (failure == .stack_too_deep) errors_value.array.clearRetainingCapacity();
                 for (job.diagnostics.array.items) |diagnostic|
                     try errors_value.array.append(diagnostic);
+                if (failure == .stack_too_deep) return error.StackTooDeep;
                 return false;
             },
         }
     }
 
     for (jobs.items) |*job| {
+        if (job.bytecode_sizes) |sizes|
+            try CodeSizeDiagnostics.report(scratch_allocator, reporter, job.contract.location, settings.frontend.evm_version, sizes);
         try artifact_arenas.append(scratch_allocator, job.artifact_arena);
         job.artifact_arena_transferred = true;
         const contract_output = try ensureArtifactContract(
@@ -3188,20 +3275,7 @@ fn appendSolidityViaIRArtifactsParallel(
             job.source_name,
             job.contract_name,
         );
-        try mergeObject(allocator, contract_output, &job.output);
-        if (job.restore_method_identifiers and job.output.object.contains("evm")) {
-            const evm = try ensureObject(allocator, contract_output, "evm");
-            if (!evm.object.contains("methodIdentifiers"))
-                try evm.object.put(
-                    allocator,
-                    "methodIdentifiers",
-                    try solidityMethodIdentifiers(
-                        allocator,
-                        type_provider,
-                        job.contract,
-                    ),
-                );
-        }
+        try ArtifactOutput.mergeContract(allocator, contract_output, &job.output);
     }
     return true;
 }
@@ -3383,7 +3457,7 @@ fn solidityInternalFunctionSignatureAlloc(
     return output.toOwnedSlice(allocator);
 }
 
-fn generateSolidityIRCached(
+fn generateSolidityYulCached(
     allocator: std.mem.Allocator,
     type_provider: *SolidityTypeProvider.TypeProvider,
     compatibility_ids: CompatibilityIdResolver,
@@ -3395,16 +3469,16 @@ fn generateSolidityIRCached(
     settings: *const CompilationOptions,
     source_provider: StreamProvider.CharStreamProvider,
     cbor_metadata_override: ?[]const u8,
-    other_yul_sources: *SolidityIRGenerator.OtherYulSources,
+    other_yul_objects: *SolidityIRGenerator.OtherYulObjects,
     depth: usize,
-) ![]const u8 {
-    if (other_yul_sources.get(contract)) |source| return source;
+) !*const SolidityIRGenerator.GeneratedObject {
+    if (other_yul_objects.get(contract)) |source| return source;
     if (depth >= 256) return error.InvalidSolidityParserState;
     const contract_source = contract_sources.get(contract) orelse
         return error.InvalidSolidityParserState;
     const annotation = try solidityContractAnnotationConst(contract);
     for (annotation.contract_dependencies.items) |dependency|
-        _ = try generateSolidityIRCached(
+        _ = try generateSolidityYulCached(
             allocator,
             type_provider,
             compatibility_ids,
@@ -3416,7 +3490,7 @@ fn generateSolidityIRCached(
             settings,
             source_provider,
             null,
-            other_yul_sources,
+            other_yul_objects,
             depth + 1,
         );
 
@@ -3458,10 +3532,10 @@ fn generateSolidityIRCached(
         contract_source.tree,
         @constCast(contract),
         cbor_metadata,
-        other_yul_sources,
+        other_yul_objects,
     );
-    errdefer allocator.free(ir);
-    try other_yul_sources.put(allocator, contract, ir);
+    errdefer ir.destroy(allocator);
+    try other_yul_objects.put(allocator, contract, ir);
     return ir;
 }
 
@@ -4012,10 +4086,8 @@ pub fn compileYulStandardJsonAlloc(
         contract_name = try arena.dupe(u8, parser_result.name);
 
         if (isArtifactRequested(&settings.projection.output_selection, source_name, contract_name, "ir", true)) {
-            const ir = try stack.print();
-            defer allocator.free(ir);
             const contract = try ensureContract(arena, &output, source_name, contract_name);
-            try contract.object.put(arena, "ir", try ownedString(arena, ir));
+            try contract.object.put(arena, "ir", .{ .string = try stack.printAlloc(arena) });
         }
 
         if (isArtifactRequested(&settings.projection.output_selection, source_name, contract_name, "ast", true)) {
@@ -4028,6 +4100,7 @@ pub fn compileYulStandardJsonAlloc(
         }
 
         stack.optimize() catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
             const message = try std.fmt.allocPrint(arena, "Yul optimizer failed: {s}", .{@errorName(err)});
             try appendError(arena, errors_value, .YulException, message, message, null, null);
             return finishOutput(allocator, &output);
@@ -4043,6 +4116,7 @@ pub fn compileYulStandardJsonAlloc(
             settings.link.libraries.items,
             backend_cache,
         ) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
             const message = try std.fmt.allocPrint(arena, "Yul code generation failed: {s}", .{@errorName(err)});
             try appendError(arena, errors_value, .YulException, message, message, null, null);
             return finishOutput(allocator, &output);
@@ -4086,18 +4160,19 @@ pub fn compileYulStandardJsonAlloc(
     );
 
     if (isArtifactRequested(&settings.projection.output_selection, source_name, contract_name, "irOptimized", true)) {
-        const ir = try stack.print();
-        defer allocator.free(ir);
         const contract = try ensureContract(arena, &output, source_name, contract_name);
-        try contract.object.put(arena, "irOptimized", try ownedString(arena, ir));
+        try contract.object.put(arena, "irOptimized", .{ .string = try stack.printAlloc(arena) });
     }
     if (isArtifactRequested(&settings.projection.output_selection, source_name, contract_name, "evm.assembly", true)) {
         const assembly = assembly_pair.creation.assembly() orelse return error.MissingAssembly;
-        const rendered = try assembly.assemblyStringAlloc(allocator, stack.debugInfoSelection(), &.{});
-        defer allocator.free(rendered);
         const contract = try ensureContract(arena, &output, source_name, contract_name);
         const evm = try ensureObject(arena, contract, "evm");
-        try evm.object.put(arena, "assembly", try ownedString(arena, rendered));
+        try evm.object.put(arena, "assembly", .{ .string = try assembly.assemblyStringAllocWithScratch(
+            arena,
+            allocator,
+            stack.debugInfoSelection(),
+            &.{},
+        ) });
     }
 
     return finishOutput(allocator, &output);
@@ -4960,12 +5035,7 @@ fn ensureObject(allocator: std.mem.Allocator, parent: *Json, name: []const u8) !
 }
 
 fn finishOutput(allocator: std.mem.Allocator, output: *const Json) ![]u8 {
-    const compact = try JSON.jsonCompactPrintAlloc(allocator, output);
-    defer allocator.free(compact);
-    const result = try allocator.alloc(u8, compact.len + 1);
-    @memcpy(result[0..compact.len], compact);
-    result[compact.len] = '\n';
-    return result;
+    return JSON.jsonPrintAlloc(allocator, output, .{ .trailing_newline = true });
 }
 
 fn resolveIndexedSource(

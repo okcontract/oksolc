@@ -70,8 +70,7 @@ pub const IRVariable = struct {
             compatibility_ids,
             declaration,
         );
-        defer allocator.free(base_name);
-        return init(allocator, base_name, type_ref);
+        return .{ .allocator = allocator, .base_name = base_name, .type_ref = type_ref };
     }
 
     pub fn fromExpression(
@@ -85,8 +84,7 @@ pub const IRVariable = struct {
             compatibility_ids,
             expression,
         );
-        defer allocator.free(base_name);
-        return init(allocator, base_name, type_ref);
+        return .{ .allocator = allocator, .base_name = base_name, .type_ref = type_ref };
     }
 
     pub fn clone(self: *const IRVariable) std.mem.Allocator.Error!IRVariable {
@@ -106,8 +104,11 @@ pub const IRVariable = struct {
             if (item.name.len != 0 and item.type_ref == null)
                 return error.InvalidStackLayout;
             const suffixed = try self.suffixedNameAlloc(item.name);
-            defer self.allocator.free(suffixed);
-            return init(self.allocator, suffixed, item.type_ref orelse self.type_ref);
+            return .{
+                .allocator = self.allocator,
+                .base_name = suffixed,
+                .type_ref = item.type_ref orelse self.type_ref,
+            };
         }
         return error.InvalidStackPart;
     }
@@ -274,6 +275,7 @@ test "IR variables recursively flatten tuple and calldata stack parts" {
     defer component.deinit();
     try std.testing.expectEqualStrings("value_component_3", component.base_name);
     try std.testing.expect(try component.hasPart("length"));
+    try std.testing.expectError(error.InvalidStackPart, component.part("missing"));
     const list = try component.commaSeparatedListAlloc();
     defer std.testing.allocator.free(list);
     try std.testing.expectEqualStrings(
@@ -282,7 +284,7 @@ test "IR variables recursively flatten tuple and calldata stack parts" {
     );
 }
 
-test "appending stack slots preserves existing names on every allocation failure" {
+test "IR variable appending stack slots preserves existing names on every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseAppendStackSlots, .{});
 }
 
@@ -332,4 +334,48 @@ test "single-slot primitive names reject typed wrapper layouts" {
     var wrapped = try IRVariable.init(std.testing.allocator, "a", &memory_array);
     defer wrapped.deinit();
     try std.testing.expectError(error.ExpectedSingleUntypedSlot, wrapped.nameAlloc());
+}
+
+test "IR variable generated names retain one owner across allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const uint_type = Types.Type{ .payload = .{ .Integer = .{ .bits = 256, .modifier = .Unsigned } } };
+            const tuple_type = Types.Type{ .payload = .{ .Tuple = .{ .components = &.{&uint_type} } } };
+            var declaration_annotation: ASTAnnotations.Annotation = .{ .variable_declaration = .{ .type_ref = &tuple_type } };
+            const declaration: AST.Node = .{
+                .id = 17,
+                .location = .{},
+                .payload = .{ .variable_declaration = .{ .declaration = .{ .name = "value" } } },
+                .annotation = @ptrCast(&declaration_annotation),
+            };
+            var expression_annotation: ASTAnnotations.Annotation = .{ .identifier = .{ .expression = .{ .type_ref = &uint_type } } };
+            const expression: AST.Node = .{
+                .id = 18,
+                .location = .{},
+                .payload = .{ .identifier = .{ .name = "value" } },
+                .annotation = @ptrCast(&expression_annotation),
+            };
+            var child = blk: {
+                var variable = try IRVariable.fromDeclaration(allocator, .legacyNodeIds(), &declaration);
+                defer variable.deinit();
+                try std.testing.expectEqualStrings("var_value_17", variable.base_name);
+                var copy = try variable.clone();
+                defer copy.deinit();
+                copy.base_name[0] = 'X';
+                try std.testing.expectEqualStrings("var_value_17", variable.base_name);
+                break :blk try variable.part("component_1");
+            };
+            defer child.deinit();
+            // The child owns its suffix independently of the destroyed parent.
+            try std.testing.expectEqualStrings("var_value_17_component_1", child.base_name);
+            try std.testing.expect(child.type_ref == &uint_type);
+            var value = try IRVariable.fromExpression(allocator, .legacyNodeIds(), &expression);
+            defer value.deinit();
+            try std.testing.expectEqualStrings("expr_18", value.base_name);
+            try std.testing.expect(value.type_ref == &uint_type);
+            try std.testing.expectError(error.InvalidAst, IRVariable.fromDeclaration(allocator, .legacyNodeIds(), &expression));
+            try std.testing.expectError(error.InvalidAst, IRVariable.fromExpression(allocator, .legacyNodeIds(), &declaration));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }

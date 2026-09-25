@@ -22,6 +22,7 @@ pub const JsonFormat = struct {
 
     format: Format = .compact,
     indent: u32 = default_indent,
+    trailing_newline: bool = false,
 };
 
 pub const JsonDocument = struct {
@@ -225,6 +226,7 @@ pub fn jsonPrintAlloc(
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     try appendValue(allocator, &output, input, format, 0);
+    if (format.trailing_newline) try output.append(allocator, '\n');
     return output.toOwnedSlice(allocator);
 }
 
@@ -316,9 +318,9 @@ fn appendFormatted(
     comptime format: []const u8,
     args: anytype,
 ) std.mem.Allocator.Error!void {
-    const formatted = try std.fmt.allocPrint(allocator, format, args);
-    defer allocator.free(formatted);
-    try output.appendSlice(allocator, formatted);
+    var writer = std.Io.Writer.Allocating.fromArrayList(allocator, output);
+    defer output.* = writer.toArrayList();
+    writer.writer.print(format, args) catch return error.OutOfMemory;
 }
 
 fn appendFloat(
@@ -326,9 +328,9 @@ fn appendFloat(
     output: *std.ArrayList(u8),
     value: f64,
 ) std.mem.Allocator.Error!void {
-    const encoded = try std.json.Stringify.valueAlloc(allocator, value, .{});
-    defer allocator.free(encoded);
-    try output.appendSlice(allocator, encoded);
+    var writer = std.Io.Writer.Allocating.fromArrayList(allocator, output);
+    defer output.* = writer.toArrayList();
+    std.json.Stringify.value(value, .{}, &writer.writer) catch return error.OutOfMemory;
 }
 
 fn appendString(
@@ -336,11 +338,11 @@ fn appendString(
     output: *std.ArrayList(u8),
     value: []const u8,
 ) std.mem.Allocator.Error!void {
-    const encoded = try std.json.Stringify.valueAlloc(allocator, value, .{
-        .escape_unicode = true,
-    });
-    defer allocator.free(encoded);
-    try output.appendSlice(allocator, encoded);
+    // Lend the destination buffer to the standard JSON escaper. Transfer it
+    // back even on OOM so the caller can release a partially grown buffer.
+    var writer = std.Io.Writer.Allocating.fromArrayList(allocator, output);
+    defer output.* = writer.toArrayList();
+    std.json.Stringify.value(value, .{ .escape_unicode = true }, &writer.writer) catch return error.OutOfMemory;
 }
 
 fn appendIndent(
@@ -548,6 +550,31 @@ test "printing sorts keys, escapes Unicode, and honors arbitrary indentation" {
     );
 }
 
+test "printing final newline retains canonical bytes across allocation failures" {
+    const allocator = std.testing.allocator;
+    var parsed = try jsonParseStrict(allocator, "{\"z\":\"ऑ\\n\",\"a\":[null,true,1.0,{\"b\":\"\\u0000\"}]}");
+    defer parsed.deinit();
+    const document = try expectDocument(&parsed);
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, value: *const Json, format: JsonFormat, expected: []const u8) !void {
+            const result = try jsonPrintAlloc(failing, value, format);
+            defer failing.free(result);
+            try std.testing.expectEqual(expected.len + 1, result.len);
+            try std.testing.expectEqualSlices(u8, expected, result[0..expected.len]);
+            try std.testing.expectEqual(@as(u8, '\n'), result[expected.len]);
+        }
+    };
+    for ([_]JsonFormat.Format{ .compact, .pretty }) |format| {
+        const expected = try jsonPrintAlloc(allocator, document.rootConst(), .{ .format = format });
+        defer allocator.free(expected);
+        try std.testing.checkAllAllocationFailures(allocator, Check.run, .{
+            document.rootConst(),
+            JsonFormat{ .format = format, .trailing_newline = true },
+            expected,
+        });
+    }
+}
+
 test "null object members are removed but null array entries remain" {
     var result = try jsonParseStrict(
         std.testing.allocator,
@@ -585,4 +612,45 @@ test "nlohmann error identifiers are removed and trimmed" {
     );
     defer std.testing.allocator.free(cleaned);
     try std.testing.expectEqualStrings("unexpected token", cleaned);
+}
+
+test "printing many scalars avoids per-token allocation" {
+    const allocator = std.testing.allocator;
+    var value: Json = .{ .array = std.json.Array.init(allocator) };
+    defer value.array.deinit();
+    for (0..2048) |_| try value.array.appendSlice(&.{
+        .{ .string = "source \\ \"\t\r\n\x00 é 𝄞" },
+        .{ .integer = std.math.minInt(i64) },
+        .{ .float = 1.25 },
+    });
+    const expected = try std.json.Stringify.valueAlloc(allocator, value, .{ .escape_unicode = true });
+    defer allocator.free(expected);
+    var accounting = std.testing.FailingAllocator.init(allocator, .{});
+    const actual = try jsonCompactPrintAlloc(accounting.allocator(), &value);
+    defer accounting.allocator().free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
+    std.debug.print("JSON scalars: {d} output bytes, {d} allocations, {d} allocated bytes\n", .{ actual.len, accounting.allocations, accounting.allocated_bytes });
+    try std.testing.expect(accounting.allocations < 64);
+}
+
+test "printing streamed scalar growth releases buffers across allocation failures" {
+    const allocator = std.testing.allocator;
+    var value: Json = .{ .array = std.json.Array.init(allocator) };
+    defer value.array.deinit();
+    for (0..256) |_| try value.array.appendSlice(&.{
+        .{ .string = "long escaped source line \\ \"\t\r\n\x00 é 𝄞" },
+        .{ .integer = std.math.maxInt(i64) },
+        .{ .float = -0.0 },
+        .{ .number_string = "18446744073709551615" },
+    });
+    const expected = try std.json.Stringify.valueAlloc(allocator, value, .{ .escape_unicode = true });
+    defer allocator.free(expected);
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, input: *const Json, canonical: []const u8) !void {
+            const output = try jsonCompactPrintAlloc(failing, input);
+            defer failing.free(output);
+            try std.testing.expectEqualStrings(canonical, output);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &value, expected });
 }

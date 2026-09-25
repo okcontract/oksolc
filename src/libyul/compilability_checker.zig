@@ -42,7 +42,7 @@ pub const CompilabilityChecker = struct {
     }
 
     /// Internal form used by StackCompressor while repeatedly rewriting a
-    /// cloned root block. Object structure and builtin object access still
+    /// transferred root block. Object structure and builtin object access still
     /// come from `object`, exactly as in the upstream temporary Object copy.
     pub fn initWithBlock(
         allocator: std.mem.Allocator,

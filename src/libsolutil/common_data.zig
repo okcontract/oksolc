@@ -452,39 +452,124 @@ pub fn formatAsStringOrNumberAlloc(
     value: []const u8,
 ) FormatStringError![]u8 {
     if (value.len > 32) return error.StringTooLong;
-    for (value) |character| {
-        if (character <= 0x1f or character >= 0x7f or character == '"') {
-            const hash = fixed_hash.H256.fromBytes(value, .align_left);
-            const hex = hash.hex();
-            return std.fmt.allocPrint(allocator, "0x{s}", .{hex});
-        }
+    if (!preferStringLiteral(value)) {
+        const hash = fixed_hash.H256.fromBytes(value, .align_left);
+        const hex = hash.hex();
+        return std.fmt.allocPrint(allocator, "0x{s}", .{hex});
     }
     return escapeAndQuoteStringAlloc(allocator, value);
+}
+
+/// The shared spelling rule for a word represented as a string or number.
+/// Length validation belongs to the word constructor.
+pub fn preferStringLiteral(value: []const u8) bool {
+    for (value) |character| {
+        if (character <= 0x1f or character >= 0x7f or character == '"') return false;
+    }
+    return true;
 }
 
 pub fn escapeAndQuoteStringAlloc(
     allocator: std.mem.Allocator,
     input: []const u8,
 ) std.mem.Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    try output.append(allocator, '"');
-    for (input) |character| switch (character) {
-        '\\' => try output.appendSlice(allocator, "\\\\"),
-        '"' => try output.appendSlice(allocator, "\\\""),
-        '\n' => try output.appendSlice(allocator, "\\n"),
-        '\r' => try output.appendSlice(allocator, "\\r"),
-        '\t' => try output.appendSlice(allocator, "\\t"),
-        else => if (!std.ascii.isPrint(character)) {
-            try output.appendSlice(allocator, "\\x");
-            const encoded = std.fmt.bytesToHex([_]u8{character}, .lower);
-            try output.appendSlice(allocator, &encoded);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    writeEscapedQuoted(&output.writer, input) catch return error.OutOfMemory;
+    return output.toOwnedSlice();
+}
+
+/// Shared quoting for caller-owned writers, including a counting projection.
+pub fn writeEscapedQuoted(writer: anytype, input: []const u8) !void {
+    try writer.writeByte('"');
+    try writeEscapedStringContent(writer, input);
+    try writer.writeByte('"');
+}
+
+/// Stream one string segment with the same byte escaping as writeEscapedQuoted.
+/// The caller owns the quotes, allowing borrowed segments to share one string.
+/// Input stays alive and unchanged until return; writers consume slices synchronously.
+pub fn writeEscapedStringContent(writer: anytype, input: []const u8) !void {
+    // Bound lookahead when a layout probe or failing writer stops early.
+    // Each plain run borrows the input; only four-byte escapes use stack storage.
+    var remaining = input;
+    while (remaining.len != 0) {
+        const chunk = remaining[0..@min(remaining.len, 64)];
+        var start: usize = 0;
+        for (chunk, 0..) |character, index| {
+            var encoded: [4]u8 = undefined;
+            const escaped: []const u8 = switch (character) {
+                '\\' => "\\\\",
+                '"' => "\\\"",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                else => blk: {
+                    if (std.ascii.isPrint(character)) continue;
+                    const hex = std.fmt.bytesToHex([_]u8{character}, .lower);
+                    encoded = .{ '\\', 'x', hex[0], hex[1] };
+                    break :blk &encoded;
+                },
+            };
+            if (start != index) try writer.writeAll(chunk[start..index]);
+            try writer.writeAll(escaped);
+            start = index + 1;
+        }
+        if (start != chunk.len) try writer.writeAll(chunk[start..]);
+        remaining = remaining[chunk.len..];
+    }
+}
+
+test "escaped string content preserves all bytes across segments and writer limits" {
+    var input: [256]u8 = undefined;
+    for (&input, 0..) |*byte, index| byte.* = @intCast(index);
+    const expected = "\"" ++
+        "\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\t\\n\\x0b\\x0c\\r\\x0e\\x0f\\x10\\x11\\x12\\x13\\x14\\x15\\x16\\x17\\x18\\x19\\x1a\\x1b\\x1c\\x1d\\x1e\\x1f" ++
+        " !\\\"#$%&'()*+,-./0123456789:;<=>?" ++
+        "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\\\]^_" ++
+        "`abcdefghijklmnopqrstuvwxyz{|}~\\x7f" ++
+        "\\x80\\x81\\x82\\x83\\x84\\x85\\x86\\x87\\x88\\x89\\x8a\\x8b\\x8c\\x8d\\x8e\\x8f\\x90\\x91\\x92\\x93\\x94\\x95\\x96\\x97\\x98\\x99\\x9a\\x9b\\x9c\\x9d\\x9e\\x9f" ++
+        "\\xa0\\xa1\\xa2\\xa3\\xa4\\xa5\\xa6\\xa7\\xa8\\xa9\\xaa\\xab\\xac\\xad\\xae\\xaf\\xb0\\xb1\\xb2\\xb3\\xb4\\xb5\\xb6\\xb7\\xb8\\xb9\\xba\\xbb\\xbc\\xbd\\xbe\\xbf" ++
+        "\\xc0\\xc1\\xc2\\xc3\\xc4\\xc5\\xc6\\xc7\\xc8\\xc9\\xca\\xcb\\xcc\\xcd\\xce\\xcf\\xd0\\xd1\\xd2\\xd3\\xd4\\xd5\\xd6\\xd7\\xd8\\xd9\\xda\\xdb\\xdc\\xdd\\xde\\xdf" ++
+        "\\xe0\\xe1\\xe2\\xe3\\xe4\\xe5\\xe6\\xe7\\xe8\\xe9\\xea\\xeb\\xec\\xed\\xee\\xef\\xf0\\xf1\\xf2\\xf3\\xf4\\xf5\\xf6\\xf7\\xf8\\xf9\\xfa\\xfb\\xfc\\xfd\\xfe\\xff" ++
+        "\"";
+    var buffer: [1024]u8 = undefined;
+    for (0..input.len + 1) |split| {
+        var writer = std.Io.Writer.fixed(&buffer);
+        try writer.writeByte('"');
+        try writeEscapedStringContent(&writer, input[0..split]);
+        try writeEscapedStringContent(&writer, input[split..]);
+        try writer.writeByte('"');
+        try std.testing.expectEqualStrings(expected, writer.buffered());
+    }
+    for (0..expected.len + 1) |capacity| {
+        var writer = std.Io.Writer.fixed(buffer[0..capacity]);
+        if (capacity < expected.len) {
+            try std.testing.expectError(error.WriteFailed, writeEscapedQuoted(&writer, &input));
+            try std.testing.expect(std.mem.startsWith(u8, expected, writer.buffered()));
         } else {
-            try output.append(allocator, character);
-        },
-    };
-    try output.append(allocator, '"');
-    return output.toOwnedSlice(allocator);
+            try writeEscapedQuoted(&writer, &input);
+            try std.testing.expectEqualStrings(expected, writer.buffered());
+        }
+    }
+}
+
+test "escaped string content joins borrowed segments with shared quoting" {
+    const first = "\x00\x1f !\"";
+    const second = "\t\n\r\\\x7f\xff";
+    const expected = "\"\\x00\\x1f !\\\"\\t\\n\\r\\\\\\x7f\\xff\"";
+    var buffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writer.writeByte('"');
+    try writeEscapedStringContent(&writer, first);
+    try writeEscapedStringContent(&writer, second);
+    try writer.writeByte('"');
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+    writer.end = 0;
+    try writeEscapedQuoted(&writer, first ++ second);
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+    var short = std.Io.Writer.fixed(buffer[0..3]);
+    try std.testing.expectError(error.WriteFailed, writeEscapedStringContent(&short, first));
 }
 
 pub fn containerEqual(lhs: anytype, rhs: anytype, context: anytype, compare: anytype) bool {

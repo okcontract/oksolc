@@ -6,17 +6,14 @@
 
 const std = @import("std");
 const AST = @import("../ast.zig");
-const CallGraph = @import("call_graph_generator.zig");
 const DataFlow = @import("data_flow_analyzer.zig");
 const OptimiserStepContext = @import("optimiser_step.zig").OptimiserStepContext;
 const OptimizerUtilities = @import("optimizer_utilities.zig");
-const Semantics = @import("semantics.zig");
 
 pub const EqualStoreEliminator = struct {
     const Self = @This();
     const Analyzer = DataFlow.DataFlowAnalyzer(Self, .analyze);
 
-    allocator: std.mem.Allocator,
     analyzer: Analyzer,
     pending_removals: OptimizerUtilities.StatementSet,
 
@@ -24,22 +21,16 @@ pub const EqualStoreEliminator = struct {
 
     pub fn run(context: *const OptimiserStepContext, ast: *AST.Block) anyerror!void {
         const allocator = context.dispenser.allocator;
-        var graph = try CallGraph.CallGraphGenerator.callGraph(allocator, ast);
-        defer graph.deinit();
-        var function_side_effects = try Semantics.SideEffectsPropagator.sideEffects(
-            allocator,
-            context.dialect,
-            &graph,
-        );
-        defer function_side_effects.deinit(allocator);
+        const scratch_allocator = context.scratchAllocator();
+        var function_analysis = try context.functionAnalysis(ast);
+        defer function_analysis.deinit();
         var eliminator: EqualStoreEliminator = .{
-            .allocator = allocator,
             .analyzer = Analyzer.init(
-                allocator,
+                scratch_allocator,
                 context.dialect,
-                &function_side_effects,
+                function_analysis.sideEffects(),
             ),
-            .pending_removals = OptimizerUtilities.StatementSet.init(allocator),
+            .pending_removals = OptimizerUtilities.StatementSet.init(scratch_allocator),
         };
         defer eliminator.deinit();
         try eliminator.analyzer.run(&eliminator, ast);

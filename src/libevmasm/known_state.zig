@@ -570,7 +570,9 @@ pub const KnownState = struct {
         var word_count: usize = 0;
         var offset: u32 = 0;
         while (offset < length) : (offset += 32) {
-            const offset_id = try self.expressionClasses().makeConstant(offset, debug_data);
+            // Analysis-created offsets have no source annotation in solc.
+            // Their interned representatives may later supply emitted PUSHes.
+            const offset_id = try self.expressionClasses().makeConstant(offset, .{});
             const slot = try self.expressionClasses().makeOperation(.ADD, &.{ start, offset_id }, debug_data);
             word_storage[word_count] = try self.loadFromMemory(slot, debug_data);
             word_count += 1;
@@ -765,6 +767,27 @@ test "known state copies share expressions but own mutable maps" {
     try std.testing.expect(state.eql(&merged_copy));
     merged_copy.resetStack();
     try std.testing.expectEqual(@as(i32, 1), state.stack_height);
+}
+
+test "source locations for Keccak analysis offsets preserve existing representatives" {
+    var state = try KnownState.init(std.testing.allocator);
+    defer state.deinit();
+    const debug_data: DebugData = .{
+        .origin_location = .{ .start = 1, .end = 10, .source_name = "C.sol" },
+    };
+    const classes = state.expressionClasses();
+    const start = try classes.makeConstant(64, debug_data);
+    const length = try classes.makeConstant(96, debug_data);
+    const hash = try state.applyKeccak256(start, length, debug_data);
+    for ([_]u256{ 0, 32 }) |offset| {
+        const id = try classes.makeConstant(offset, debug_data);
+        const item = (try classes.representative(id)).item;
+        try std.testing.expect(item.debug_data.origin_location.eql(.{}));
+    }
+    // The already-interned 64 keeps its original annotation, as does the
+    // KECCAK256 instruction; only newly introduced offset constants are empty.
+    try std.testing.expect((try classes.representative(start)).item.debug_data.origin_location.eql(debug_data.origin_location));
+    try std.testing.expect((try classes.representative(hash)).item.debug_data.origin_location.eql(debug_data.origin_location));
 }
 
 test "gas meter consumes and updates the concrete known state" {

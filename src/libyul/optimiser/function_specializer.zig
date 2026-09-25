@@ -17,10 +17,10 @@ const YulName = @import("../yul_name.zig").YulName;
 pub const LiteralArguments = struct {
     items: std.ArrayList(?AST.Expression) = .empty,
 
-    fn deinit(self: *LiteralArguments, allocator: std.mem.Allocator) void {
+    fn deinit(self: *LiteralArguments, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator) void {
         for (self.items.items) |*maybe_expression| if (maybe_expression.*) |*expression|
             expression.deinit(allocator);
-        self.items.deinit(allocator);
+        self.items.deinit(scratch_allocator);
         self.* = undefined;
     }
 };
@@ -29,8 +29,8 @@ const Specialization = struct {
     new_name: YulName,
     arguments: LiteralArguments,
 
-    fn deinit(self: *Specialization, allocator: std.mem.Allocator) void {
-        self.arguments.deinit(allocator);
+    fn deinit(self: *Specialization, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator) void {
+        self.arguments.deinit(allocator, scratch_allocator);
         self.* = undefined;
     }
 };
@@ -40,6 +40,7 @@ const SpecializationMap = std.AutoHashMap(YulName, SpecializationList);
 
 pub const FunctionSpecializer = struct {
     allocator: std.mem.Allocator,
+    scratch_allocator: std.mem.Allocator,
     recursive_functions: *const CallGraphModule.FunctionHandleSet,
     name_dispenser: *NameDispenser,
     old_to_new: SpecializationMap,
@@ -48,15 +49,17 @@ pub const FunctionSpecializer = struct {
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
         const allocator = context.dispenser.allocator;
-        var graph = try CallGraphModule.CallGraphGenerator.callGraph(allocator, ast);
+        const scratch_allocator = context.scratchAllocator();
+        var graph = try CallGraphModule.CallGraphGenerator.callGraph(scratch_allocator, ast);
         defer graph.deinit();
         var recursive = try graph.recursiveFunctions();
-        defer recursive.deinit(allocator);
+        defer recursive.deinit(scratch_allocator);
         var specializer: FunctionSpecializer = .{
             .allocator = allocator,
+            .scratch_allocator = scratch_allocator,
             .recursive_functions = &recursive,
             .name_dispenser = context.dispenser,
-            .old_to_new = SpecializationMap.init(allocator),
+            .old_to_new = SpecializationMap.init(scratch_allocator),
         };
         defer specializer.deinit();
         try specializer.visitBlock(ast);
@@ -66,8 +69,8 @@ pub const FunctionSpecializer = struct {
     fn deinit(self: *FunctionSpecializer) void {
         var lists = self.old_to_new.valueIterator();
         while (lists.next()) |list| {
-            for (list.items) |*specialization| specialization.deinit(self.allocator);
-            list.deinit(self.allocator);
+            for (list.items) |*specialization| specialization.deinit(self.allocator, self.scratch_allocator);
+            list.deinit(self.scratch_allocator);
         }
         self.old_to_new.deinit();
         self.* = undefined;
@@ -123,86 +126,93 @@ pub const FunctionSpecializer = struct {
         };
         if (self.recursive_functions.contains(.{ .user = identifier.name })) return;
 
-        var arguments = try self.specializableArguments(call);
-        var arguments_owned = true;
-        defer if (arguments_owned) arguments.deinit(self.allocator);
-        var has_literal = false;
-        for (arguments.items.items) |argument| if (argument != null) {
-            has_literal = true;
-            break;
-        };
+        const has_literal = for (call.arguments.items) |argument| {
+            if (argument == .literal) break true;
+        } else false;
         if (!has_literal) return;
 
+        // Reserve every destination before transferring ownership. The argument
+        // list borrows no call storage: literals move into this pass-local owner,
+        // and the remaining arguments compact in their original allocation.
+        var arguments: LiteralArguments = .{};
+        errdefer arguments.deinit(self.allocator, self.scratch_allocator);
+        try arguments.items.ensureTotalCapacityPrecise(self.scratch_allocator, call.arguments.items.len);
         const old_name = identifier.name;
-        const new_name = try self.name_dispenser.newName(old_name);
-        identifier.name = new_name;
-
-        var kept_arguments: std.ArrayList(AST.Expression) = .empty;
-        errdefer {
-            for (kept_arguments.items) |*argument| argument.deinit(self.allocator);
-            kept_arguments.deinit(self.allocator);
-        }
-        try kept_arguments.ensureTotalCapacity(self.allocator, call.arguments.items.len);
-        for (call.arguments.items, arguments.items.items) |*argument, specialized| {
-            if (specialized != null) {
-                argument.deinit(self.allocator);
-            } else {
-                kept_arguments.appendAssumeCapacity(argument.*);
-                argument.* = emptyExpression();
-            }
-        }
-        call.arguments.deinit(self.allocator);
-        call.arguments = kept_arguments;
-        kept_arguments = .empty;
-
         const entry = try self.old_to_new.getOrPut(old_name);
         if (!entry.found_existing) entry.value_ptr.* = .empty;
-        try entry.value_ptr.append(self.allocator, .{
+        try entry.value_ptr.ensureUnusedCapacity(self.scratch_allocator, 1);
+        const new_name = try self.name_dispenser.newName(old_name);
+
+        var kept: usize = 0;
+        for (call.arguments.items) |argument| {
+            if (argument == .literal) {
+                arguments.items.appendAssumeCapacity(argument);
+            } else {
+                arguments.items.appendAssumeCapacity(null);
+                call.arguments.items[kept] = argument;
+                kept += 1;
+            }
+        }
+        call.arguments.shrinkRetainingCapacity(kept);
+        identifier.name = new_name;
+        entry.value_ptr.appendAssumeCapacity(.{
             .new_name = new_name,
             .arguments = arguments,
         });
-        arguments_owned = false;
-    }
-
-    fn specializableArguments(
-        self: *FunctionSpecializer,
-        call: *const AST.FunctionCall,
-    ) anyerror!LiteralArguments {
-        var result: LiteralArguments = .{};
-        errdefer result.deinit(self.allocator);
-        var copier = ASTCopierModule.ASTCopier.init(self.allocator);
-        for (call.arguments.items) |*argument| {
-            if (argument.* == .literal)
-                try result.items.append(self.allocator, try copier.translateExpression(argument))
-            else
-                try result.items.append(self.allocator, null);
-        }
-        return result;
     }
 
     fn insertSpecializedFunctions(self: *FunctionSpecializer, ast: *AST.Block) anyerror!void {
-        var replacement: std.ArrayList(AST.Statement) = .empty;
-        errdefer {
-            for (replacement.items) |*statement| statement.deinit(self.allocator);
-            replacement.deinit(self.allocator);
+        if (self.old_to_new.count() == 0) return;
+        const old_len = ast.statements.items.len;
+        var expanded_len = old_len;
+        for (ast.statements.items) |statement| {
+            if (statement == .function_definition) {
+                if (self.old_to_new.get(statement.function_definition.name)) |specializations|
+                    expanded_len = std.math.add(usize, expanded_len, specializations.items.len) catch return error.OutOfMemory;
+            }
         }
-        for (ast.statements.items) |*statement| {
+        if (expanded_len == old_len) return;
+
+        // Place original statements and empty specialization slots in their
+        // final positions before copying any body. All slots are valid owners
+        // when fallible copying starts, including after a partial failure.
+        try ast.statements.ensureTotalCapacityPrecise(self.allocator, expanded_len);
+        ast.statements.items.len = expanded_len;
+        var source_index = old_len;
+        var destination_index = expanded_len;
+        while (source_index != 0) {
+            source_index -= 1;
+            const statement = ast.statements.items[source_index];
+            ast.statements.items[source_index] = emptyStatement();
+            destination_index -= 1;
+            ast.statements.items[destination_index] = statement;
+            if (statement == .function_definition) {
+                if (self.old_to_new.get(statement.function_definition.name)) |specializations| {
+                    const end = destination_index;
+                    destination_index -= specializations.items.len;
+                    @memset(ast.statements.items[destination_index..end], emptyStatement());
+                }
+            }
+        }
+        std.debug.assert(destination_index == 0);
+
+        // Copies occupy slots before the current original, which this walk has
+        // already passed. The root cannot grow while specialize borrows it.
+        for (ast.statements.items, 0..) |*statement, index| {
             if (statement.* == .function_definition) {
                 const function = &statement.function_definition;
                 if (self.old_to_new.getPtr(function.name)) |specializations| {
-                    for (specializations.items) |*specialization| {
-                        var specialized = try self.specialize(function, specialization);
-                        errdefer specialized.deinit(self.allocator);
-                        try replacement.append(self.allocator, .{ .function_definition = specialized });
+                    for (specializations.items, 0..) |*specialization, offset| {
+                        const destination = index - specializations.items.len + offset;
+                        // A fallible union initializer can write into its result
+                        // location before returning an error. Publish only a
+                        // completed function so failure leaves the empty slot.
+                        const specialized = try self.specialize(function, specialization);
+                        ast.statements.items[destination] = .{ .function_definition = specialized };
                     }
                 }
             }
-            try replacement.append(self.allocator, statement.*);
-            statement.* = emptyStatement();
         }
-        ast.statements.deinit(self.allocator);
-        ast.statements = replacement;
-        replacement = .empty;
     }
 
     fn specialize(
@@ -214,16 +224,17 @@ pub const FunctionSpecializer = struct {
             return error.InvalidSpecializationArity;
 
         var names = try NameCollector.NameCollector.initFunction(
-            self.allocator,
+            self.scratch_allocator,
             function,
             .only_variables,
         );
         defer names.deinit();
         var translations: std.ArrayList(ASTCopierModule.NameTranslation) = .empty;
-        defer translations.deinit(self.allocator);
+        defer translations.deinit(self.scratch_allocator);
+        try translations.ensureTotalCapacityPrecise(self.scratch_allocator, names.names().len());
         for (0..names.names().len()) |index| {
             const old_name = names.names().at(index);
-            try translations.append(self.allocator, .{
+            translations.appendAssumeCapacity(.{
                 .from = old_name,
                 .to = try self.name_dispenser.newName(old_name),
             });
@@ -233,57 +244,44 @@ pub const FunctionSpecializer = struct {
         var new_function = try copier.copier.translateFunctionDefinition(function);
         errdefer new_function.deinit(self.allocator);
 
-        var specialized_mask: std.ArrayList(bool) = .empty;
-        defer specialized_mask.deinit(self.allocator);
+        var literal_count: usize = 0;
         for (specialization.arguments.items.items) |argument|
-            try specialized_mask.append(self.allocator, argument != null);
+            if (argument != null) {
+                literal_count += 1;
+            };
 
-        var declarations: std.ArrayList(AST.Statement) = .empty;
-        defer declarations.deinit(self.allocator);
-        for (specialization.arguments.items.items, 0..) |*maybe_argument, index| {
-            if (maybe_argument.*) |*argument| {
-                const value = try self.allocator.create(AST.Expression);
-                value.* = argument.*;
+        // Grow the copied body once and place declarations directly into it.
+        // Empty prefix slots are valid cleanup owners throughout construction.
+        const body = &new_function.body.statements;
+        const old_len = body.items.len;
+        try body.ensureUnusedCapacity(self.allocator, literal_count);
+        body.items.len += literal_count;
+        std.mem.copyBackwards(AST.Statement, body.items[literal_count..], body.items[0..old_len]);
+        @memset(body.items[0..literal_count], emptyStatement());
+
+        var declaration_index: usize = 0;
+        var kept: usize = 0;
+        for (specialization.arguments.items.items, new_function.parameters.items) |*maybe_argument, parameter| {
+            if (maybe_argument.*) |argument| {
+                const declaration = &body.items[declaration_index];
+                const value = try AST.createExpression(self.allocator, argument);
+                declaration.* = .{ .variable_declaration = .{
+                    .debug_data = function.debug_data,
+                    .value = value,
+                } };
                 maybe_argument.* = null;
-                var declaration: AST.VariableDeclaration = .{ .debug_data = function.debug_data };
-                errdefer declaration.deinit(self.allocator);
-                try declaration.variables.append(self.allocator, new_function.parameters.items[index]);
-                declaration.value = value;
-                try declarations.append(self.allocator, .{ .variable_declaration = declaration });
+                try declaration.variable_declaration.variables.ensureTotalCapacityPrecise(self.allocator, 1);
+                declaration.variable_declaration.variables.appendAssumeCapacity(parameter);
+                declaration_index += 1;
+            } else {
+                new_function.parameters.items[kept] = parameter;
+                kept += 1;
             }
         }
-
-        var body_statements: std.ArrayList(AST.Statement) = .empty;
-        errdefer {
-            for (body_statements.items) |*statement| statement.deinit(self.allocator);
-            body_statements.deinit(self.allocator);
-        }
-        try body_statements.ensureTotalCapacity(
-            self.allocator,
-            declarations.items.len + new_function.body.statements.items.len,
-        );
-        for (declarations.items) |*statement| {
-            body_statements.appendAssumeCapacity(statement.*);
-            statement.* = emptyStatement();
-        }
-        for (new_function.body.statements.items) |*statement| {
-            body_statements.appendAssumeCapacity(statement.*);
-            statement.* = emptyStatement();
-        }
-        new_function.body.statements.deinit(self.allocator);
-        new_function.body.statements = body_statements;
-        body_statements = .empty;
-
-        var parameters: std.ArrayList(AST.NameWithDebugData) = .empty;
-        errdefer parameters.deinit(self.allocator);
-        for (new_function.parameters.items, specialized_mask.items) |parameter, specialized|
-            if (!specialized) try parameters.append(self.allocator, parameter);
-        new_function.parameters.deinit(self.allocator);
-        new_function.parameters = parameters;
-        parameters = .empty;
+        new_function.parameters.shrinkRetainingCapacity(kept);
         new_function.name = specialization.new_name;
 
-        specialization.arguments.items.deinit(self.allocator);
+        specialization.arguments.items.deinit(self.scratch_allocator);
         specialization.arguments.items = .empty;
         return new_function;
     }
@@ -291,10 +289,6 @@ pub const FunctionSpecializer = struct {
 
 fn emptyStatement() AST.Statement {
     return .{ .block = .{} };
-}
-
-fn emptyExpression() AST.Expression {
-    return .{ .identifier = .{} };
 }
 
 test "function specializer materializes literal parameters" {
@@ -336,4 +330,81 @@ test "function specializer materializes literal parameters" {
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.find(u8, rendered, "function f_1") != null);
     try std.testing.expect(std.mem.find(u8, rendered, "f_1(x)") != null);
+}
+
+test "function specializer moves literals and preserves dynamic storage across allocation failures" {
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const EVMDialect = @import("../backends/evm/evm_dialect.zig").EVMDialect;
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialect.init(allocator, .current(), false);
+    defer dialect.deinit();
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var source = (try Parser.parseSource(allocator,
+        \\{ function f(a, b, c) { pop(add(a, add(b, c))) }
+        \\  function recursive(r) { if r { recursive(sub(r, 1)) } }
+        \\  let x := 7
+        \\  f(0x01, add(x, 2), 0x03)
+        \\  f(x, x, x)
+        \\  f(4, 5, 6)
+        \\  recursive(8)
+        \\}
+    , "specializer-ownership.yul", &reporter, dialect.dialect(), .{})).?;
+    defer source.deinit();
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, input: *const AST.AST, separate_scratch: bool) !void {
+            const Printer = @import("../asm_printer.zig").AsmPrinter;
+            const Analysis = @import("../asm_analysis.zig");
+            const Structure = @import("../object.zig").Structure;
+            var copier = ASTCopierModule.ASTCopier.init(failing);
+            var ast = try copier.translateBlock(input.root());
+            defer ast.deinit(failing);
+            var reserved: NameCollector.NameSet = .{};
+            defer reserved.deinit(failing);
+            var dispenser = try NameDispenser.initFromAst(failing, input.dialect().*, &ast, &reserved);
+            defer dispenser.deinit();
+            var scratch = std.heap.ArenaAllocator.init(failing);
+            defer scratch.deinit();
+            var context: OptimiserStepContext = .{
+                .dialect = input.dialect().*,
+                .dispenser = &dispenser,
+                .reserved_identifiers = &reserved,
+                .scratch_arena = if (separate_scratch) &scratch else null,
+            };
+            const first_call = &ast.statements.items[3].expression_statement.expression.function_call;
+            const call_storage = first_call.arguments.items.ptr;
+            const nested_storage = first_call.arguments.items[1].function_call.arguments.items.ptr;
+            const first_spelling = first_call.arguments.items[0].literal.value.string_value.?.ptr;
+            const last_spelling = first_call.arguments.items[2].literal.value.string_value.?.ptr;
+            const dynamic_storage = ast.statements.items[4].expression_statement.expression.function_call.arguments.items.ptr;
+            try FunctionSpecializer.run(&context, &ast);
+            _ = scratch.reset(.free_all);
+            // Two specialized functions precede the original function. Their
+            // literal spelling buffers transfer unchanged, and call containers
+            // and nested dynamic expressions keep their original allocation.
+            try std.testing.expectEqual(@as(usize, 9), ast.statements.items.len);
+            const specialized = &ast.statements.items[0].function_definition;
+            try std.testing.expectEqual(@as(usize, 1), specialized.parameters.items.len);
+            try std.testing.expectEqual(first_spelling, specialized.body.statements.items[0].variable_declaration.value.?.literal.value.string_value.?.ptr);
+            try std.testing.expectEqual(last_spelling, specialized.body.statements.items[1].variable_declaration.value.?.literal.value.string_value.?.ptr);
+            const moved_call = &ast.statements.items[5].expression_statement.expression.function_call;
+            try std.testing.expectEqual(call_storage, moved_call.arguments.items.ptr);
+            try std.testing.expectEqual(@as(usize, 1), moved_call.arguments.items.len);
+            try std.testing.expectEqual(nested_storage, moved_call.arguments.items[0].function_call.arguments.items.ptr);
+            try std.testing.expectEqual(dynamic_storage, ast.statements.items[6].expression_statement.expression.function_call.arguments.items.ptr);
+            try std.testing.expectEqual(@as(usize, 0), ast.statements.items[7].expression_statement.expression.function_call.arguments.items.len);
+            try std.testing.expectEqualStrings("recursive", try ast.statements.items[8].expression_statement.expression.function_call.function_name.identifier.name.str());
+            var structure = try Structure.init(failing, "");
+            defer structure.deinit();
+            var analysis = try Analysis.analyzeStrictBlock(failing, input.dialect().*, &ast, &structure, .{});
+            defer analysis.deinit();
+            var printer = Printer.init(failing, input.dialect().*, &.{}, .{}, null);
+            const rendered = try printer.renderBlock(&ast);
+            defer failing.free(rendered);
+            try std.testing.expect(std.mem.find(u8, rendered, "0x01") != null);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &source, false });
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &source, true });
 }

@@ -99,13 +99,28 @@ pub const CommonSubexpressionEliminator = struct {
     }
 
     pub fn getOptimizedItems(self: *CommonSubexpressionEliminator) CSEError!std.ArrayList(AssemblyItem) {
+        return self.generateOptimizedItems(true);
+    }
+
+    /// Consumes this analysis on success or error. Returned items belong to the
+    /// caller and must be destroyed with this object's allocator. Do not deinit
+    /// or otherwise use this object again after calling finish.
+    pub fn finish(self: *CommonSubexpressionEliminator) CSEError!std.ArrayList(AssemblyItem) {
+        defer self.deinit();
+        return self.generateOptimizedItems(false);
+    }
+
+    fn generateOptimizedItems(self: *CommonSubexpressionEliminator, comptime continue_analysis: bool) CSEError!std.ArrayList(AssemblyItem) {
         try self.optimizeBreakingItem();
 
+        // Feeding the breaking item can intern expressions used by code
+        // generation. Preserve that work even when no later state is needed.
         var next_initial = try self.state.clone();
-        errdefer next_initial.deinit();
+        defer if (!continue_analysis) next_initial.deinit();
+        errdefer if (continue_analysis) next_initial.deinit();
         if (self.breaking_item) |*breaking| _ = try next_initial.feedItem(breaking, false);
-        var next_state = try next_initial.clone();
-        errdefer next_state.deinit();
+        var next_state = if (continue_analysis) try next_initial.clone() else {}; // zlinter-disable-current-line no_swallow_error - comptime branch constructs a void value when continuation state is unnecessary
+        errdefer if (continue_analysis) next_state.deinit();
 
         var initial_stack: StackMap = .{};
         defer initial_stack.deinit(self.allocator);
@@ -149,13 +164,15 @@ pub const CommonSubexpressionEliminator = struct {
             try output.append(self.allocator, cloned_breaking);
         }
 
-        self.initial_state.deinit();
-        self.state.deinit();
-        self.initial_state = next_initial;
-        self.state = next_state;
-        self.store_operations.clearRetainingCapacity();
-        if (self.breaking_item) |*breaking| breaking.deinit(self.allocator);
-        self.breaking_item = null;
+        if (continue_analysis) {
+            self.initial_state.deinit();
+            self.state.deinit();
+            self.initial_state = next_initial;
+            self.state = next_state;
+            self.store_operations.clearRetainingCapacity();
+            if (self.breaking_item) |*breaking| breaking.deinit(self.allocator);
+            self.breaking_item = null;
+        }
         return output;
     }
 
@@ -690,6 +707,303 @@ test "CSE eliminates duplicate constants and folds arithmetic" {
     try std.testing.expect(output.items.len < input.len);
     try std.testing.expect(output.items[0].item_type == .Push);
     try std.testing.expectEqual(@as(u256, 14), output.items[0].data_value);
+}
+
+test "assembly CSE final output survives every analysis owner and allocation failure" {
+    const Stats = struct { bytes: usize = 0, calls: usize = 0 };
+    const Check = struct {
+        fn output(
+            allocator: std.mem.Allocator,
+            input: []const AssemblyItem,
+            version: EVMVersion,
+            final: bool,
+            separate_state: bool,
+            clone_stats: ?*Stats,
+        ) !std.ArrayList(AssemblyItem) {
+            var owned_input: std.ArrayList(AssemblyItem) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent cleanup releases the container and owned payloads on failure
+            defer deinitItems(allocator, &owned_input);
+            try owned_input.ensureTotalCapacity(allocator, input.len);
+            for (input) |*item| owned_input.appendAssumeCapacity(try item.clone(allocator));
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            var state = try KnownState.init(if (separate_state) arena.allocator() else allocator);
+            defer state.deinit();
+            var cse = try CommonSubexpressionEliminator.init(allocator, &state, version);
+            const consumed = cse.feedItems(owned_input.items, false) catch |err| {
+                cse.deinit();
+                return err;
+            };
+            if (consumed != input.len) {
+                cse.deinit();
+                return error.UnexpectedChunkBoundary;
+            }
+            if (final) return cse.finish();
+            defer cse.deinit();
+            var result = try cse.getOptimizedItems();
+            errdefer deinitItems(allocator, &result);
+            if (clone_stats) |stats| {
+                // A borrowed view selects a counting allocator only for this
+                // temporary clone. No copied allocator context escapes.
+                var counter = std.testing.FailingAllocator.init(cse.state.allocator, .{});
+                var view = cse.state;
+                view.allocator = counter.allocator();
+                {
+                    var copy = try view.clone();
+                    defer copy.deinit();
+                    try std.testing.expect(cse.state.eql(&copy));
+                }
+                try std.testing.expectEqual(counter.allocated_bytes, counter.freed_bytes);
+                stats.* = .{ .bytes = counter.allocated_bytes, .calls = counter.allocations };
+            }
+            return result;
+        }
+
+        fn run(
+            backing: std.mem.Allocator,
+            input: []const AssemblyItem,
+            version: EVMVersion,
+            final: bool,
+            separate_state: bool,
+            expected: []const AssemblyItem,
+            stats: ?*Stats,
+        ) !void {
+            var counter = std.testing.FailingAllocator.init(backing, .{});
+            defer if (counter.allocated_bytes != counter.freed_bytes)
+                @panic("CSE result or analysis owner leaked");
+            var result = try output(counter.allocator(), input, version, final, separate_state, null);
+            defer deinitItems(counter.allocator(), &result);
+            // Input copies, the CSE object, shared expression classes, and the
+            // optional state arena have all died before these values are read.
+            try std.testing.expectEqualDeep(expected, result.items);
+            if (stats) |value| value.* = .{ .bytes = counter.allocated_bytes, .calls = counter.allocations };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const I = AssemblyItem;
+    var payload = try I.initVerbatim(allocator, &.{ 0x60, 0x2a }, 0, 1);
+    defer payload.deinit(allocator);
+    const cases = [_][]const I{
+        &.{},
+        &.{ I.initPush(7, .{}), I.initPush(7, .{}), I.initInstruction(.ADD, .{}) },
+        &.{ I.initPush(0, .{}), I.initType(.PushTag, 9, .{}), I.initInstruction(.JUMPI, .{}) },
+        &.{ I.initPush(1, .{}), I.initType(.PushTag, 9, .{}), I.initInstruction(.JUMPI, .{}) },
+        &.{ I.initPush(0, .{}), I.initInstruction(.CALLDATALOAD, .{}), I.initType(.PushTag, 9, .{}), I.initInstruction(.JUMPI, .{}) },
+        &.{ I.initPush(0, .{}), I.initPush(0, .{}), I.initInstruction(.RETURN, .{}) },
+        &.{ I.initPush(32, .{}), I.initPush(0, .{}), I.initInstruction(.RETURN, .{}) },
+        &.{ I.initInstruction(.DUP1, .{}), I.initInstruction(.DUP1, .{}), I.initInstruction(.ADD, .{}) },
+        &.{I.initType(.Tag, 1, .{})},
+        &.{I.initInstruction(.MSIZE, .{})},
+        &.{payload},
+        &.{
+            I.initPush(17, .{}), I.initPush(0, .{}),             I.initInstruction(.MSTORE, .{}),
+            I.initPush(32, .{}), I.initPush(0, .{}),             I.initInstruction(.KECCAK256, .{}),
+            I.initPush(11, .{}), I.initPush(1, .{}),             I.initInstruction(.SSTORE, .{}),
+            I.initPush(1, .{}),  I.initInstruction(.SLOAD, .{}),
+        },
+    };
+    var unused: Stats = .{};
+    var baseline: Stats = .{};
+    var final_output: Stats = .{};
+    for (cases, 0..) |input, case_index| {
+        // A non-owning descriptor copy adds distinct annotations. The original
+        // fixture remains the sole owner of its verbatim payload.
+        const annotated = try allocator.dupe(I, input);
+        defer allocator.free(annotated);
+        for (annotated, 0..) |*item, index| {
+            item.debug_data = .{
+                .native_location = .{ .start = @intCast(index), .end = @intCast(index + 1), .source_name = "native.yul" },
+                .origin_location = .{ .start = @intCast(case_index), .end = @intCast(case_index + 1), .source_name = "origin.sol" },
+                .ast_id = @intCast(100 + index),
+            };
+            item.modifier_depth = index + 1;
+        }
+        for ([_]EVMVersion{ .init(.London), .init(.Shanghai) }) |version| {
+            var clone_stats: Stats = .{};
+            var expected = try Check.output(allocator, annotated, version, false, false, &clone_stats);
+            defer deinitItems(allocator, &expected);
+            unused.bytes += clone_stats.bytes;
+            unused.calls += clone_stats.calls;
+            var reference_stats: Stats = .{};
+            var finish_stats: Stats = .{};
+            try Check.run(allocator, annotated, version, false, false, expected.items, &reference_stats);
+            try Check.run(allocator, annotated, version, true, false, expected.items, &finish_stats);
+            baseline.bytes += reference_stats.bytes;
+            baseline.calls += reference_stats.calls;
+            final_output.bytes += finish_stats.bytes;
+            final_output.calls += finish_stats.calls;
+            for ([_]bool{ false, true }) |final| for ([_]bool{ false, true }) |separate_state|
+                try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ annotated, version, final, separate_state, expected.items, null });
+        }
+    }
+    try std.testing.expect(unused.bytes > 0 and unused.calls > 0);
+    try std.testing.expectEqual(unused.bytes, baseline.bytes - final_output.bytes);
+    try std.testing.expectEqual(unused.calls, baseline.calls - final_output.calls);
+    std.debug.print("CSE fixtures: continuation clone {d} bytes / {d} allocations; ordinary output {d} / {d}; final output {d} / {d}\n", .{
+        unused.bytes, unused.calls, baseline.bytes, baseline.calls, final_output.bytes, final_output.calls,
+    });
+}
+
+test "assembly CSE generation preserves input maps through owner destruction and allocation failure" {
+    const Shape = enum { empty, constant, unchanged, duplicate, drop, swap, zero, unavailable, invalid, deep };
+    const Stats = struct { bytes: usize = 0, calls: usize = 0, clone_bytes: usize = 0, clone_calls: usize = 0 };
+    const Check = struct {
+        fn debug(value: i64) DebugData {
+            return .{
+                .native_location = .{ .start = 1, .end = 4, .source_name = "native.yul" },
+                .origin_location = .{ .start = 5, .end = 9, .source_name = "origin.sol" },
+                .ast_id = value,
+            };
+        }
+
+        fn output(allocator: std.mem.Allocator, shape: Shape, version: EVMVersion, separate_maps: bool, stats: ?*Stats) !std.ArrayList(AssemblyItem) {
+            var classes = ExpressionClasses.init(allocator);
+            defer classes.deinit();
+            var generator = try CSECodeGenerator.init(allocator, &classes, &.{}, version);
+            defer generator.deinit();
+            // Maps and their optional arena die before the generator, on every
+            // exit. Only generated items may outlive all these owners.
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const map_allocator = if (separate_maps) arena.allocator() else allocator;
+            var initial: StackMap = .{};
+            defer initial.deinit(map_allocator);
+            var target: StackMap = .{};
+            defer target.deinit(map_allocator);
+            const seven = try classes.makeConstant(7, debug(7));
+            const eight = try classes.makeConstant(8, debug(8));
+            switch (shape) {
+                .empty => {},
+                .constant => _ = try target.insert(map_allocator, 1, seven),
+                .unchanged, .duplicate, .drop => {
+                    _ = try initial.insert(map_allocator, 1, seven);
+                    if (shape != .drop) _ = try target.insert(map_allocator, 1, seven);
+                    if (shape == .duplicate) _ = try target.insert(map_allocator, 2, seven);
+                },
+                .swap => {
+                    _ = try initial.insert(map_allocator, 1, seven);
+                    _ = try initial.insert(map_allocator, 2, eight);
+                    _ = try target.insert(map_allocator, 1, eight);
+                    _ = try target.insert(map_allocator, 2, seven);
+                },
+                .zero => _ = try target.insert(map_allocator, 1, try classes.makeConstant(0, debug(0))),
+                .unavailable => _ = try target.insert(map_allocator, 1, try classes.newClass(debug(10))),
+                .invalid => _ = try target.insert(map_allocator, 1, ExpressionClassesModule.invalid_id),
+                .deep => {
+                    for (1..18) |position| {
+                        const id = try classes.newClass(debug(@intCast(position)));
+                        _ = try initial.insert(map_allocator, @intCast(position), id);
+                        _ = try target.insert(map_allocator, @intCast(position), id);
+                    }
+                    _ = try target.insert(map_allocator, 18, initial.items()[0].value);
+                },
+            }
+            var initial_snapshot: [18]StackMap.Entry = undefined;
+            var target_snapshot: [18]StackMap.Entry = undefined;
+            @memcpy(initial_snapshot[0..initial.len()], initial.items());
+            @memcpy(target_snapshot[0..target.len()], target.items());
+            const initial_view = initial.entries;
+            const target_view = target.entries;
+            if (stats) |value| {
+                var counter = std.testing.FailingAllocator.init(allocator, .{});
+                {
+                    var clone = try target.clone(counter.allocator());
+                    defer clone.deinit(counter.allocator());
+                    try std.testing.expectEqualDeep(target.items(), clone.items());
+                }
+                try std.testing.expectEqual(counter.allocated_bytes, counter.freed_bytes);
+                value.clone_bytes = counter.allocated_bytes;
+                value.clone_calls = counter.allocations;
+            }
+            const result = generator.generateCode(1, @intCast(initial.len()), &initial, &target);
+            errdefer if (result) |items| {
+                var owned = items;
+                deinitItems(allocator, &owned);
+            } else |_| {};
+            try std.testing.expectEqual(initial_view.items.ptr, initial.entries.items.ptr);
+            try std.testing.expectEqual(target_view.items.ptr, target.entries.items.ptr);
+            try std.testing.expectEqual(initial_view.capacity, initial.entries.capacity);
+            try std.testing.expectEqual(target_view.capacity, target.entries.capacity);
+            try std.testing.expectEqualDeep(initial_snapshot[0..initial_view.items.len], initial.items());
+            try std.testing.expectEqualDeep(target_snapshot[0..target_view.items.len], target.items());
+            if (result) |items| {
+                try std.testing.expect(shape != .unavailable and shape != .invalid and shape != .deep);
+                return items;
+            } else |err| {
+                if (err == error.OutOfMemory) return err;
+                const expected: CSEError = switch (shape) {
+                    .unavailable => error.ItemNotAvailable,
+                    .invalid => error.InvalidExpressionId,
+                    .deep => error.StackTooDeep,
+                    else => return err,
+                };
+                try std.testing.expectEqual(expected, err);
+                return .empty;
+            }
+        }
+
+        fn run(backing: std.mem.Allocator, shape: Shape, version: EVMVersion, separate_maps: bool, expected: []const AssemblyItem, stats: ?*Stats) !void {
+            var counter = std.testing.FailingAllocator.init(backing, .{});
+            defer if (counter.allocated_bytes != counter.freed_bytes) @panic("CSE generator or output leaked");
+            var items = try output(counter.allocator(), shape, version, separate_maps, stats);
+            defer deinitItems(counter.allocator(), &items);
+            try std.testing.expectEqualDeep(expected, items.items);
+            if (stats) |value| {
+                value.bytes = counter.allocated_bytes;
+                value.calls = counter.allocations;
+            }
+        }
+    };
+    const allocator = std.testing.allocator;
+    const I = AssemblyItem;
+    var total: Stats = .{};
+    for (std.enums.values(Shape)) |shape| {
+        const expected: []const I = switch (shape) {
+            .constant => &.{I.initPush(7, Check.debug(7))},
+            .duplicate => &.{I.initInstruction(.DUP1, Check.debug(7))},
+            .drop => &.{I.initInstruction(.POP, .{})},
+            .swap => &.{I.initInstruction(.SWAP1, Check.debug(8))},
+            .zero => &.{I.initPush(0, Check.debug(0))},
+            else => &.{},
+        };
+        for ([_]EVMVersion{ .init(.London), .init(.Shanghai) }) |version| {
+            var stats: Stats = .{};
+            try Check.run(allocator, shape, version, false, expected, &stats);
+            total.bytes += stats.bytes;
+            total.calls += stats.calls;
+            total.clone_bytes += stats.clone_bytes;
+            total.clone_calls += stats.clone_calls;
+            for ([_]bool{ false, true }) |separate_maps|
+                try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ shape, version, separate_maps, expected, null });
+        }
+    }
+    std.debug.print("CSE target fixtures: clone {d} bytes / {d} allocations; whole helper {d} / {d}\n", .{
+        total.clone_bytes, total.clone_calls, total.bytes, total.calls,
+    });
+}
+
+test "assembly CSE preserves reusable continuation states across blocks" {
+    const allocator = std.testing.allocator;
+    var state = try KnownState.init(allocator);
+    defer state.deinit();
+    var cse = try CommonSubexpressionEliminator.init(allocator, &state, .current());
+    defer cse.deinit();
+    const I = AssemblyItem;
+    const first = [_]I{ I.initPush(7, .{}), I.initInstruction(.MSIZE, .{}) };
+    try std.testing.expectEqual(first.len, try cse.feedItems(&first, false));
+    var first_output = try cse.getOptimizedItems();
+    defer deinitItems(allocator, &first_output);
+    try std.testing.expect(cse.initial_state.eql(&cse.state));
+    try std.testing.expect(cse.initial_state.stack_elements.items().ptr != cse.state.stack_elements.items().ptr);
+    const height = cse.initial_state.stack_height;
+    const next = [_]I{I.initInstruction(.DUP1, .{})};
+    try std.testing.expectEqual(next.len, try cse.feedItems(&next, false));
+    try std.testing.expectEqual(height, cse.initial_state.stack_height);
+    try std.testing.expectEqual(height + 1, cse.state.stack_height);
+    var next_output = try cse.getOptimizedItems();
+    defer deinitItems(allocator, &next_output);
+    try std.testing.expect(cse.initial_state.eql(&cse.state));
+    try std.testing.expect(cse.breaking_item == null);
+    try std.testing.expectEqual(@as(usize, 0), cse.store_operations.items.len);
 }
 
 test "CSE specializes constant conditional breaking items" {

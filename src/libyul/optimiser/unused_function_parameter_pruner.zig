@@ -38,7 +38,7 @@ pub const UnusedFunctionParameterPruner = struct {
     pub const name = "UnusedFunctionParameterPruner";
 
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
-        const allocator = context.dispenser.allocator;
+        const allocator = context.scratchAllocator();
         var references = try NameCollectorModule.VariableReferencesCounter.countReferencesBlock(
             allocator,
             ast,
@@ -90,9 +90,10 @@ pub const UnusedFunctionParameterPruner = struct {
         defer displacer.deinit();
         try displacer.run(ast);
 
+        const ast_allocator = context.dispenser.allocator;
         var output: std.ArrayList(AST.Statement) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
-        errdefer deinitStatements(allocator, &output);
-        try output.ensureTotalCapacity(allocator, ast.statements.items.len + usage.len());
+        errdefer deinitStatements(ast_allocator, &output);
+        try output.ensureTotalCapacity(ast_allocator, ast.statements.items.len + usage.len());
         for (ast.statements.items) |*statement| {
             if (statement.* == .function_definition and
                 originalName(displacer.translations(), statement.function_definition.name) != null)
@@ -101,18 +102,17 @@ pub const UnusedFunctionParameterPruner = struct {
                 const original_name = originalName(displacer.translations(), linking_name).?;
                 const masks = usage.get(original_name) orelse return error.MissingUsageMask;
                 var linking = try Common.createLinkingFunction(
-                    allocator,
+                    ast_allocator,
                     &statement.function_definition,
                     masks.borrowed(),
                     original_name,
                     linking_name,
                     context.dispenser,
                 );
-                errdefer linking.deinit(allocator);
+                errdefer linking.deinit(ast_allocator);
                 statement.function_definition.name = original_name;
-                try filterNames(allocator, &statement.function_definition.parameters, masks.parameters.items);
+                try filterNames(&statement.function_definition.parameters, masks.parameters.items);
                 try filterNames(
-                    allocator,
                     &statement.function_definition.return_variables,
                     masks.returns.items,
                 );
@@ -125,7 +125,7 @@ pub const UnusedFunctionParameterPruner = struct {
                 statement.* = .{ .block = .{} };
             }
         }
-        ast.statements.deinit(allocator);
+        ast.statements.deinit(ast_allocator);
         ast.statements = output;
         output = .empty;
     }
@@ -139,25 +139,38 @@ fn originalName(
     return null;
 }
 
-fn filterNames(
-    allocator: std.mem.Allocator,
-    names: *AST.NameWithDebugDataList,
-    mask: []const bool,
-) !void {
+fn filterNames(names: *AST.NameWithDebugDataList, mask: []const bool) !void {
     if (names.items.len != mask.len) return error.InvalidUsageMask;
-    var filtered: AST.NameWithDebugDataList = .empty;
-    errdefer filtered.deinit(allocator);
-    var count: usize = 0;
-    for (mask) |used| if (used) {
-        count += 1;
+    var kept: usize = 0;
+    for (names.items, mask) |entry, used| if (used) {
+        names.items[kept] = entry;
+        kept += 1;
     };
-    try filtered.ensureTotalCapacity(allocator, count);
-    for (names.items, mask) |entry, used| if (used) filtered.appendAssumeCapacity(entry);
-    names.deinit(allocator);
-    names.* = filtered;
+    names.items.len = kept;
 }
 
 fn deinitStatements(allocator: std.mem.Allocator, statements: *std.ArrayList(AST.Statement)) void {
     for (statements.items) |*statement| statement.deinit(allocator);
     statements.deinit(allocator);
+}
+
+test "unused parameter filtering compacts names in their existing buffer" {
+    const allocator = std.testing.allocator;
+    var names: AST.NameWithDebugDataList = .empty;
+    defer names.deinit(allocator);
+    for ([_][]const u8{ "first", "discarded", "last" }) |name|
+        try names.append(allocator, .{ .name = try YulName.init(name) });
+    const buffer = names.items.ptr;
+    try std.testing.expectError(error.InvalidUsageMask, filterNames(&names, &.{true}));
+    try std.testing.expectEqual(@as(usize, 3), names.items.len);
+    try filterNames(&names, &.{ true, false, true });
+    try std.testing.expectEqual(buffer, names.items.ptr);
+    try std.testing.expectEqual(@as(usize, 2), names.items.len);
+    try std.testing.expectEqualStrings("first", try names.items[0].name.str());
+    try std.testing.expectEqualStrings("last", try names.items[1].name.str());
+    try filterNames(&names, &.{ true, true });
+    try std.testing.expectEqual(buffer, names.items.ptr);
+    try filterNames(&names, &.{ false, false });
+    try std.testing.expectEqual(@as(usize, 0), names.items.len);
+    try std.testing.expectEqual(buffer, names.items.ptr);
 }

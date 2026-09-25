@@ -173,7 +173,7 @@ const ExpressionGraph = struct {
     fn addBorrowed(self: *ExpressionGraph, expression: *const AST.Expression) anyerror!ExpressionId {
         for (self.nodes.items, 0..) |*node, index| {
             if (node.kind != .borrowed) continue;
-            if (borrowedEqual(node.source.?, expression)) return @intCast(index);
+            if (node.source.? == expression) return @intCast(index);
         }
         if (self.nodes.items.len >= std.math.maxInt(ExpressionId))
             return error.ExpressionCapacity;
@@ -196,6 +196,16 @@ const ExpressionGraph = struct {
         self.nodes.items[id].owns_arguments = true;
         arguments_owned = false;
         return id;
+    }
+
+    // Pattern matching compares values, but captured AST occurrences retain
+    // their own annotations. Interning equal identifiers here loses the source
+    // location of the later occurrence when a rule returns that capture.
+    pub fn sameExpression(self: *const ExpressionGraph, left: ExpressionId, right: ExpressionId) bool {
+        if (left == right) return true;
+        const lhs = self.getNode(left) orelse return false;
+        const rhs = self.getNode(right) orelse return false;
+        return lhs.kind == .borrowed and rhs.kind == .borrowed and borrowedEqual(lhs.source.?, rhs.source.?);
     }
 
     pub fn knownConstantValue(self: *const ExpressionGraph, id: ExpressionId) ?u256 {
@@ -394,4 +404,74 @@ test "Yul simplification rules preserve identifier identity while resolving SSA 
     defer owned_replacement.deinit(allocator);
     try std.testing.expect(owned_replacement == .identifier);
     try std.testing.expect(owned_replacement.identifier.name.eql(x));
+}
+
+test "Yul simplification rules preserve captured occurrence and literal annotations" {
+    const DebugData = @import("../../liblangutil/debug_data.zig").DebugData;
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialectModule.EVMDialect.init(allocator, .current(), false);
+    defer dialect.deinit();
+    const x = try YulName.init("x");
+    const debug_a: DebugData = .{ .origin_location = .{ .start = 1, .end = 2, .source_name = "input.sol" } };
+    const debug_b: DebugData = .{ .origin_location = .{ .start = 3, .end = 4, .source_name = "input.sol" } };
+    const debug_constant: DebugData = .{ .origin_location = .{ .start = 5, .end = 6, .source_name = "input.sol" } };
+    var first: AST.Expression = .{ .identifier = .{ .name = x, .debug_data = debug_a } };
+    var second: AST.Expression = .{ .identifier = .{ .name = x, .debug_data = debug_b } };
+    var literal: AST.Expression = .{ .literal = .{
+        .debug_data = debug_constant,
+        .kind = .Number,
+        .value = try AST.LiteralValue.initNumeric(allocator, 7, "0x07"),
+    } };
+    defer literal.deinit(allocator);
+    var graph = ExpressionGraph.init(allocator, dialect.dialect(), &dialect, .{}, .{});
+    defer graph.deinit();
+    const a = try graph.addBorrowed(&first);
+    const b = try graph.addBorrowed(&second);
+    const c = try graph.addBorrowed(&literal);
+    try std.testing.expect(a != b);
+    try std.testing.expect(graph.sameExpression(a, b));
+    const inner = try graph.makeOperation(.ADD, &.{ a, c }, .{});
+    const replacement = (try RuleList.simplifyWithOptions(&graph, .ADD, &.{ inner, b }, .{}, .{ .for_yul_optimizer = true })).?;
+    var result = try graph.toExpression(replacement);
+    defer result.deinit(allocator);
+    const sum = result.function_call.arguments.items[0].function_call;
+    try std.testing.expect(sum.arguments.items[0].debugData().?.origin_location.eql(debug_a.origin_location));
+    try std.testing.expect(sum.arguments.items[1].debugData().?.origin_location.eql(debug_b.origin_location));
+    const captured = result.function_call.arguments.items[1].literal;
+    try std.testing.expect(captured.debug_data.?.origin_location.eql(debug_constant.origin_location));
+    try std.testing.expectEqualStrings("0x07", (try captured.value.hint()).?);
+
+    // Occurrence IDs must not prevent rules that require equal operands.
+    const cancelled = (try RuleList.simplifyWithOptions(&graph, .SUB, &.{ a, b }, .{}, .{ .for_yul_optimizer = true })).?;
+    try std.testing.expectEqual(@as(?u256, 0), graph.knownConstantValue(cancelled));
+
+    // Repeated captures use the first occurrence in left-to-right pattern
+    // order, including when that occurrence is inside an SSA initializer.
+    var other: AST.Expression = .{ .identifier = .{ .name = try YulName.init("y") } };
+    const y = try graph.addBorrowed(&other);
+    for ([_]Instruction{ .ADD, .SUB }) |instruction| {
+        const nested = try graph.makeOperation(instruction, &.{ a, c }, .{});
+        const moved = (try RuleList.simplify(&graph, .SUB, &.{ nested, y }, .{})).?;
+        var moved_expression = try graph.toExpression(moved);
+        defer moved_expression.deinit(allocator);
+        const moved_literal = moved_expression.function_call.arguments.items[1].literal;
+        try std.testing.expect(moved_literal.debug_data.?.origin_location.eql(debug_constant.origin_location));
+        try std.testing.expectEqualStrings("0x07", (try moved_literal.value.hint()).?);
+    }
+    for ([_]Instruction{ .AND, .OR }) |instruction| {
+        const opposite: Instruction = if (instruction == .AND) .OR else .AND;
+        for ([_][2]ExpressionId{ .{ a, y }, .{ y, a } }) |operands| {
+            const nested = try graph.makeOperation(instruction, &operands, .{});
+            const absorbed = (try RuleList.simplify(&graph, opposite, &.{ nested, b }, .{})).?;
+            try std.testing.expectEqual(a, absorbed);
+            const absorbed_left = (try RuleList.simplify(&graph, opposite, &.{ b, nested }, .{})).?;
+            try std.testing.expectEqual(b, absorbed_left);
+            const deduplicated = (try RuleList.simplify(&graph, instruction, &.{ b, nested }, .{})).?;
+            const actual = graph.operationArguments(deduplicated, instruction).?;
+            try std.testing.expectEqualSlices(ExpressionId, if (operands[0] == a) &.{ b, y } else &.{ y, b }, actual);
+        }
+    }
+    const extension = try graph.makeOperation(.SIGNEXTEND, &.{ a, y }, .{});
+    const extended = (try RuleList.simplify(&graph, .SIGNEXTEND, &.{ b, extension }, .{})).?;
+    try std.testing.expectEqualSlices(ExpressionId, &.{ b, y }, graph.operationArguments(extended, .SIGNEXTEND).?);
 }

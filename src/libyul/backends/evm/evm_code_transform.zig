@@ -120,7 +120,7 @@ pub const CodeTransform = struct {
         context.* = CodeTransformContext.init(allocator);
         errdefer context.deinit();
         if (allow_stack_opt) {
-            context.variable_references.deinit();
+            // The initial map is empty. Keep it valid if counting fails.
             context.variable_references = try VariableReferenceCounterModule.VariableReferenceCounter.run(
                 allocator,
                 analysis_info,
@@ -162,7 +162,7 @@ pub const CodeTransform = struct {
         context.* = CodeTransformContext.init(allocator);
         errdefer context.deinit();
         if (allow_stack_opt) {
-            context.variable_references.deinit();
+            // The initial map is empty. Keep it valid if counting fails.
             context.variable_references = try VariableReferenceCounterModule.VariableReferenceCounter.run(
                 allocator,
                 analysis_info,
@@ -617,24 +617,21 @@ pub const CodeTransform = struct {
         if (stack_layout.items.len > self.dialect.reachableStackDepth() + 1) {
             const unreachable_slots = stack_layout.items.len - (self.dialect.reachableStackDepth() + 1);
             const function_name = try function_definition.name.str();
+            const target_height = (try self.assembly.stackHeight()) -
+                @as(i32, @intCast(function_definition.parameters.items.len));
             const message = try std.fmt.allocPrint(
                 self.allocator,
                 "The function {s} has {d} parameters or return variables too many to fit the stack size.",
                 .{ function_name, unreachable_slots },
             );
-            defer self.allocator.free(message);
-            const stack_error = try StackTooDeepError.initInFunction(
-                self.allocator,
-                function_definition.name,
-                .{},
-                @intCast(unreachable_slots),
-                message,
-            );
-            try self.stackError(
-                stack_error,
-                (try self.assembly.stackHeight()) -
-                    @as(i32, @intCast(function_definition.parameters.items.len)),
-            );
+            // stackError consumes the formatted message, including on failure.
+            try self.stackError(.{
+                .allocator = self.allocator,
+                .function_name = function_definition.name,
+                .variable = .{},
+                .depth = @intCast(unreachable_slots),
+                .message = message,
+            }, target_height);
         } else {
             while (stack_layout.items.len != 0 and
                 stack_layout.items[stack_layout.items.len - 1] !=
@@ -916,16 +913,13 @@ pub const CodeTransform = struct {
                     @import("../../../libsolutil/stack_too_deep_string.zig").stack_too_deep_string,
                 },
             );
-            defer self.allocator.free(message);
-            try self.stack_errors.append(
-                self.allocator,
-                try StackTooDeepError.init(
-                    self.allocator,
-                    variable_name,
-                    @intCast(excess),
-                    message,
-                ),
-            );
+            const stack_error: StackTooDeepError = .{
+                .allocator = self.allocator,
+                .variable = variable_name,
+                .depth = @intCast(excess),
+                .message = message,
+            };
+            try stack_error.appendTo(self.allocator, &self.stack_errors);
             try self.assembly.markAsInvalid();
             return if (for_swap) 2 else 1;
         }
@@ -944,16 +938,19 @@ pub const CodeTransform = struct {
     }
 
     fn stackError(self: *CodeTransform, stack_error: StackTooDeepError, target_height: i32) !void {
-        errdefer {
-            var owned_error = stack_error;
-            owned_error.deinit();
+        {
+            errdefer {
+                var owned_error = stack_error;
+                owned_error.deinit();
+            }
+            try self.assembly.appendInstruction(.INVALID);
+            while (try self.assembly.stackHeight() > target_height)
+                try self.assembly.appendInstruction(.POP);
+            while (try self.assembly.stackHeight() < target_height)
+                try self.assembly.appendConstant(0);
+            try self.stack_errors.append(self.allocator, stack_error);
         }
-        try self.assembly.appendInstruction(.INVALID);
-        while (try self.assembly.stackHeight() > target_height)
-            try self.assembly.appendInstruction(.POP);
-        while (try self.assembly.stackHeight() < target_height)
-            try self.assembly.appendConstant(0);
-        try self.stack_errors.append(self.allocator, stack_error);
+        // The list owns the message even if invalidation fails afterward.
         try self.assembly.markAsInvalid();
     }
 };
@@ -1094,4 +1091,128 @@ test "classic transform emits the expected stack program for a local value" {
         &.{ 0x60, 0x02, 0x60, 0x01, 0x01, 0x80, 0x50, 0x50 },
         object.bytecode.items,
     );
+}
+
+test "stack diagnostic classic recovery owns messages across assembly failures" {
+    const Stage = enum { none, invalid, height, pop, constant, mark };
+    const Mock = struct {
+        stage: Stage,
+        height: i32,
+
+        fn instruction(pointer: *anyopaque, value: Instruction) !void {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            if ((self.stage == .invalid and value == .INVALID) or
+                (self.stage == .pop and value == .POP)) return error.AssemblyProbeFailure;
+            if (value == .POP) self.height -= 1;
+        }
+
+        fn stackHeight(pointer: *const anyopaque) !i32 {
+            const self: *const @This() = @ptrCast(@alignCast(pointer));
+            if (self.stage == .height) return error.AssemblyProbeFailure;
+            return self.height;
+        }
+
+        fn constant(pointer: *anyopaque, _: u256) !void {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            if (self.stage == .constant) return error.AssemblyProbeFailure;
+            self.height += 1;
+        }
+
+        fn mark(pointer: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            if (self.stage == .mark) return error.AssemblyProbeFailure;
+        }
+    };
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, stage: Stage, initial_height: i32, target_height: i32) !void {
+            var mock: Mock = .{ .stage = stage, .height = initial_height };
+            // Recovery uses only the allocator, assembly and diagnostic list.
+            var transform: CodeTransform = undefined;
+            transform.allocator = allocator;
+            transform.assembly = .{ .context = &mock, .vtable = &.{
+                .append_instruction = Mock.instruction,
+                .stack_height = Mock.stackHeight,
+                .append_constant = Mock.constant,
+                .mark_as_invalid = Mock.mark,
+            } };
+            transform.stack_errors = .empty;
+            defer {
+                for (transform.stack_errors.items) |*value| value.deinit();
+                transform.stack_errors.deinit(allocator);
+            }
+            const owned = try StackTooDeepError.init(allocator, .{}, 2, "classic stack diagnostic");
+            const message_pointer = owned.message.ptr;
+            if (transform.stackError(owned, target_height)) |_| {
+                try std.testing.expectEqual(Stage.none, stage);
+            } else |err| {
+                if (err != error.AssemblyProbeFailure) return err;
+                try std.testing.expect(stage != .none);
+            }
+            const published = stage == .none or stage == .mark;
+            try std.testing.expectEqual(@intFromBool(published), transform.stack_errors.items.len);
+            if (published) {
+                try std.testing.expectEqual(message_pointer, transform.stack_errors.items[0].message.ptr);
+                try std.testing.expectEqualStrings("classic stack diagnostic", transform.stack_errors.items[0].message);
+                try std.testing.expectEqual(target_height, mock.height);
+            }
+        }
+    };
+    for ([_]Stage{ .none, .invalid, .height, .pop, .mark }) |stage|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{ stage, @as(i32, 1), @as(i32, 0) });
+    for ([_]Stage{ .none, .constant }) |stage|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{ stage, @as(i32, 0), @as(i32, 1) });
+}
+
+test "stack diagnostic classic variable formatting releases allocation failures" {
+    const Mock = struct {
+        height: i32,
+        marked: bool = false,
+
+        fn stackHeight(pointer: *const anyopaque) !i32 {
+            const self: *const @This() = @ptrCast(@alignCast(pointer));
+            return self.height;
+        }
+
+        fn mark(pointer: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            self.marked = true;
+        }
+    };
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, dialect: *const EVMDialect, context: *CodeTransformContext, variable: *const ScopeModule.Variable, for_swap: bool) !void {
+            var mock: Mock = .{ .height = if (for_swap) 18 else 17 };
+            // Variable diagnostics read only these fields and the frozen map.
+            var transform: CodeTransform = undefined;
+            transform.allocator = allocator;
+            transform.assembly = .{ .context = &mock, .vtable = &.{
+                .stack_height = Mock.stackHeight,
+                .mark_as_invalid = Mock.mark,
+            } };
+            transform.dialect = dialect;
+            transform.context = context;
+            transform.stack_errors = .empty;
+            defer {
+                for (transform.stack_errors.items) |*value| value.deinit();
+                transform.stack_errors.deinit(allocator);
+            }
+            try std.testing.expectEqual(@as(usize, if (for_swap) 2 else 1), try transform.variableHeightDiff(variable, variable.name, for_swap));
+            try std.testing.expect(mock.marked);
+            try std.testing.expectEqual(@as(usize, 1), transform.stack_errors.items.len);
+            const diagnostic = transform.stack_errors.items[0];
+            try std.testing.expect(diagnostic.function_name.empty());
+            try std.testing.expectEqual(variable.name, diagnostic.variable);
+            try std.testing.expectEqual(@as(i32, 1), diagnostic.depth);
+            try std.testing.expectEqualStrings("Variable variable is 1 slot(s) too deep inside the stack. " ++
+                @import("../../../libsolutil/stack_too_deep_string.zig").stack_too_deep_string, diagnostic.message);
+        }
+    };
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialect.init(allocator, .init(.Cancun), false);
+    defer dialect.deinit();
+    var context = CodeTransformContext.init(allocator);
+    defer context.deinit();
+    const variable: ScopeModule.Variable = .{ .name = try YulName.init("variable") };
+    try context.variable_stack_heights.put(&variable, 0);
+    for ([_]bool{ false, true }) |for_swap|
+        try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &dialect, &context, &variable, for_swap });
 }

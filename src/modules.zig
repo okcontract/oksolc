@@ -91,6 +91,8 @@ pub const libevmasm = struct {
 
 pub const libyul = struct {
     pub const ast = @import("libyul/ast.zig");
+    pub const ast_builder = @import("libyul/ast_builder.zig");
+    pub const ast_template = @import("libyul/ast_template.zig");
     pub const ast_forward = @import("libyul/ast_forward.zig");
     pub const ast_label_registry = @import("libyul/ast_label_registry.zig");
     pub const asm_analysis = @import("libyul/asm_analysis.zig");

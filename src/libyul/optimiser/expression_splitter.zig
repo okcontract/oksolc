@@ -12,8 +12,10 @@ const Utilities = @import("../utilities.zig");
 
 pub const ExpressionSplitter = struct {
     allocator: std.mem.Allocator,
+    scratch_allocator: std.mem.Allocator,
     dialect: AST.Dialect,
     dispenser: *NameDispenser,
+    // Scratch owns the slots; allocator owns their pending AST payloads.
     statements_to_prefix: std.ArrayList(AST.Statement) = .empty,
 
     pub const name = "ExpressionSplitter";
@@ -21,33 +23,32 @@ pub const ExpressionSplitter = struct {
     pub fn run(context: *OptimiserStepContext, ast: *AST.Block) anyerror!void {
         var splitter: ExpressionSplitter = .{
             .allocator = context.dispenser.allocator,
+            .scratch_allocator = context.scratchAllocator(),
             .dialect = context.dialect,
             .dispenser = context.dispenser,
         };
-        defer deinitStatements(splitter.allocator, &splitter.statements_to_prefix);
+        defer deinitStatements(splitter.allocator, splitter.scratch_allocator, &splitter.statements_to_prefix);
         try splitter.visitBlock(ast);
     }
 
     fn visitBlock(self: *ExpressionSplitter, block: *AST.Block) anyerror!void {
-        const saved = self.statements_to_prefix;
-        self.statements_to_prefix = .empty;
-        defer {
-            deinitStatements(self.allocator, &self.statements_to_prefix);
-            self.statements_to_prefix = saved;
-        }
+        // Ancestors may have pending prefixes (for example an if condition).
+        // This block borrows the reusable suffix and transfers only that suffix.
+        // On failure, run() destroys every still-pending node.
+        const prefix_start = self.statements_to_prefix.items.len;
 
         var index: usize = 0;
         while (index < block.statements.items.len) {
-            std.debug.assert(self.statements_to_prefix.items.len == 0);
+            std.debug.assert(self.statements_to_prefix.items.len == prefix_start);
             try self.visitStatement(&block.statements.items[index]);
-            const prefix_count = self.statements_to_prefix.items.len;
+            const prefix_count = self.statements_to_prefix.items.len - prefix_start;
             if (prefix_count != 0) {
                 try block.statements.insertSlice(
                     self.allocator,
                     index,
-                    self.statements_to_prefix.items,
+                    self.statements_to_prefix.items[prefix_start..],
                 );
-                self.statements_to_prefix.clearRetainingCapacity();
+                self.statements_to_prefix.shrinkRetainingCapacity(prefix_start);
                 index += prefix_count;
             }
             index += 1;
@@ -106,10 +107,10 @@ pub const ExpressionSplitter = struct {
             .identifier => unreachable,
             .literal => |*value| value.debug_data,
         };
-        var variables: AST.NameWithDebugDataList = .empty;
+        var variables = try AST.NameWithDebugDataList.initCapacity(self.allocator, 1);
         errdefer variables.deinit(self.allocator);
-        try variables.append(self.allocator, .{ .debug_data = debug_data, .name = temporary });
-        try self.statements_to_prefix.ensureUnusedCapacity(self.allocator, 1);
+        variables.appendAssumeCapacity(.{ .debug_data = debug_data, .name = temporary });
+        try self.statements_to_prefix.ensureUnusedCapacity(self.scratch_allocator, 1);
         const moved = expression.*;
         const moved_pointer = try self.allocator.create(AST.Expression);
         moved_pointer.* = moved;
@@ -123,7 +124,7 @@ pub const ExpressionSplitter = struct {
     }
 };
 
-fn deinitStatements(allocator: std.mem.Allocator, statements: *std.ArrayList(AST.Statement)) void {
+fn deinitStatements(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, statements: *std.ArrayList(AST.Statement)) void {
     for (statements.items) |*statement| statement.deinit(allocator);
-    statements.deinit(allocator);
+    statements.deinit(scratch_allocator);
 }

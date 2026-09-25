@@ -300,10 +300,13 @@ pub const ControlFlowSideEffectsCollector = struct {
         while (flows.next()) |entry| {
             const function = entry.key_ptr.*;
             const state_index = self.states.items.len;
-            var state = FunctionState.init(self.allocator, function, entry.value_ptr.*);
-            errdefer state.deinit(self.allocator);
-            try state.pending.append(self.allocator, entry.value_ptr.entry);
-            try self.states.append(self.allocator, state);
+            {
+                var state = FunctionState.init(self.allocator, function, entry.value_ptr.*);
+                errdefer state.deinit(self.allocator);
+                try state.pending.append(self.allocator, entry.value_ptr.entry);
+                try self.states.append(self.allocator, state);
+            } // The collector owns the state before the following map writes.
+
             try self.state_index.put(function, state_index);
             try self.function_side_effects.put(function, .{
                 .can_terminate = false,

@@ -74,6 +74,41 @@ const ExpressionKeyContext = struct {
 
 const ExpressionMap = std.HashMapUnmanaged(ExpressionKey, Id, ExpressionKeyContext, 80);
 
+/// A lookup borrows its input or caller-local normalization storage. Larger
+/// commutative argument lists own a temporary buffer, transferable on a miss.
+const NormalizedArguments = struct {
+    items: []const Id,
+    owned: ?[]Id = null,
+
+    fn init(allocator: std.mem.Allocator, item: *const AssemblyItem, arguments: []const Id, buffer: []Id) !NormalizedArguments {
+        if (!SemanticInformation.isCommutativeOperation(item) or arguments.len < 2)
+            return .{ .items = arguments };
+        const normalized = if (arguments.len <= buffer.len)
+            buffer[0..arguments.len]
+        else
+            try allocator.alloc(Id, arguments.len);
+        @memcpy(normalized, arguments);
+        std.sort.insertion(Id, normalized, {}, std.sort.asc(Id));
+        return .{
+            .items = normalized,
+            .owned = if (arguments.len > buffer.len) normalized else null,
+        };
+    }
+
+    fn deinit(self: *NormalizedArguments, allocator: std.mem.Allocator) void {
+        if (self.owned) |owned| allocator.free(owned);
+        self.* = undefined;
+    }
+
+    fn takeOwned(self: *NormalizedArguments, allocator: std.mem.Allocator) ![]Id {
+        if (self.owned) |owned| {
+            self.owned = null;
+            return owned;
+        }
+        return allocator.dupe(Id, self.items);
+    }
+};
+
 pub const ExpressionError = std.mem.Allocator.Error || SemanticInformation.SemanticError || error{
     InvalidExpressionId,
     ExpressionCapacity,
@@ -123,15 +158,17 @@ pub const ExpressionClasses = struct {
         if (self.representatives.items.len >= std.math.maxInt(Id))
             return error.ExpressionCapacity;
 
-        const normalized = try self.allocator.dupe(Id, arguments);
+        var argument_buffer: [2]Id = undefined;
+        var lookup = try NormalizedArguments.init(self.allocator, item, arguments, &argument_buffer);
+        defer lookup.deinit(self.allocator);
+        const deterministic = try SemanticInformation.isDeterministic(item);
+        if (deterministic)
+            if (self.expressions.get(makeKey(item, lookup.items, sequence_number))) |existing| return existing;
+
+        const normalized = try lookup.takeOwned(self.allocator);
         var normalized_owned = true;
         defer if (normalized_owned) self.allocator.free(normalized);
-        if (SemanticInformation.isCommutativeOperation(item))
-            std.sort.insertion(Id, normalized, {}, std.sort.asc(Id));
-
-        const deterministic = try SemanticInformation.isDeterministic(item);
         const lookup_key = makeKey(item, normalized, sequence_number);
-        if (deterministic) if (self.expressions.get(lookup_key)) |existing| return existing;
 
         if (deterministic and item.item_type == .Operation) {
             if (try RuleList.simplify(
@@ -200,13 +237,15 @@ pub const ExpressionClasses = struct {
         _: bool,
     ) ExpressionError!void {
         _ = try self.representative(id);
-        const normalized = try self.allocator.dupe(Id, arguments);
+        var argument_buffer: [2]Id = undefined;
+        var lookup = try NormalizedArguments.init(self.allocator, item, arguments, &argument_buffer);
+        defer lookup.deinit(self.allocator);
+        if (self.expressions.get(makeKey(item, lookup.items, 0)) != null) return;
+
+        const normalized = try lookup.takeOwned(self.allocator);
         var owned = true;
         defer if (owned) self.allocator.free(normalized);
-        if (SemanticInformation.isCommutativeOperation(item))
-            std.sort.insertion(Id, normalized, {}, std.sort.asc(Id));
         const key = makeKey(item, normalized, 0);
-        if (self.expressions.get(key) != null) return;
         try self.expressions.put(self.allocator, key, id);
         owned = false;
     }
@@ -371,4 +410,52 @@ test "nested logical and arithmetic rules retain first-match semantics" {
 
     try std.testing.expect(try classes.knownToBeDifferent(three, five));
     try std.testing.expect(!(try classes.knownToBeDifferentBy32(three, five)));
+}
+
+test "expression classes cache hits borrow arguments without allocations" {
+    var classes = ExpressionClasses.init(std.testing.allocator);
+    defer classes.deinit();
+    const x = try classes.newClass(.{});
+    const y = try classes.newClass(.{});
+    var arguments = [_]Id{ y, x };
+    const sum = try classes.makeOperation(.ADD, &arguments, .{});
+    const difference = try classes.makeOperation(.SUB, &arguments, .{});
+    const add = AssemblyItem.initInstruction(.ADD, .{});
+    const sub = AssemblyItem.initInstruction(.SUB, .{});
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    classes.allocator = failing.allocator();
+    defer classes.allocator = std.testing.allocator;
+    try std.testing.expectEqual(sum, try classes.findDefault(&add, &arguments));
+    try std.testing.expectEqual(sum, try classes.findDefault(&add, &.{ x, y }));
+    try std.testing.expectEqual(difference, try classes.findDefault(&sub, &arguments));
+    try classes.forceEqual(x, &add, &arguments, true);
+    try classes.forceEqual(x, &sub, &arguments, true);
+    try std.testing.expectEqualSlices(Id, &.{ y, x }, &arguments);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "expression classes misses retain owned arguments through allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var classes = ExpressionClasses.init(allocator);
+            defer classes.deinit();
+            const x = try classes.newClass(.{});
+            const y = try classes.newClass(.{});
+            var arguments = [_]Id{ y, x };
+            const difference = try classes.makeOperation(.SUB, &arguments, .{});
+            arguments[0] = x;
+            try std.testing.expectEqualSlices(Id, &.{ y, x }, (try classes.representative(difference)).arguments);
+            const three = try classes.makeConstant(3, .{});
+            const sum = try classes.makeOperation(.ADD, &.{ x, three }, .{});
+            const five = try classes.makeConstant(5, .{});
+            _ = try classes.makeOperation(.ADD, &.{ sum, five }, .{});
+            const add = AssemblyItem.initInstruction(.ADD, .{});
+            // Keep the public API's arbitrary-arity interning behavior, including
+            // the heap normalization fallback, without invoking binary rules.
+            try classes.forceEqual(x, &add, &.{ y, x, three }, true);
+            try std.testing.expectEqual(x, try classes.findDefault(&add, &.{ three, y, x }));
+            try std.testing.expectEqualSlices(Id, &.{ y, x }, (try classes.representative(difference)).arguments);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }

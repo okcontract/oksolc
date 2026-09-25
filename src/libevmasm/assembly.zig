@@ -431,7 +431,9 @@ pub const Assembly = struct {
         arguments: usize,
         returns: usize,
     ) AssemblyError!void {
-        _ = try self.append(try AssemblyItem.initVerbatim(self.allocator, data_bytes, arguments, returns));
+        var item = try AssemblyItem.initVerbatim(self.allocator, data_bytes, arguments, returns);
+        errdefer item.deinit(self.allocator);
+        _ = try self.append(item);
     }
 
     pub fn codeSize(self: *const Assembly, initial_tag_size: u32) AssemblyError!u32 {
@@ -446,13 +448,26 @@ pub const Assembly = struct {
     }
 
     pub fn optimise(self: *Assembly, settings: OptimiserSettings) AssemblyError!void {
-        _ = try self.optimiseInternal(settings, &.{});
+        return self.optimiseWithScratch(settings, null);
+    }
+
+    /// Optionally reclaim CSE analysis and candidate storage between chunks.
+    /// The borrowed backing allocator must outlive this call. Published items
+    /// remain owned by the assembly allocator; nested assemblies use the same
+    /// original backing allocator rather than a retaining parent arena.
+    pub fn optimiseWithScratch(
+        self: *Assembly,
+        settings: OptimiserSettings,
+        scratch_backing_allocator: ?std.mem.Allocator,
+    ) AssemblyError!void {
+        _ = try self.optimiseInternal(settings, &.{}, scratch_backing_allocator);
     }
 
     fn optimiseInternal(
         self: *Assembly,
         settings: OptimiserSettings,
         outside_tags_input: []const usize,
+        scratch_backing_allocator: ?std.mem.Allocator,
     ) AssemblyError![]const BlockDeduplicator.TagReplacement {
         if (self.tag_replacements) |*cached| return cached.items;
 
@@ -467,7 +482,7 @@ pub const Assembly = struct {
                 SubAssemblyID.init(sub_index),
             );
             defer references.deinit(self.allocator);
-            const replacements = try sub_assembly.optimiseInternal(settings, references.values.items);
+            const replacements = try sub_assembly.optimiseInternal(settings, references.values.items, scratch_backing_allocator);
             _ = BlockDeduplicator.applyTagReplacement(
                 self.assembly_items.items,
                 replacements,
@@ -522,7 +537,7 @@ pub const Assembly = struct {
             }
 
             if (settings.run_cse) {
-                try self.optimiseCSE(&iteration_count);
+                try self.optimiseCSE(&iteration_count, scratch_backing_allocator);
             }
         }
 
@@ -540,7 +555,13 @@ pub const Assembly = struct {
         return self.tag_replacements.?.items;
     }
 
-    fn optimiseCSE(self: *Assembly, iteration_count: *u32) AssemblyError!void {
+    fn optimiseCSE(self: *Assembly, iteration_count: *u32, scratch_backing_allocator: ?std.mem.Allocator) AssemblyError!void {
+        var scratch_arena = if (scratch_backing_allocator) |backing|
+            std.heap.ArenaAllocator.init(backing)
+        else
+            null;
+        defer if (scratch_arena) |*arena| arena.deinit();
+        const scratch_allocator = if (scratch_arena) |*arena| arena.allocator() else self.allocator;
         var uses_msize = false;
         for (self.assembly_items.items) |*item| {
             if (item.eqlInstruction(.MSIZE) or item.item_type == .VerbatimBytecode) {
@@ -552,16 +573,26 @@ pub const Assembly = struct {
         errdefer deinitItems(self.allocator, &optimized);
         var index: usize = 0;
         while (index < self.assembly_items.items.len) {
-            var state = try KnownState.init(self.allocator);
+            // Prior chunk owners have been destroyed, including on fallback.
+            // Reuse bounded storage only when another chunk actually needs it.
+            if (index != 0) if (scratch_arena) |*arena| {
+                if (!arena.reset(.{ .retain_with_limit = 8 * 1024 * 1024 }))
+                    _ = arena.reset(.free_all);
+            };
+            var state = try KnownState.init(scratch_allocator);
             defer state.deinit();
             var eliminator = try CommonSubexpressionEliminator.CommonSubexpressionEliminator.init(
-                self.allocator,
+                scratch_allocator,
                 &state,
                 self.evm_version,
             );
-            defer eliminator.deinit();
-            const consumed = try eliminator.feedItems(self.assembly_items.items[index..], uses_msize);
-            var chunk = eliminator.getOptimizedItems() catch |err| switch (err) {
+            const consumed = eliminator.feedItems(self.assembly_items.items[index..], uses_msize) catch |err| {
+                eliminator.deinit();
+                return err;
+            };
+            // finish consumes the analysis on every outcome. Its independently
+            // owned output survives until copied into the assembly allocator.
+            var chunk = eliminator.finish() catch |err| switch (err) {
                 error.StackTooDeep, error.ItemNotAvailable => {
                     for (self.assembly_items.items[index .. index + consumed]) |*item|
                         try appendClone(self.allocator, &optimized, item);
@@ -570,7 +601,7 @@ pub const Assembly = struct {
                 },
                 else => return err,
             };
-            defer deinitItems(self.allocator, &chunk);
+            defer deinitItems(scratch_allocator, &chunk);
             if (chunk.items.len < consumed) {
                 iteration_count.* += 1;
                 for (chunk.items) |*item| try appendClone(self.allocator, &optimized, item);
@@ -607,20 +638,18 @@ pub const Assembly = struct {
         if (self.assembled_object.link_references.items.len != 0) return error.UnexpectedLinkReferences;
 
         var sub_tag_size: usize = 1;
-        var immutable_by_sub: std.ArrayList(LinkerObjectModule.ImmutableReference) = .empty;
-        defer {
-            for (immutable_by_sub.items) |*reference| reference.references.deinit(self.allocator);
-            immutable_by_sub.deinit(self.allocator);
-        }
+        // Assembled children own stable reference payloads until this parent
+        // is destroyed. Only the pending-reference list changes during patching;
+        // identifiers and offsets can stay borrowed from their child owner.
+        var immutable_by_sub: std.ArrayList(*const LinkerObjectModule.ImmutableReference) = .empty;
+        defer immutable_by_sub.deinit(self.allocator);
         for (self.subs.items) |sub_assembly| {
             const object = try sub_assembly.assemble();
             if (object.immutable_references.items.len != 0) {
                 if (immutable_by_sub.items.len != 0) return error.MultipleImmutableSubassemblies;
-                for (object.immutable_references.items) |reference|
-                    try immutable_by_sub.append(self.allocator, .{
-                        .hash = reference.hash,
-                        .references = try reference.references.clone(self.allocator),
-                    });
+                try immutable_by_sub.ensureTotalCapacityPrecise(self.allocator, object.immutable_references.items.len);
+                for (object.immutable_references.items) |*reference|
+                    immutable_by_sub.appendAssumeCapacity(reference);
             }
             for (sub_assembly.tag_positions_in_bytecode.items) |tag_position| {
                 if (tag_position != std.math.maxInt(usize))
@@ -783,7 +812,7 @@ pub const Assembly = struct {
                         try emitLocation(self.allocator, &code_locations, item_index, &location_start, ret.bytecode.items.len);
                         try ret.bytecode.append(self.allocator, @intFromEnum(InstructionModule.Instruction.POP));
                     }
-                    removeImmutableReference(self.allocator, &immutable_by_sub, item.data_value);
+                    removeImmutableReference(&immutable_by_sub, item.data_value);
                 },
                 .PushDeployTimeAddress => {
                     try ret.bytecode.append(self.allocator, @intFromEnum(InstructionModule.Instruction.PUSH20));
@@ -949,11 +978,38 @@ pub const Assembly = struct {
         selection: DebugInfoSelection,
         source_codes: []const SourceCode,
     ) AssemblyError![]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(allocator);
-        if (selection.ethdebug) try output.appendSlice(allocator, "/// ethdebug: enabled\n");
-        try self.appendAssemblyText(allocator, &output, selection, "", source_codes);
-        return output.toOwnedSlice(allocator);
+        return self.assemblyStringAllocWithScratch(allocator, allocator, selection, source_codes);
+    }
+
+    /// Returns output-allocator-owned bytes; temporary expression strings,
+    /// source comments and indentation use the independent scratch allocator.
+    pub fn assemblyStringAllocWithScratch(
+        self: *const Assembly,
+        output_allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        selection: DebugInfoSelection,
+        source_codes: []const SourceCode,
+    ) AssemblyError![]u8 {
+        var output = std.Io.Writer.Allocating.init(output_allocator);
+        defer output.deinit();
+        self.writeAssemblyText(scratch_allocator, &output.writer, selection, source_codes) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            else => |remaining| return remaining,
+        };
+        return output.toOwnedSlice();
+    }
+
+    /// Borrows the assembly and sources only for this call. The caller owns
+    /// the writer and output; scratch allocations never escape into them.
+    pub fn writeAssemblyText(
+        self: *const Assembly,
+        scratch_allocator: std.mem.Allocator,
+        writer: *std.Io.Writer,
+        selection: DebugInfoSelection,
+        source_codes: []const SourceCode,
+    ) (AssemblyError || std.Io.Writer.Error)!void {
+        if (selection.ethdebug) try writer.writeAll("/// ethdebug: enabled\n");
+        try self.appendAssemblyText(scratch_allocator, writer, selection, "", source_codes);
     }
 
     pub fn assemblyJSONAlloc(
@@ -1054,11 +1110,11 @@ pub const Assembly = struct {
     fn appendAssemblyText(
         self: *const Assembly,
         allocator: std.mem.Allocator,
-        output: *std.ArrayList(u8),
+        output: *std.Io.Writer,
         selection: DebugInfoSelection,
         prefix: []const u8,
         source_codes: []const SourceCode,
-    ) AssemblyError!void {
+    ) (AssemblyError || std.Io.Writer.Error)!void {
         var pending: std.ArrayList([]u8) = .empty;
         defer {
             for (pending.items) |expression| allocator.free(expression);
@@ -1069,7 +1125,7 @@ pub const Assembly = struct {
             if (item.location().isValid() and !item.location().eql(location)) {
                 try flushExpressions(allocator, output, prefix, &pending);
                 location = item.location().*;
-                try appendLocation(allocator, output, prefix, location, selection, source_codes);
+                try appendLocation(output, prefix, location, selection, source_codes);
             }
             var expression = try item.toAssemblyTextAlloc(allocator, .{
                 .evm_version = self.evm_version,
@@ -1079,10 +1135,10 @@ pub const Assembly = struct {
             errdefer allocator.free(expression);
             if (!item.canBeFunctional() or item.returnValues() > 1 or item.arguments() > pending.items.len) {
                 try flushExpressions(allocator, output, prefix, &pending);
-                try output.appendSlice(allocator, prefix);
-                if (item.item_type != .Tag) try output.appendSlice(allocator, "  ");
-                try output.appendSlice(allocator, expression);
-                try output.append(allocator, '\n');
+                try output.writeAll(prefix);
+                if (item.item_type != .Tag) try output.writeAll("  ");
+                try output.writeAll(expression);
+                try output.writeByte('\n');
                 allocator.free(expression);
                 continue;
             }
@@ -1092,6 +1148,7 @@ pub const Assembly = struct {
                 try functional.appendSlice(allocator, expression);
                 try functional.append(allocator, '(');
                 allocator.free(expression);
+                expression = &.{};
                 for (0..item.arguments()) |argument_index| {
                     const argument = pending.pop().?;
                     defer allocator.free(argument);
@@ -1102,13 +1159,14 @@ pub const Assembly = struct {
                 expression = try functional.toOwnedSlice(allocator);
             }
             try pending.append(allocator, expression);
+            expression = &.{};
             if (item.returnValues() != 1) try flushExpressions(allocator, output, prefix, &pending);
         }
         try flushExpressions(allocator, output, prefix, &pending);
 
         if (self.data_entries.items.len != 0 or self.subs.items.len != 0) {
-            try output.appendSlice(allocator, prefix);
-            try output.appendSlice(allocator, "stop\n");
+            try output.writeAll(prefix);
+            try output.writeAll("stop\n");
             for (self.data_entries.items) |entry| {
                 if (entry.hash < self.subs.items.len) continue;
                 const hash = Numeric.toBigEndian256(entry.hash);
@@ -1116,14 +1174,14 @@ pub const Assembly = struct {
                 defer allocator.free(hash_hex);
                 const data_hex = try CommonData.toHexAlloc(allocator, entry.bytes, .dont_add, .lower);
                 defer allocator.free(data_hex);
-                try appendFormat(allocator, output, "{s}data_{s} {s}\n", .{ prefix, hash_hex, data_hex });
+                try output.print("{s}data_{s} {s}\n", .{ prefix, hash_hex, data_hex });
             }
             for (self.subs.items, 0..) |sub_assembly, index| {
-                try appendFormat(allocator, output, "\n{s}sub_{d}: assembly {{\n", .{ prefix, index });
+                try output.print("\n{s}sub_{d}: assembly {{\n", .{ prefix, index });
                 const child_prefix = try std.fmt.allocPrint(allocator, "{s}    ", .{prefix});
                 defer allocator.free(child_prefix);
                 try sub_assembly.appendAssemblyText(allocator, output, selection, child_prefix, source_codes);
-                try appendFormat(allocator, output, "{s}}}\n", .{prefix});
+                try output.print("{s}}}\n", .{prefix});
             }
         }
         if (self.auxiliary_data.items.len != 0) {
@@ -1134,7 +1192,7 @@ pub const Assembly = struct {
                 .lower,
             );
             defer allocator.free(auxiliary_hex);
-            try appendFormat(allocator, output, "\n{s}auxdata: 0x{s}\n", .{ prefix, auxiliary_hex });
+            try output.print("\n{s}auxdata: 0x{s}\n", .{ prefix, auxiliary_hex });
         }
     }
 };
@@ -1691,20 +1749,18 @@ fn appendImmutableReference(
     try object.immutable_references.insert(allocator, lower, .{ .hash = hash, .references = references });
 }
 
-fn immutableOffsets(references: []const LinkerObjectModule.ImmutableReference, hash: u256) []const usize {
+fn immutableOffsets(references: []const *const LinkerObjectModule.ImmutableReference, hash: u256) []const usize {
     for (references) |reference| if (reference.hash == hash) return reference.references.offsets.items;
     return &.{};
 }
 
 fn removeImmutableReference(
-    allocator: std.mem.Allocator,
-    references: *std.ArrayList(LinkerObjectModule.ImmutableReference),
+    references: *std.ArrayList(*const LinkerObjectModule.ImmutableReference),
     hash: u256,
 ) void {
     for (references.items, 0..) |reference, index| {
         if (reference.hash != hash) continue;
-        var removed = references.orderedRemove(index);
-        removed.references.deinit(allocator);
+        _ = references.orderedRemove(index);
         return;
     }
 }
@@ -1832,72 +1888,55 @@ fn compareSubPaths(left: []const SubAssemblyID, right: []const SubAssemblyID) st
 
 fn flushExpressions(
     allocator: std.mem.Allocator,
-    output: *std.ArrayList(u8),
+    output: *std.Io.Writer,
     prefix: []const u8,
     pending: *std.ArrayList([]u8),
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     for (pending.items) |expression| {
-        try output.appendSlice(allocator, prefix);
-        try output.appendSlice(allocator, "  ");
-        try output.appendSlice(allocator, expression);
-        try output.append(allocator, '\n');
-        allocator.free(expression);
+        try output.writeAll(prefix);
+        try output.writeAll("  ");
+        try output.writeAll(expression);
+        try output.writeByte('\n');
     }
+    // Retain every owner until all fallible writes finish. On failure the
+    // caller still owns the complete pending list and releases it once.
+    for (pending.items) |expression| allocator.free(expression);
     pending.clearRetainingCapacity();
 }
 
 fn appendLocation(
-    allocator: std.mem.Allocator,
-    output: *std.ArrayList(u8),
+    output: *std.Io.Writer,
     prefix: []const u8,
     location: SourceLocation,
     selection: DebugInfoSelection,
     source_codes: []const SourceCode,
-) std.mem.Allocator.Error!void {
+) std.Io.Writer.Error!void {
     if (!location.isValid() or (!selection.location and !selection.snippet)) return;
 
-    try output.appendSlice(allocator, prefix);
-    try output.appendSlice(allocator, "    /*");
+    try output.writeAll(prefix);
+    try output.writeAll("    /*");
     if (selection.location) {
         if (location.source_name) |source_name| {
-            const quoted = try CommonData.escapeAndQuoteStringAlloc(allocator, source_name);
-            defer allocator.free(quoted);
-            try output.append(allocator, ' ');
-            try output.appendSlice(allocator, quoted);
+            try output.writeByte(' ');
+            try CommonData.writeEscapedQuoted(output, source_name);
         }
         if (location.hasText())
-            try appendFormat(allocator, output, ":{d}:{d}", .{ location.start, location.end });
+            try output.print(":{d}:{d}", .{ location.start, location.end });
     }
     if (selection.snippet) {
-        if (selection.location) try output.appendSlice(allocator, "  ");
+        if (selection.location) try output.writeAll("  ");
         if (location.hasText()) {
             if (location.source_name) |source_name| {
                 for (source_codes) |source_code| {
                     if (!std.mem.eql(u8, source_code.name, source_name)) continue;
-                    const snippet = try CharStream.singleLineSnippetFromTextAlloc(
-                        allocator,
-                        source_code.code,
-                        location,
-                    );
-                    defer allocator.free(snippet);
-                    try output.appendSlice(allocator, snippet);
+                    const snippet = CharStream.singleLineSnippetFromText(source_code.code, location);
+                    try snippet.writeTo(output);
                     break;
                 }
             }
         }
     }
-    try output.appendSlice(allocator, " */\n");
-}
-
-fn appendFormat(
-    allocator: std.mem.Allocator,
-    output: *std.ArrayList(u8),
-    comptime format: []const u8,
-    arguments: anytype,
-) std.mem.Allocator.Error!void {
-    const rendered = try std.fmt.allocPrint(allocator, format, arguments);
-    defer allocator.free(rendered);
-    try output.appendSlice(allocator, rendered);
+    try output.writeAll(" */\n");
 }
 
 fn searchSubPath(items: []const SubPath, path: []const SubAssemblyID) SearchResult {
@@ -1990,4 +2029,345 @@ test "assembly JSON preserves code, source names, data, and subassemblies" {
     const actual = try JSON.jsonCompactPrintAlloc(allocator, &round_trip.value);
     defer allocator.free(actual);
     try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "assembly printing annotations retain raw snippets and quoted names" {
+    const name = "C\"\\\x01.sol";
+    const sources = &[_]SourceCode{.{ .name = name, .code = "ab */ \t\xff\r\nmore" }};
+    const location: SourceLocation = .{ .start = 0, .end = 100, .source_name = name };
+    const expected = ">    /* \"C\\\"\\\\\\x01.sol\":0:100  ab */ \t\xff... */\n";
+    var buffer: [128]u8 = undefined;
+    for (0..expected.len + 1) |capacity| {
+        var writer = std.Io.Writer.fixed(buffer[0..capacity]);
+        if (capacity < expected.len) {
+            try std.testing.expectError(error.WriteFailed, appendLocation(&writer, ">", location, .{ .location = true, .snippet = true }, sources));
+            try std.testing.expect(std.mem.startsWith(u8, expected, writer.buffered()));
+        } else {
+            try appendLocation(&writer, ">", location, .{ .location = true, .snippet = true }, sources);
+            try std.testing.expectEqualStrings(expected, writer.buffered());
+        }
+    }
+    var writer = std.Io.Writer.fixed(&buffer);
+    try appendLocation(&writer, "", location, .{ .snippet = true }, sources);
+    try std.testing.expectEqualStrings("    /*ab */ \t\xff... */\n", writer.buffered());
+    writer.end = 0;
+    try appendLocation(&writer, "", .{}, .{ .snippet = true }, sources);
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+}
+
+test "assembly printing retains one owner through allocation failures" {
+    const allocator = std.testing.allocator;
+    var assembly = try Assembly.init(allocator, .current(), false, "print-ownership");
+    defer assembly.deinit();
+    for (0..20) |i|
+        _ = try assembly.append(AssemblyItem.initPush(@as(u256, 0x123456789abcdef) + i, .{}));
+    _ = try assembly.append(AssemblyItem.initInstruction(.ADD, .{}));
+    _ = try assembly.append(AssemblyItem.initInstruction(.SUB, .{}));
+    _ = try assembly.append(AssemblyItem.initInstruction(.POP, .{}));
+    _ = try assembly.append(AssemblyItem.initInstruction(.STOP, .{}));
+    _ = try assembly.appendData("payload");
+    try assembly.appendToAuxiliaryData(&.{ 0xab, 0xcd });
+    assembly.assembly_items.items[0].setLocation(.{ .start = 0, .end = 5, .source_name = "input.sol" });
+    const child = try Assembly.create(allocator, .current(), false, "child");
+    _ = try assembly.append(try assembly.newSub(child));
+    _ = try child.append(AssemblyItem.initPush(7, .{}));
+    const selection: DebugInfoSelection = .{ .location = true, .snippet = true, .ethdebug = true };
+    const sources = [_]SourceCode{.{ .name = "input.sol", .code = "value = 1;" }};
+    const expected = try assembly.assemblyStringAlloc(allocator, selection, &sources);
+    defer allocator.free(expected);
+    try std.testing.expect(std.mem.find(u8, expected, "pop(sub(add(") != null);
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, input: *const Assembly, text: []const u8, selection_value: DebugInfoSelection, source_codes: []const SourceCode, mode: enum { both, scratch, output }) !void {
+            const output_allocator = if (mode == .scratch) std.testing.allocator else failing;
+            const scratch_allocator = if (mode == .output) std.testing.allocator else failing;
+            const actual = try input.assemblyStringAllocWithScratch(output_allocator, scratch_allocator, selection_value, source_codes);
+            defer output_allocator.free(actual);
+            try std.testing.expectEqualStrings(text, actual);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &assembly, expected, selection, &sources, .both });
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &assembly, expected, selection, &sources, .scratch });
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &assembly, expected, selection, &sources, .output });
+    var buffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try std.testing.expectError(error.WriteFailed, assembly.writeAssemblyText(allocator, &writer, .{}, &.{}));
+}
+
+test "assembly printing output survives destruction of its input owner" {
+    const allocator = std.testing.allocator;
+    const output = blk: {
+        var assembly = try Assembly.init(allocator, .current(), false, "detached");
+        defer assembly.deinit();
+        _ = try assembly.appendData("owned");
+        break :blk try assembly.assemblyStringAllocWithScratch(allocator, allocator, .{}, &.{});
+    };
+    defer allocator.free(output);
+    try std.testing.expect(std.mem.find(u8, output, "6f776e6564") != null);
+}
+
+test "assembly append releases unpublished verbatim payloads" {
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, reject: bool) !void {
+            var assembly = try Assembly.init(failing, .current(), false, "verbatim");
+            defer assembly.deinit();
+            if (reject) assembly.stack_deposit = -1;
+            var bytes = [_]u8{ 0x60, 0x2a };
+            if (assembly.appendVerbatim(&bytes, 0, 1)) |_| {
+                try std.testing.expect(!reject);
+            } else |err| {
+                if (err != error.StackUnderflow) return err;
+                try std.testing.expect(reject);
+                try std.testing.expectEqual(@as(usize, 0), assembly.assembly_items.items.len);
+                return;
+            }
+            bytes[1] = 0xff;
+            try std.testing.expectEqual(@as(usize, 1), assembly.assembly_items.items.len);
+            const item = &assembly.assembly_items.items[0];
+            try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x2a }, try item.verbatimData());
+            try std.testing.expectEqual(@as(usize, 0), item.verbatim.?.arguments);
+            try std.testing.expectEqual(@as(usize, 1), item.verbatim.?.return_variables);
+            _ = try assembly.append(AssemblyItem.initInstruction(.POP, .{}));
+            _ = try assembly.append(AssemblyItem.initInstruction(.STOP, .{}));
+            const linker = try assembly.assemble();
+            try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x2a, 0x50, 0x00 }, linker.bytecode.items);
+        }
+    };
+    // Cover semantic rejection even if an earlier OOM regression stops a sweep.
+    try Check.run(std.testing.allocator, true);
+    for ([_]bool{ false, true }) |reject|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{reject});
+}
+
+test "assembly immutable references preserve child owners across allocation failures" {
+    const Case = enum { complete, unassigned, multiple_children, conflicting_push, no_refs };
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, case: Case) !void {
+            var parent = try Assembly.init(allocator, .init(.London), true, "creation");
+            defer parent.deinit();
+            const child = try Assembly.create(allocator, .init(.London), false, "runtime");
+            const child_item = try parent.newSub(child); // Consumes child on either outcome.
+            if (case != .no_refs) {
+                for ([_][]const u8{ "a", "b", "a" }) |name_| {
+                    _ = try child.append(try child.newPushImmutable(name_));
+                    _ = try child.append(AssemblyItem.initInstruction(.POP, .{}));
+                }
+            }
+            _ = try child.append(AssemblyItem.initInstruction(.STOP, .{}));
+            const child_object = try child.assemble();
+            const child_refs = child_object.immutable_references.items;
+            var identifiers: [2][]const u8 = undefined;
+            var offsets: [2][]const usize = undefined;
+            for (child_refs, 0..) |reference, index| {
+                identifiers[index] = reference.references.identifier;
+                offsets[index] = reference.references.offsets.items;
+            }
+            if (case == .multiple_children) {
+                const other = try Assembly.create(allocator, .init(.London), false, "other");
+                _ = try parent.newSub(other);
+                _ = try other.append(try other.newPushImmutable("other"));
+                _ = try other.append(AssemblyItem.initInstruction(.POP, .{}));
+            }
+            // Repeat a consumed hash and assign an unknown hash: both must emit
+            // two POPs rather than patching the child's original offsets again.
+            for ([_][]const u8{ "a", "b", "a", "unknown" }, 0..) |name_, index| {
+                if (case == .unassigned and index == 1) continue;
+                _ = try parent.append(AssemblyItem.initPush(42 + index, .{}));
+                _ = try parent.append(AssemblyItem.initPush(0, .{}));
+                _ = try parent.append(try parent.newImmutableAssignment(name_));
+            }
+            if (case == .conflicting_push)
+                _ = try parent.append(try parent.newPushImmutable("parent"));
+            _ = try parent.append(child_item);
+            _ = try parent.append(AssemblyItem.initInstruction(.POP, .{}));
+            _ = try parent.append(AssemblyItem.initInstruction(.STOP, .{}));
+            const expected_error: ?anyerror = switch (case) {
+                .complete, .no_refs => null,
+                .unassigned => error.UnassignedImmutable,
+                .multiple_children => error.MultipleImmutableSubassemblies,
+                .conflicting_push => error.PushAndAssignImmutables,
+            };
+            if (parent.assemble()) |object| {
+                try std.testing.expect(expected_error == null);
+                const runtime_hex = ("7f" ++ "00" ** 32 ++ "50") ** 3 ++ "00";
+                const expected = if (case == .complete)
+                    "602a600081816001015260450152602b600060230152602c60005050602d600050506100285000fe" ++ runtime_hex
+                else
+                    "602a60005050602b60005050602c60005050602d60005050601d5000fe00";
+                var buffer: [256]u8 = undefined;
+                try std.testing.expectEqualSlices(u8, try std.fmt.hexToBytes(&buffer, expected), object.bytecode.items);
+            } else |err| {
+                if (err == error.OutOfMemory) return err;
+                try std.testing.expect(expected_error != null);
+                try std.testing.expectEqual(expected_error.?, err);
+            }
+            try std.testing.expectEqual(child_refs.ptr, child_object.immutable_references.items.ptr);
+            try std.testing.expectEqual(child_refs.len, child_object.immutable_references.items.len);
+            for (child_refs, 0..) |reference, index| {
+                try std.testing.expectEqual(identifiers[index].ptr, reference.references.identifier.ptr);
+                try std.testing.expectEqual(offsets[index].ptr, reference.references.offsets.items.ptr);
+                const is_a = std.mem.eql(u8, reference.references.identifier, "a");
+                try std.testing.expect(is_a or std.mem.eql(u8, reference.references.identifier, "b"));
+                try std.testing.expectEqualSlices(usize, if (is_a) &.{ 1, 69 } else &.{35}, reference.references.offsets.items);
+            }
+        }
+    };
+    const cases = [_]Case{ .complete, .unassigned, .multiple_children, .conflicting_push, .no_refs };
+    for (cases) |case| try Check.run(std.testing.allocator, case);
+    for (cases) |case|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{case});
+}
+
+test "assembly CSE scratch releases nested analyses before output use" {
+    const sources = [_]SourceCode{.{ .name = "cse.sol", .code = "value = 1;" }};
+    const Check = struct {
+        fn appendBody(assembly: *Assembly, repeats: usize) !void {
+            assembly.setSourceLocation(.{ .start = 0, .end = 5, .source_name = "cse.sol" });
+            for (0..repeats) |_| {
+                _ = try assembly.append(AssemblyItem.initPush(3, .{ .ast_id = 11 }));
+                _ = try assembly.append(AssemblyItem.initPush(4, .{ .ast_id = 12 }));
+                _ = try assembly.append(AssemblyItem.initInstruction(.ADD, .{ .ast_id = 13 }));
+                _ = try assembly.append(AssemblyItem.initPush(0, .{}));
+                _ = try assembly.append(AssemblyItem.initInstruction(.MSTORE, .{}));
+            }
+            _ = try assembly.append(try assembly.namedTag("entry", 0, 0, 17));
+            try assembly.appendVerbatim(&.{ 0x60, 0xaa }, 0, 1);
+            _ = try assembly.append(AssemblyItem.initInstruction(.POP, .{}));
+            _ = try assembly.append(AssemblyItem.initInstruction(.MSIZE, .{ .ast_id = 14 }));
+            _ = try assembly.append(AssemblyItem.initInstruction(.POP, .{}));
+            _ = try assembly.append(try assembly.newTag());
+            _ = try assembly.appendData("payload");
+            _ = try assembly.append(AssemblyItem.initInstruction(.POP, .{}));
+            _ = try assembly.append(AssemblyItem.initInstruction(.STOP, .{}));
+            try assembly.appendToAuxiliaryData(&.{ 0xab, 0xcd });
+        }
+
+        fn make(allocator: std.mem.Allocator, version: EVMVersion, repeats: usize) !Assembly {
+            var root = try Assembly.init(allocator, version, true, "Root");
+            errdefer root.deinit();
+            const child = try Assembly.create(allocator, version, false, "Child");
+            _ = try root.append(try root.newSub(child));
+            _ = try root.append(AssemblyItem.initInstruction(.POP, .{}));
+            try appendBody(child, repeats);
+            try appendBody(&root, repeats);
+            return root;
+        }
+
+        fn run(
+            allocator: std.mem.Allocator,
+            version: EVMVersion,
+            enable_cse: bool,
+            separate_scratch: bool,
+            repeats: usize,
+            expected_bytes: []const u8,
+            expected_text: []const u8,
+        ) !void {
+            var root = try make(allocator, version, repeats);
+            defer root.deinit();
+            // Observe scratch backing independently of the output owner. The
+            // outer failing allocator sees both, including arena reset growth.
+            var backing = std.testing.FailingAllocator.init(allocator, .{});
+            const result = root.optimiseWithScratch(
+                .{ .run_cse = enable_cse },
+                if (separate_scratch) backing.allocator() else null,
+            );
+            try std.testing.expectEqual(backing.allocated_bytes, backing.freed_bytes);
+            try result;
+            try std.testing.expectEqual(enable_cse and separate_scratch, backing.allocated_bytes != 0);
+            // Every scratch arena is dead before emitted payloads, source
+            // annotations, nested assemblies and final bytecode are consumed.
+            const linker = try root.assemble();
+            try std.testing.expectEqualSlices(u8, expected_bytes, linker.bytecode.items);
+            const text = try root.assemblyStringAlloc(allocator, .defaultValue(), &sources);
+            defer allocator.free(text);
+            try std.testing.expectEqualStrings(expected_text, text);
+        }
+    };
+    const allocator = std.testing.allocator;
+    for ([_]EVMVersion{ .init(.London), .init(.Shanghai) }) |version| {
+        for ([_]bool{ false, true }) |enable_cse| {
+            var reference = try Check.make(allocator, version, 1);
+            defer reference.deinit();
+            try reference.optimise(.{ .run_cse = enable_cse });
+            const linker = try reference.assemble();
+            const text = try reference.assemblyStringAlloc(allocator, .defaultValue(), &sources);
+            defer allocator.free(text);
+            for ([_]bool{ false, true }) |separate_scratch|
+                try std.testing.checkAllAllocationFailures(allocator, Check.run, .{
+                    version, enable_cse, separate_scratch, @as(usize, 1), linker.bytecode.items, text,
+                });
+        }
+    }
+    // Cross the 2,000-instruction analysis boundary without multiplying a large
+    // input by the exhaustive OOM sweep. Each child has several further chunks.
+    var reference = try Check.make(allocator, .current(), 410);
+    defer reference.deinit();
+    try reference.optimise(.{ .run_cse = true });
+    const linker = try reference.assemble();
+    const text = try reference.assemblyStringAlloc(allocator, .defaultValue(), &sources);
+    defer allocator.free(text);
+    try Check.run(allocator, .current(), true, true, 410, linker.bytecode.items, text);
+}
+
+test "assembly CSE scratch preserves fallback before subsequent chunks" {
+    const Check = struct {
+        fn make(allocator: std.mem.Allocator) !Assembly {
+            var root = try Assembly.init(allocator, .current(), false, "fallback");
+            errdefer root.deinit();
+            for (0..20) |index| {
+                _ = try root.append(AssemblyItem.initPush(index * 32, .{}));
+                _ = try root.append(AssemblyItem.initInstruction(.SLOAD, .{}));
+            }
+            _ = try root.append(AssemblyItem.initPush(42, .{}));
+            _ = try root.append(AssemblyItem.initPush(0, .{}));
+            _ = try root.append(AssemblyItem.initInstruction(.SSTORE, .{}));
+            for ([_]InstructionModule.Instruction{
+                .XOR, .DUP12, .DUP1, .ADD, .XOR, .XOR, .SWAP7, .ADD, .DUP1, .SWAP6, .ADD, .XOR, .STOP,
+            }) |opcode| _ = try root.append(AssemblyItem.initInstruction(opcode, .{}));
+            _ = try root.append(try root.newTag());
+            _ = try root.append(AssemblyItem.initPush(3, .{}));
+            _ = try root.append(AssemblyItem.initPush(4, .{}));
+            _ = try root.append(AssemblyItem.initInstruction(.ADD, .{}));
+            _ = try root.append(AssemblyItem.initInstruction(.POP, .{}));
+            try root.appendVerbatim(&.{ 0x60, 0xaa }, 0, 1);
+            _ = try root.append(AssemblyItem.initInstruction(.POP, .{}));
+            _ = try root.append(AssemblyItem.initInstruction(.STOP, .{}));
+            return root;
+        }
+
+        fn run(allocator: std.mem.Allocator, separate_scratch: bool, expected: []const u8) !void {
+            var root = try make(allocator);
+            defer root.deinit();
+            var backing = std.testing.FailingAllocator.init(allocator, .{});
+            const result = root.optimiseWithScratch(.{ .run_cse = true }, if (separate_scratch) backing.allocator() else null);
+            try std.testing.expectEqual(backing.allocated_bytes, backing.freed_bytes);
+            try result;
+            try std.testing.expectEqual(separate_scratch, backing.allocated_bytes != 0);
+            try std.testing.expectEqualSlices(u8, expected, (try root.assemble()).bytecode.items);
+        }
+    };
+    const allocator = std.testing.allocator;
+    var reference = try Check.make(allocator);
+    defer reference.deinit();
+    // Prove this fixture actually reaches the fallback, with the same MSIZE
+    // policy selected by its later verbatim payload. The first chunk ends STOP.
+    const fallback_len = 56;
+    var state = try KnownState.init(allocator);
+    defer state.deinit();
+    var cse = try CommonSubexpressionEliminator.CommonSubexpressionEliminator.init(allocator, &state, .current());
+    defer cse.deinit();
+    try std.testing.expectEqual(@as(usize, fallback_len), try cse.feedItems(reference.itemsConst(), true));
+    if (cse.getOptimizedItems()) |result| {
+        var owned = result;
+        deinitItems(allocator, &owned);
+        return error.ExpectedCSEFallback;
+    } else |err| try std.testing.expectEqual(error.StackTooDeep, err);
+    // This prefix has no owned payloads; retaining its values cannot create a
+    // second owner. Successful optimization must keep its exact instructions.
+    const prefix = try allocator.dupe(AssemblyItem, reference.itemsConst()[0..fallback_len]);
+    defer allocator.free(prefix);
+    try reference.optimise(.{ .run_cse = true });
+    try std.testing.expectEqualDeep(prefix, reference.itemsConst()[0..fallback_len]);
+    const expected = (try reference.assemble()).bytecode.items;
+    for ([_]bool{ false, true }) |separate_scratch|
+        try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ separate_scratch, expected });
 }

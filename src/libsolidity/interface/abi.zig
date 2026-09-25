@@ -417,15 +417,14 @@ fn appendABIType(
         return;
     }
     switch (type_ref.payload) {
-        .Contract => if (library)
+        .Contract, .Enum => if (library)
             try result.object.put(
                 allocator,
                 "type",
                 .{ .string = try TypeBehavior.canonicalNameAlloc(allocator, type_ref) },
             )
         else
-            try putString(allocator, result, "type", "address"),
-        .Enum => try putString(allocator, result, "type", "uint8"),
+            try putString(allocator, result, "type", if (type_ref.category() == .Enum) "uint8" else "address"),
         .UserDefinedValueType => |value| try appendABIType(
             allocator,
             result,

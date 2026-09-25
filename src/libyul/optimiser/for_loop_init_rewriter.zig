@@ -20,34 +20,50 @@ pub const ForLoopInitRewriter = struct {
     }
 
     fn visitBlock(allocator: std.mem.Allocator, block: *AST.Block) anyerror!void {
-        var replacement: std.ArrayList(AST.Statement) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
-        errdefer deinitStatements(allocator, &replacement);
-        try replacement.ensureTotalCapacity(allocator, block.statements.items.len);
-
+        const old_len = block.statements.items.len;
+        var expanded_len = old_len;
         for (block.statements.items) |*statement| {
             if (statement.* == .for_loop) {
                 const loop = &statement.for_loop;
                 try visitBlock(allocator, &loop.pre);
                 try visitBlock(allocator, &loop.body);
                 try visitBlock(allocator, &loop.post);
-                try replacement.ensureUnusedCapacity(allocator, loop.pre.statements.items.len + 1);
-                for (loop.pre.statements.items) |*pre_statement| {
-                    replacement.appendAssumeCapacity(pre_statement.*);
-                    pre_statement.* = emptyStatement();
+                expanded_len = std.math.add(usize, expanded_len, loop.pre.statements.items.len) catch return error.OutOfMemory;
+                if (loop.pre.statements.items.len == 0 and loop.pre.statements.capacity != 0) {
+                    loop.pre.statements.deinit(allocator);
+                    loop.pre.statements = .empty;
                 }
-                loop.pre.statements.deinit(allocator);
-                loop.pre.statements = .empty;
-                replacement.appendAssumeCapacity(statement.*);
-                statement.* = emptyStatement();
             } else {
                 try visitChildren(allocator, statement);
-                try replacement.append(allocator, statement.*);
-                statement.* = emptyStatement();
             }
         }
-        block.statements.deinit(allocator);
-        block.statements = replacement;
-        replacement = .empty;
+        if (expanded_len == old_len) return;
+
+        // Finish all fallible work before moving owners. Reacquire statement
+        // pointers after growth; each destination is at or beyond its source,
+        // so backwards expansion cannot overwrite an unread statement.
+        try block.statements.ensureTotalCapacityPrecise(allocator, expanded_len);
+        block.statements.items.len = expanded_len;
+        var source_index = old_len;
+        var destination_index = expanded_len;
+        while (source_index != 0) {
+            source_index -= 1;
+            var statement = block.statements.items[source_index];
+            block.statements.items[source_index] = emptyStatement();
+            destination_index -= 1;
+            if (statement == .for_loop) {
+                var pre = statement.for_loop.pre.statements;
+                statement.for_loop.pre.statements = .empty;
+                block.statements.items[destination_index] = statement;
+                destination_index -= pre.items.len;
+                @memcpy(block.statements.items[destination_index..][0..pre.items.len], pre.items);
+                // Payloads moved into the parent; only the old header is owned.
+                pre.deinit(allocator);
+            } else {
+                block.statements.items[destination_index] = statement;
+            }
+        }
+        std.debug.assert(destination_index == 0);
     }
 
     fn visitChildren(allocator: std.mem.Allocator, statement: *AST.Statement) anyerror!void {
@@ -64,11 +80,6 @@ pub const ForLoopInitRewriter = struct {
 
 fn emptyStatement() AST.Statement {
     return .{ .block = .{} };
-}
-
-fn deinitStatements(allocator: std.mem.Allocator, statements: *std.ArrayList(AST.Statement)) void {
-    for (statements.items) |*statement| statement.deinit(allocator);
-    statements.deinit(allocator);
 }
 
 test "for-loop init rewriter empties pre and preserves its order before the loop" {

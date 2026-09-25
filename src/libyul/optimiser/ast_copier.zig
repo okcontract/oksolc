@@ -7,8 +7,13 @@
 const std = @import("std");
 const AST = @import("../ast.zig");
 const YulName = @import("../yul_name.zig").YulName;
+const DebugData = @import("../../liblangutil/debug_data.zig").DebugData;
 
 pub const Hooks = struct {
+    /// Rebind borrowed source names when copying across ownership boundaries.
+    /// Replacement nodes returned by expression/identifier hooks own their
+    /// annotation policy and bypass this hook, like their name translation.
+    translate_debug_data: ?*const fn (?*anyopaque, ?DebugData) anyerror!?DebugData = null,
     translate_expression: ?*const fn (
         ?*anyopaque,
         *ASTCopier,
@@ -72,7 +77,7 @@ pub const ASTCopier = struct {
     ) anyerror!AST.Statement {
         return switch (statement.*) {
             .expression_statement => |*value| .{ .expression_statement = .{
-                .debug_data = value.debug_data,
+                .debug_data = try self.translateDebugData(value.debug_data),
                 .expression = try self.translateExpression(&value.expression),
             } },
             .assignment => |*value| .{ .assignment = try self.translateAssignment(value) },
@@ -85,9 +90,9 @@ pub const ASTCopier = struct {
             .if_statement => |*value| .{ .if_statement = try self.translateIf(value) },
             .switch_statement => |*value| .{ .switch_statement = try self.translateSwitch(value) },
             .for_loop => |*value| .{ .for_loop = try self.translateForLoop(value) },
-            .break_statement => |value| .{ .break_statement = value },
-            .continue_statement => |value| .{ .continue_statement = value },
-            .leave_statement => |value| .{ .leave_statement = value },
+            .break_statement => |value| .{ .break_statement = .{ .debug_data = try self.translateDebugData(value.debug_data) } },
+            .continue_statement => |value| .{ .continue_statement = .{ .debug_data = try self.translateDebugData(value.debug_data) } },
+            .leave_statement => |value| .{ .leave_statement = .{ .debug_data = try self.translateDebugData(value.debug_data) } },
             .block => |*value| .{ .block = try self.translateBlock(value) },
         };
     }
@@ -99,13 +104,11 @@ pub const ASTCopier = struct {
         try self.enterScope(block);
         var scope_open = true;
         errdefer if (scope_open) self.leaveScope(block) catch {}; // zlinter-disable-current-line no_swallow_error - rollback cleanup must preserve the initiating error
-        var result: AST.Block = .{ .debug_data = block.debug_data };
+        var result: AST.Block = .{ .debug_data = try self.translateDebugData(block.debug_data) };
         errdefer result.deinit(self.allocator);
-        for (block.statements.items) |*statement| {
-            var translated = try self.translateStatement(statement);
-            errdefer translated.deinit(self.allocator);
-            try result.statements.append(self.allocator, translated);
-        }
+        try result.statements.ensureTotalCapacityPrecise(self.allocator, block.statements.items.len);
+        for (block.statements.items) |*statement|
+            result.statements.appendAssumeCapacity(try self.translateStatement(statement));
         scope_open = false;
         try self.leaveScope(block);
         return result;
@@ -115,11 +118,11 @@ pub const ASTCopier = struct {
         self: *ASTCopier,
         assignment: *const AST.Assignment,
     ) anyerror!AST.Assignment {
-        var result: AST.Assignment = .{ .debug_data = assignment.debug_data };
+        var result: AST.Assignment = .{ .debug_data = try self.translateDebugData(assignment.debug_data) };
         errdefer result.deinit(self.allocator);
-        for (assignment.variable_names.items) |*identifier| {
-            try result.variable_names.append(self.allocator, try self.translateIdentifier(identifier));
-        }
+        try result.variable_names.ensureTotalCapacityPrecise(self.allocator, assignment.variable_names.items.len);
+        for (assignment.variable_names.items) |*identifier|
+            result.variable_names.appendAssumeCapacity(try self.translateIdentifier(identifier));
         result.value = try self.translateOptionalExpression(assignment.value);
         return result;
     }
@@ -128,11 +131,11 @@ pub const ASTCopier = struct {
         self: *ASTCopier,
         declaration: *const AST.VariableDeclaration,
     ) anyerror!AST.VariableDeclaration {
-        var result: AST.VariableDeclaration = .{ .debug_data = declaration.debug_data };
+        var result: AST.VariableDeclaration = .{ .debug_data = try self.translateDebugData(declaration.debug_data) };
         errdefer result.deinit(self.allocator);
-        for (declaration.variables.items) |*variable| {
-            try result.variables.append(self.allocator, try self.translateNameWithDebugData(variable));
-        }
+        try result.variables.ensureTotalCapacityPrecise(self.allocator, declaration.variables.items.len);
+        for (declaration.variables.items) |*variable|
+            result.variables.appendAssumeCapacity(try self.translateNameWithDebugData(variable));
         result.value = try self.translateOptionalExpression(declaration.value);
         return result;
     }
@@ -142,15 +145,13 @@ pub const ASTCopier = struct {
         call: *const AST.FunctionCall,
     ) anyerror!AST.FunctionCall {
         var result: AST.FunctionCall = .{
-            .debug_data = call.debug_data,
+            .debug_data = try self.translateDebugData(call.debug_data),
             .function_name = try self.translateFunctionName(&call.function_name),
         };
         errdefer result.deinit(self.allocator);
-        for (call.arguments.items) |*argument| {
-            var translated = try self.translateExpression(argument);
-            errdefer translated.deinit(self.allocator);
-            try result.arguments.append(self.allocator, translated);
-        }
+        try result.arguments.ensureTotalCapacityPrecise(self.allocator, call.arguments.items.len);
+        for (call.arguments.items) |*argument|
+            result.arguments.appendAssumeCapacity(try self.translateExpression(argument));
         return result;
     }
 
@@ -158,7 +159,7 @@ pub const ASTCopier = struct {
         self: *ASTCopier,
         if_statement: *const AST.If,
     ) anyerror!AST.If {
-        var result: AST.If = .{ .debug_data = if_statement.debug_data };
+        var result: AST.If = .{ .debug_data = try self.translateDebugData(if_statement.debug_data) };
         errdefer result.deinit(self.allocator);
         result.condition = try self.translateOptionalExpression(if_statement.condition);
         result.body = try self.translateBlock(&if_statement.body);
@@ -169,14 +170,12 @@ pub const ASTCopier = struct {
         self: *ASTCopier,
         switch_statement: *const AST.Switch,
     ) anyerror!AST.Switch {
-        var result: AST.Switch = .{ .debug_data = switch_statement.debug_data };
+        var result: AST.Switch = .{ .debug_data = try self.translateDebugData(switch_statement.debug_data) };
         errdefer result.deinit(self.allocator);
         result.expression = try self.translateOptionalExpression(switch_statement.expression);
-        for (switch_statement.cases.items) |*case_value| {
-            var translated = try self.translateCase(case_value);
-            errdefer translated.deinit(self.allocator);
-            try result.cases.append(self.allocator, translated);
-        }
+        try result.cases.ensureTotalCapacityPrecise(self.allocator, switch_statement.cases.items.len);
+        for (switch_statement.cases.items) |*case_value|
+            result.cases.appendAssumeCapacity(try self.translateCase(case_value));
         return result;
     }
 
@@ -190,19 +189,16 @@ pub const ASTCopier = struct {
         errdefer if (function_scope_open) self.leaveFunction(definition) catch {}; // zlinter-disable-current-line no_swallow_error - rollback cleanup must preserve the initiating error
 
         var result: AST.FunctionDefinition = .{
-            .debug_data = definition.debug_data,
+            .debug_data = try self.translateDebugData(definition.debug_data),
             .name = translated_name,
         };
         errdefer result.deinit(self.allocator);
-        for (definition.parameters.items) |*parameter| {
-            try result.parameters.append(self.allocator, try self.translateNameWithDebugData(parameter));
-        }
-        for (definition.return_variables.items) |*return_variable| {
-            try result.return_variables.append(
-                self.allocator,
-                try self.translateNameWithDebugData(return_variable),
-            );
-        }
+        try result.parameters.ensureTotalCapacityPrecise(self.allocator, definition.parameters.items.len);
+        for (definition.parameters.items) |*parameter|
+            result.parameters.appendAssumeCapacity(try self.translateNameWithDebugData(parameter));
+        try result.return_variables.ensureTotalCapacityPrecise(self.allocator, definition.return_variables.items.len);
+        for (definition.return_variables.items) |*return_variable|
+            result.return_variables.appendAssumeCapacity(try self.translateNameWithDebugData(return_variable));
         result.body = try self.translateBlock(&definition.body);
         function_scope_open = false;
         try self.leaveFunction(definition);
@@ -216,7 +212,7 @@ pub const ASTCopier = struct {
         try self.enterScope(&loop.pre);
         var loop_scope_open = true;
         errdefer if (loop_scope_open) self.leaveScope(&loop.pre) catch {}; // zlinter-disable-current-line no_swallow_error - rollback cleanup must preserve the initiating error
-        var result: AST.ForLoop = .{ .debug_data = loop.debug_data };
+        var result: AST.ForLoop = .{ .debug_data = try self.translateDebugData(loop.debug_data) };
         errdefer result.deinit(self.allocator);
         result.pre = try self.translateBlock(&loop.pre);
         result.condition = try self.translateOptionalExpression(loop.condition);
@@ -231,7 +227,7 @@ pub const ASTCopier = struct {
         self: *ASTCopier,
         case_value: *const AST.Case,
     ) anyerror!AST.Case {
-        var result: AST.Case = .{ .debug_data = case_value.debug_data };
+        var result: AST.Case = .{ .debug_data = try self.translateDebugData(case_value.debug_data) };
         errdefer result.deinit(self.allocator);
         if (case_value.value) |literal| {
             var translated = try self.translateLiteral(literal);
@@ -247,7 +243,7 @@ pub const ASTCopier = struct {
         literal: *const AST.Literal,
     ) anyerror!AST.Literal {
         return .{
-            .debug_data = literal.debug_data,
+            .debug_data = try self.translateDebugData(literal.debug_data),
             .kind = literal.kind,
             .value = try literal.value.clone(self.allocator),
         };
@@ -257,7 +253,7 @@ pub const ASTCopier = struct {
         if (self.hooks.translate_identifier_node) |callback|
             if (try callback(self.context, self, identifier)) |replacement| return replacement;
         return .{
-            .debug_data = identifier.debug_data,
+            .debug_data = try self.translateDebugData(identifier.debug_data),
             .name = try self.translateIdentifierName(identifier.name),
         };
     }
@@ -268,7 +264,7 @@ pub const ASTCopier = struct {
     ) anyerror!AST.FunctionName {
         return switch (function_name.*) {
             .identifier => |*identifier| .{ .identifier = try self.translateIdentifier(identifier) },
-            .builtin => |builtin| .{ .builtin = builtin },
+            .builtin => |builtin| .{ .builtin = .{ .handle = builtin.handle, .debug_data = try self.translateDebugData(builtin.debug_data) } },
         };
     }
 
@@ -277,7 +273,7 @@ pub const ASTCopier = struct {
         value: *const AST.NameWithDebugData,
     ) anyerror!AST.NameWithDebugData {
         return .{
-            .debug_data = value.debug_data,
+            .debug_data = try self.translateDebugData(value.debug_data),
             .name = try self.translateIdentifierName(value.name),
         };
     }
@@ -290,6 +286,11 @@ pub const ASTCopier = struct {
         var translated = try self.translateExpression(value);
         errdefer translated.deinit(self.allocator);
         return AST.createExpression(self.allocator, translated);
+    }
+
+    fn translateDebugData(self: *ASTCopier, data: ?DebugData) anyerror!?DebugData {
+        if (self.hooks.translate_debug_data) |callback| return callback(self.context, data);
+        return data;
     }
 
     fn translateIdentifierName(self: *ASTCopier, name: YulName) anyerror!YulName {
@@ -377,4 +378,34 @@ test "AST copier deep-copies owned literals and applies function renames" {
         "{\n    let renamed := \"abc\"\n    function f(renamed) -> r\n    { r := renamed }\n    f(renamed)\n}",
         rendered,
     );
+}
+
+test "Yul AST copier releases partial nested copies on allocation failure" {
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Encoding = @import("../ast_encoding.zig");
+    const allocator = std.testing.allocator;
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(allocator,
+        \\{ function f(a, b) -> r, s {
+        \\  for { let i := 0 } lt(i, a) { i := add(i, 1) } {
+        \\   switch i case 0 { r := b continue } default { s := add(s, 1) }
+        \\   if s { break }
+        \\  }
+        \\  leave
+        \\ }
+        \\ let x, y := f(3, 7) x, y := f(5, 6) x := "abc" { pop(x) }
+        \\}
+    , "copy.yul", &reporter, .{}, .{})).?;
+    defer ast.deinit();
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, source: *const AST.Block) !void {
+            var copier = ASTCopier.init(failing);
+            var result = try copier.translateBlock(source);
+            defer result.deinit(failing);
+            try std.testing.expectEqualDeep(try Encoding.hashBlock(source), try Encoding.hashBlock(&result));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ast.root()});
 }

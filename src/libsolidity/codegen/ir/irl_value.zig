@@ -2,76 +2,62 @@
 // Copyright (C) 2014-2026 The Solidity Authors.
 // Copyright (C) 2026 OKcontract Pte. Ltd.
 
-//! Owned lvalue-location variants translated from `IRLValue.h`.
+//! Lvalue locations translated from `IRLValue.h`. Stack and tuple containers are
+//! owned; Yul addresses borrow the generation arena. First use transfers child
+//! storage. Repeated uses copy the existing AST before optimization can mutate it.
 
 const std = @import("std");
 const AST = @import("../../ast/ast.zig");
 const Types = @import("../../ast/types.zig");
+const Yul = @import("../../../libyul/ast.zig");
+const YulName = @import("../../../libyul/yul_name.zig").YulName;
+const Builder = @import("../../../libyul/ast_builder.zig").Builder;
+const Copier = @import("../../../libyul/optimiser/ast_copier.zig").ASTCopier;
 const IRVariable = @import("ir_variable.zig").IRVariable;
 
 pub const Offset = union(enum) {
-    runtime: []u8,
+    runtime: YulName,
     constant: u32,
 
-    pub fn initRuntime(
-        allocator: std.mem.Allocator,
-        value: []const u8,
-    ) std.mem.Allocator.Error!Offset {
-        return .{ .runtime = try allocator.dupe(u8, value) };
-    }
-
-    pub fn deinit(self: *Offset, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .runtime => |value| allocator.free(value),
-            .constant => {},
-        }
-        self.* = undefined;
-    }
-
-    pub fn stringAlloc(
-        self: Offset,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
+    pub fn expression(self: Offset, builder: Builder) @import("../../../libyul/ast_template.zig").Error!Yul.Expression {
         return switch (self) {
-            .runtime => |value| allocator.dupe(u8, value),
-            .constant => |value| std.fmt.allocPrint(allocator, "{d}", .{value}),
+            .runtime => |name| .{ .identifier = .{ .name = name } },
+            .constant => |value| builder.expression("@0", .{value}),
         };
     }
 };
 
 pub const GenericStorage = struct {
-    slot: []u8,
+    slot: Yul.Expression,
     offset: Offset,
+    used: bool = false,
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        slot: []const u8,
-        offset: Offset,
-    ) std.mem.Allocator.Error!GenericStorage {
-        return .{
-            .slot = try allocator.dupe(u8, slot),
-            .offset = offset,
-        };
-    }
-
-    pub fn deinit(self: *GenericStorage, allocator: std.mem.Allocator) void {
-        allocator.free(self.slot);
-        self.offset.deinit(allocator);
-        self.* = undefined;
-    }
-
-    pub fn offsetStringAlloc(
-        self: *const GenericStorage,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
-        return self.offset.stringAlloc(allocator);
+    pub fn slotExpression(self: *GenericStorage, builder: Builder) std.mem.Allocator.Error!Yul.Expression {
+        return materializeAddress(builder, &self.slot, &self.used);
     }
 };
 
 pub const Memory = struct {
-    address: []u8,
+    address: Yul.Expression,
     byte_array_element: bool = false,
+    used: bool = false,
+
+    pub fn addressExpression(self: *Memory, builder: Builder) std.mem.Allocator.Error!Yul.Expression {
+        return materializeAddress(builder, &self.address, &self.used);
+    }
 };
+
+fn materializeAddress(builder: Builder, expression: *const Yul.Expression, used: *bool) std.mem.Allocator.Error!Yul.Expression {
+    if (!used.*) {
+        used.* = true;
+        return expression.*;
+    }
+    var copier = Copier.init(builder.allocator());
+    return copier.translateExpression(expression) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => unreachable, // No hooks: copying a constructed address cannot reject semantics.
+    };
+}
 
 pub const Tuple = struct {
     /// Null entries preserve Solidity tuple placeholders. Non-null components
@@ -116,38 +102,28 @@ pub const IRLValue = struct {
     pub fn initStorage(
         allocator: std.mem.Allocator,
         type_ref: *const Types.Type,
-        slot: []const u8,
+        slot: Yul.Expression,
         offset: Offset,
         transient: bool,
-    ) std.mem.Allocator.Error!IRLValue {
-        const storage = GenericStorage.init(allocator, slot, offset) catch |err| {
-            var owned_offset = offset;
-            owned_offset.deinit(allocator);
-            return err;
-        };
+    ) IRLValue {
+        const storage: GenericStorage = .{ .slot = slot, .offset = offset };
         return .{
             .allocator = allocator,
             .type_ref = type_ref,
-            .kind = if (transient)
-                .{ .transient_storage = storage }
-            else
-                .{ .storage = storage },
+            .kind = if (transient) .{ .transient_storage = storage } else .{ .storage = storage },
         };
     }
 
     pub fn initMemory(
         allocator: std.mem.Allocator,
         type_ref: *const Types.Type,
-        address: []const u8,
+        address: Yul.Expression,
         byte_array_element: bool,
-    ) std.mem.Allocator.Error!IRLValue {
+    ) IRLValue {
         return .{
             .allocator = allocator,
             .type_ref = type_ref,
-            .kind = .{ .memory = .{
-                .address = try allocator.dupe(u8, address),
-                .byte_array_element = byte_array_element,
-            } },
+            .kind = .{ .memory = .{ .address = address, .byte_array_element = byte_array_element } },
         };
     }
 
@@ -169,9 +145,7 @@ pub const IRLValue = struct {
         switch (self.kind) {
             .stack => |*variable| variable.deinit(),
             .immutable => {},
-            .storage => |*storage| storage.deinit(self.allocator),
-            .transient_storage => |*storage| storage.deinit(self.allocator),
-            .memory => |memory| self.allocator.free(memory.address),
+            .storage, .transient_storage, .memory => {},
             .tuple => |tuple| {
                 for (tuple.components) |component| if (component) |value| {
                     value.deinit();
@@ -184,37 +158,26 @@ pub const IRLValue = struct {
     }
 };
 
-test "storage offsets render constants and runtime expressions" {
-    const uint_type = Types.Type{ .payload = .{ .Integer = .{
-        .bits = 256,
-        .modifier = .Unsigned,
-    } } };
-    var constant = try IRLValue.initStorage(
-        std.testing.allocator,
-        &uint_type,
-        "slot",
-        .{ .constant = 7 },
-        false,
-    );
-    defer constant.deinit();
-    const constant_text = try constant.kind.storage.offsetStringAlloc(std.testing.allocator);
-    defer std.testing.allocator.free(constant_text);
-    try std.testing.expectEqualStrings("7", constant_text);
-
-    const runtime_offset = try Offset.initRuntime(std.testing.allocator, "index");
-    var transient = try IRLValue.initStorage(
-        std.testing.allocator,
-        &uint_type,
-        "tslot",
-        runtime_offset,
-        true,
-    );
-    defer transient.deinit();
-    const runtime_text = try transient.kind.transient_storage.offsetStringAlloc(
-        std.testing.allocator,
-    );
-    defer std.testing.allocator.free(runtime_text);
-    try std.testing.expectEqualStrings("index", runtime_text);
+test "Yul AST lvalue locations preserve offsets and own emitted occurrences" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var dialect = try @import("../../../libyul/backends/evm/evm_dialect.zig").EVMDialect.init(allocator, .current(), true);
+    defer dialect.deinit();
+    const builder = Builder.init(&arena, dialect.dialect());
+    const offset: Offset = .{ .constant = 7 };
+    const value = try offset.expression(builder);
+    try std.testing.expectEqual(@as(?u256, 7), value.literal.value.numeric_value);
+    const runtime_offset: Offset = .{ .runtime = try builder.name("index") };
+    const runtime = try runtime_offset.expression(builder);
+    try std.testing.expectEqualStrings("index", try runtime.identifier.name.str());
+    var memory: Memory = .{ .address = try builder.expression("add(base, 32)", .{}) };
+    var first = try memory.addressExpression(builder);
+    try std.testing.expect(first.function_call.arguments.items.ptr == memory.address.function_call.arguments.items.ptr);
+    const second = try memory.addressExpression(builder);
+    try std.testing.expect(first.function_call.arguments.items.ptr != second.function_call.arguments.items.ptr);
+    first.function_call.arguments.items[1].literal.value.numeric_value = 64;
+    try std.testing.expectEqual(@as(?u256, 32), second.function_call.arguments.items[1].literal.value.numeric_value);
 }
 
 test "tuple lvalues own recursive components and placeholders" {

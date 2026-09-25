@@ -7,7 +7,6 @@
 const std = @import("std");
 const ordered = @import("cxx_compat");
 const AST = @import("../ast.zig");
-const ASTCopier = @import("ast_copier.zig").ASTCopier;
 const AsmAnalysis = @import("../asm_analysis.zig");
 const Compilability = @import("../compilability_checker.zig");
 const ControlFlowGraphBuilder = @import("../backends/evm/control_flow_graph_builder.zig").ControlFlowGraphBuilder;
@@ -166,12 +165,15 @@ pub const RunResult = struct {
 };
 
 pub const StackCompressor = struct {
+    /// Consumes the object code. The returned root retains the same allocator
+    /// and borrows the object's source names; destroy it before the object.
+    /// On error the consumed root is destroyed and the object code is empty.
     pub fn run(
-        allocator: std.mem.Allocator,
-        object: *const Object,
+        object: *Object,
         optimize_stack_allocation: bool,
         max_iterations: usize,
     ) !RunResult {
+        const allocator = object.allocator;
         const code = object.code() orelse return error.MissingObjectCode;
         const dialect = object.dialect() orelse return error.MissingDialect;
         if (code.root().statements.items.len == 0 or
@@ -190,8 +192,7 @@ pub const StackCompressor = struct {
             code.root(),
         );
 
-        var copier = ASTCopier.init(allocator);
-        var ast_root = try copier.translateBlock(code.root());
+        var ast_root = try object.takeCodeRoot();
         errdefer ast_root.deinit(allocator);
 
         if (use_optimized_codegen) {
@@ -449,7 +450,7 @@ test "classic stack compression rematerializes a deeply buried value" {
     object.setCode(ast, null);
     ast = undefined;
 
-    var result = try StackCompressor.run(allocator, object, true, 16);
+    var result = try StackCompressor.run(object, true, 16);
     defer result.deinit(allocator);
     try std.testing.expect(result.success);
     var printer = AsmPrinter.AsmPrinter.init(

@@ -13,19 +13,21 @@ const TypeBehavior = @import("../ast/types.zig");
 const TypeProviderModule = @import("../ast/type_provider.zig");
 const EVMVersion = @import("../../liblangutil/evm_version.zig").EVMVersion;
 const DebugSettings = @import("../interface/debug_settings.zig");
+const Yul = @import("../../libyul/ast.zig");
+const YulName = @import("../../libyul/yul_name.zig").YulName;
+const Generated = @import("../../libyul/generated_code.zig");
 const CollectorModule = @import("multi_use_yul_function_collector.zig");
 const Numeric = @import("../../libsolutil/numeric.zig");
 const Keccak256 = @import("../../libsolutil/keccak256.zig");
 const FunctionSelector = @import("../../libsolutil/function_selector.zig");
 const PanicCode = @import("../../libsolutil/error_codes.zig").PanicCode;
-const CommonData = @import("../../libsolutil/common_data.zig");
 const AsmParser = @import("../../libyul/asm_parser.zig");
 const AsmAnalysis = @import("../../libyul/asm_analysis.zig");
 const AsmAnalysisInfo = @import("../../libyul/asm_analysis_info.zig").AsmAnalysisInfo;
 const EVMDialectModule = @import("../../libyul/backends/evm/evm_dialect.zig");
 const Diagnostics = @import("../../liblangutil/diagnostics.zig");
 
-pub const UtilError = TypeBehavior.BehaviorError || CollectorModule.CollectorError || error{
+pub const UtilError = @import("../../libyul/utilities.zig").LiteralError || TypeBehavior.BehaviorError || CollectorModule.CollectorError || error{
     UnsupportedType,
     InvalidType,
     StringTooLong,
@@ -92,95 +94,64 @@ pub const YulUtilFunctions = struct {
     }
 
     pub fn identityFunction(self: *YulUtilFunctions) UtilError![]u8 {
-        return self.collectSimple(
+        return self.collectTemplate(
             "identity",
             "\nfunction identity(value) -> ret {\nret := value\n}\n",
         );
     }
 
-    pub fn combineExternalFunctionIdFunction(
-        self: *YulUtilFunctions,
-    ) UtilError![]u8 {
+    pub fn combineExternalFunctionIdFunction(self: *YulUtilFunctions) UtilError![]u8 {
         const name = "combine_external_function_id";
-        if (!(try self.function_collector.beginFunction(name)))
-            return self.function_collector.copyFunctionName(name);
+        if (!(try self.function_collector.beginFunction(name))) return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
         const shift_32 = try self.shiftLeftFunction(32);
         defer self.allocator.free(shift_32);
         const shift_64 = try self.shiftLeftFunction(64);
         defer self.allocator.free(shift_64);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(addr, selector) -> combined {{\ncombined := {s}(or({s}(addr), and(selector, 0xffffffff)))\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        try self.function_collector.finishGeneratedFunction(name, try generator.functionDefinition(
+            "\nfunction @0(addr, selector) -> combined {\ncombined := @1(or(@2(addr), and(selector, 0xffffffff)))\n}\n",
             .{ name, shift_64, shift_32 },
-        );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        ));
         return self.function_collector.copyFunctionName(name);
     }
 
-    pub fn splitExternalFunctionIdFunction(
-        self: *YulUtilFunctions,
-    ) UtilError![]u8 {
+    pub fn splitExternalFunctionIdFunction(self: *YulUtilFunctions) UtilError![]u8 {
         const name = "split_external_function_id";
-        if (!(try self.function_collector.beginFunction(name)))
-            return self.function_collector.copyFunctionName(name);
+        if (!(try self.function_collector.beginFunction(name))) return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
-        // Preserve upstream's request order: the 32-bit helper is registered
-        // before the 64-bit helper even though the latter appears first.
+        // Preserve dependency request order even though shift_64 occurs first.
         const shift_32 = try self.shiftRightFunction(32);
         defer self.allocator.free(shift_32);
         const shift_64 = try self.shiftRightFunction(64);
         defer self.allocator.free(shift_64);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(combined) -> addr, selector {{\ncombined := {s}(combined)\nselector := and(combined, 0xffffffff)\naddr := {s}(combined)\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        try self.function_collector.finishGeneratedFunction(name, try generator.functionDefinition(
+            "\nfunction @0(combined) -> addr, selector {\ncombined := @1(combined)\nselector := and(combined, 0xffffffff)\naddr := @2(combined)\n}\n",
             .{ name, shift_64, shift_32 },
-        );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        ));
         return self.function_collector.copyFunctionName(name);
     }
 
-    pub fn copyToMemoryFunction(
-        self: *YulUtilFunctions,
-        from_calldata: bool,
-        cleanup: bool,
-    ) UtilError![]u8 {
-        const name = try std.fmt.allocPrint(
-            self.allocator,
-            "copy_{s}_to_memory{s}",
-            .{
-                if (from_calldata) "calldata" else "memory",
-                if (cleanup) "_with_cleanup" else "",
-            },
-        );
+    pub fn copyToMemoryFunction(self: *YulUtilFunctions, from_calldata: bool, cleanup: bool) UtilError![]u8 {
+        const name = try std.fmt.allocPrint(self.allocator, "copy_{s}_to_memory{s}", .{ if (from_calldata) "calldata" else "memory", if (cleanup) "_with_cleanup" else "" });
         defer self.allocator.free(name);
-        if (!(try self.function_collector.beginFunction(name)))
-            return self.function_collector.copyFunctionName(name);
+        if (!(try self.function_collector.beginFunction(name))) return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
-
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
+        const generator = try self.function_collector.generator(self.evm_version);
+        var body: Generated.Buffer = .{ .generator = generator };
         if (from_calldata) {
-            try body.appendSlice(self.allocator, "calldatacopy(dst, src, length)\n");
+            try body.add("calldatacopy(dst, src, length)\n", .{});
         } else if (self.evm_version.hasMcopy()) {
-            try body.appendSlice(self.allocator, "mcopy(dst, src, length)\n");
+            try body.add("mcopy(dst, src, length)\n", .{});
         } else {
-            try body.appendSlice(
-                self.allocator,
-                "let i := 0\nfor { } lt(i, length) { i := add(i, 32) }\n{\nmstore(add(dst, i), mload(add(src, i)))\n}\n",
-            );
+            try body.add("let i := 0\nfor { } lt(i, length) { i := add(i, 32) }\n{\nmstore(add(dst, i), mload(add(src, i)))\n}\n", .{});
         }
-        if (cleanup)
-            try body.appendSlice(self.allocator, "mstore(add(dst, length), 0)\n");
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(src, dst, length) {{\n{s}}}\n",
-            .{ name, body.items },
-        );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        if (cleanup) try body.add("mstore(add(dst, length), 0)\n", .{});
+        try self.function_collector.finishGeneratedFunction(name, try generator.functionDefinition(
+            "\nfunction @0(src, dst, length) {\n@1}\n",
+            .{ name, body.take() },
+        ));
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -200,29 +171,26 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
-        var stores: std.ArrayList(u8) = .empty;
-        defer stores.deinit(self.allocator);
+        const generator = try self.function_collector.generator(self.evm_version);
+        var stores: Generated.Buffer = .{ .generator = generator };
         var offset: usize = 0;
         while (offset < literal.len) : (offset += 32) {
             const chunk = literal[offset..@min(literal.len, offset + 32)];
-            const word = try CommonData.formatAsStringOrNumberAlloc(
-                self.allocator,
+            const word = try generator.word(
                 chunk,
             );
-            defer self.allocator.free(word);
-            try stores.print(
-                self.allocator,
-                "mstore(add(memPtr, {d}), {s})\n",
+
+            try stores.add(
+                "mstore(add(memPtr, @0), @1)\n",
                 .{ offset, word },
             );
         }
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(memPtr) {{\n{s}}}\n",
-            .{ name, stores.items },
+        const code = try generator.functionDefinition(
+            "\nfunction @0(memPtr) {\n@1}\n",
+            .{ name, stores.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -247,13 +215,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(allocate);
         const store = try self.storeLiteralInMemoryFunction(literal);
         defer self.allocator.free(store);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}() -> memPtr {{\nmemPtr := {s}({d})\n{s}(add(memPtr, 32))\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0() -> memPtr {\nmemPtr := @1(@2)\n@3(add(memPtr, 32))\n}\n",
             .{ name, allocate, literal.len, store },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -277,53 +244,46 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(byte_length);
         const cleanup = try self.cleanUpDynamicByteArrayEndSlotsFunction(bytes_storage);
         defer self.allocator.free(cleanup);
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-        try body.print(
-            self.allocator,
-            "let oldLen := {s}(sload(slot))\n{s}(slot, oldLen, {d})\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        var body: Generated.Buffer = .{ .generator = generator };
+        try body.add(
+            "let oldLen := @0(sload(slot))\n@1(slot, oldLen, @2)\n",
             .{ byte_length, cleanup, literal.len },
         );
         if (literal.len >= 32) {
             const data_area = try self.arrayDataAreaFunction(bytes_storage);
             defer self.allocator.free(data_area);
-            try body.print(
-                self.allocator,
-                "sstore(slot, {d})\nlet dstPtr := {s}(slot)\n",
+            try body.add(
+                "sstore(slot, @0)\nlet dstPtr := @1(slot)\n",
                 .{ 2 * literal.len + 1, data_area },
             );
             var offset: usize = 0;
             while (offset < literal.len) : (offset += 32) {
-                const word = try CommonData.formatAsStringOrNumberAlloc(
-                    self.allocator,
+                const word = try generator.word(
                     literal[offset..@min(literal.len, offset + 32)],
                 );
-                defer self.allocator.free(word);
-                try body.print(
-                    self.allocator,
-                    "sstore(add(dstPtr, {d}), {s})\n",
+
+                try body.add(
+                    "sstore(add(dstPtr, @0), @1)\n",
                     .{ offset / 32, word },
                 );
             }
         } else {
-            const word = try CommonData.formatAsStringOrNumberAlloc(
-                self.allocator,
+            const word = try generator.word(
                 literal,
             );
-            defer self.allocator.free(word);
-            try body.print(
-                self.allocator,
-                "sstore(slot, add({s}, {d}))\n",
+
+            try body.add(
+                "sstore(slot, add(@0, @1))\n",
                 .{ word, 2 * literal.len },
             );
         }
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot) {{\n{s}}}\n",
-            .{ name, body.items },
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot) {\n@1}\n",
+            .{ name, body.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -343,6 +303,7 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
+        const generator = try self.function_collector.generator(self.evm_version);
         const body = switch (type_ref.payload) {
             .Address => blk: {
                 const uint160 = Types.Type{ .payload = .{ .Integer = .{
@@ -351,20 +312,18 @@ pub const YulUtilFunctions = struct {
                 } } };
                 const nested = try self.leftAlignFunction(&uint160);
                 defer self.allocator.free(nested);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "aligned := {s}(value)",
+                break :blk try generator.statements(
+                    "aligned := @0(value)",
                     .{nested},
                 );
             },
             .Integer => |integer| if (integer.bits == 256)
-                try self.allocator.dupe(u8, "aligned := value")
+                try generator.statements("aligned := value", .{})
             else blk: {
                 const shift = try self.shiftLeftFunction(256 - integer.bits);
                 defer self.allocator.free(shift);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "aligned := {s}(value)",
+                break :blk try generator.statements(
+                    "aligned := @0(value)",
                     .{shift},
                 );
             },
@@ -375,22 +334,20 @@ pub const YulUtilFunctions = struct {
                 } } };
                 const nested = try self.leftAlignFunction(&uint8);
                 defer self.allocator.free(nested);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "aligned := {s}(value)",
+                break :blk try generator.statements(
+                    "aligned := @0(value)",
                     .{nested},
                 );
             },
-            .FixedBytes => try self.allocator.dupe(u8, "aligned := value"),
+            .FixedBytes => try generator.statements("aligned := value", .{}),
             .Contract => blk: {
                 const address = Types.Type{ .payload = .{ .Address = .{
                     .state_mutability = .NonPayable,
                 } } };
                 const nested = try self.leftAlignFunction(&address);
                 defer self.allocator.free(nested);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "aligned := {s}(value)",
+                break :blk try generator.statements(
+                    "aligned := @0(value)",
                     .{nested},
                 );
             },
@@ -399,22 +356,18 @@ pub const YulUtilFunctions = struct {
                     value.underlying_type orelse return error.InvalidType,
                 );
                 defer self.allocator.free(nested);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "aligned := {s}(value)",
+                break :blk try generator.statements(
+                    "aligned := @0(value)",
                     .{nested},
                 );
             },
             else => return error.UnsupportedType,
         };
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> aligned {{\n{s}\n}}\n",
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> aligned {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -435,40 +388,36 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
-        var parameters: []const u8 = "value";
+        const generator = try self.function_collector.generator(self.evm_version);
+        var parameters: []const []const u8 = &.{"value"};
         const body = if (!array.isDynamicallySized()) blk: {
             const length = try compactHex(self.allocator, array.length.?);
             defer self.allocator.free(length);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "length := {s}",
-                .{length},
+            break :blk try generator.statements(
+                "length := @0",
+                .{try generator.numberToken(length)},
             );
         } else switch (array.reference.location) {
-            .Memory => try self.allocator.dupe(u8, "length := mload(value)"),
+            .Memory => try generator.statements("length := mload(value)", .{}),
             .Storage => if (array.isByteArrayOrString()) blk: {
                 const extract = try self.extractByteArrayLengthFunction();
                 defer self.allocator.free(extract);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "length := sload(value)\nlength := {s}(length)",
+                break :blk try generator.statements(
+                    "length := sload(value)\nlength := @0(length)",
                     .{extract},
                 );
-            } else try self.allocator.dupe(u8, "length := sload(value)"),
+            } else try generator.statements("length := sload(value)", .{}),
             .CallData => blk: {
-                parameters = "value, len";
-                break :blk try self.allocator.dupe(u8, "length := len");
+                parameters = &.{ "value", "len" };
+                break :blk try generator.statements("length := len", .{});
             },
             .Transient => return error.UnsupportedType,
         };
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}({s}) -> length {{\n{s}\n}}\n",
+        const code = try generator.functionDefinition(
+            "\nfunction @0(@1) -> length {\n@2\n}\n",
             .{ name, parameters, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -481,13 +430,12 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const panic = try self.panicFunction(.storage_encoding_error);
         defer self.allocator.free(panic);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(data) -> length {{\nlength := div(data, 2)\nlet outOfPlaceEncoding := and(data, 1)\nif iszero(outOfPlaceEncoding) {{\nlength := and(length, 0x7f)\n}}\n\nif eq(outOfPlaceEncoding, lt(length, 32)) {{\n{s}()\n}}\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(data) -> length {\nlength := div(data, 2)\nlet outOfPlaceEncoding := and(data, 1)\nif iszero(outOfPlaceEncoding) {\nlength := and(length, 0x7f)\n}\n\nif eq(outOfPlaceEncoding, lt(length, 32)) {\n@1()\n}\n}\n",
             .{ name, panic },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -512,26 +460,23 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(panic);
         const round_up = try self.roundUpFunction();
         defer self.allocator.free(round_up);
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-        try body.print(
-            self.allocator,
-            "if gt(length, 0xffffffffffffffff) {{ {s}() }}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        var body: Generated.Buffer = .{ .generator = generator };
+        try body.add(
+            "if gt(length, 0xffffffffffffffff) { @0() }\n",
             .{panic},
         );
         if (array.isByteArrayOrString())
-            try body.print(self.allocator, "size := {s}(length)\n", .{round_up})
+            try body.add("size := @0(length)\n", .{round_up})
         else
-            try body.appendSlice(self.allocator, "size := mul(length, 0x20)\n");
+            try body.add("size := mul(length, 0x20)\n", .{});
         if (array.isDynamicallySized())
-            try body.appendSlice(self.allocator, "size := add(size, 0x20)\n");
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(length) -> size {{\n// Make sure we can allocate memory without overflow\n{s}}}\n",
-            .{ name, body.items },
+            try body.add("size := add(size, 0x20)\n", .{});
+        const code = try generator.functionDefinition(
+            "\nfunction @0(length) -> size {\n// Make sure we can allocate memory without overflow\n@1}\n",
+            .{ name, body.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -551,20 +496,19 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
-        var dynamic_body: []const u8 = "";
+        const generator = try self.function_collector.generator(self.evm_version);
+        var dynamic_body: Yul.Block = .{};
         if (array.isDynamicallySized()) dynamic_body = switch (array.reference.location) {
-            .Memory => "data := add(ptr, 0x20)\n",
-            .Storage => "mstore(0, ptr)\ndata := keccak256(0, 0x20)\n",
-            .CallData => "",
+            .Memory => try generator.statements("data := add(ptr, 0x20)\n", .{}),
+            .Storage => try generator.statements("mstore(0, ptr)\ndata := keccak256(0, 0x20)\n", .{}),
+            .CallData => try generator.statements("", .{}),
             .Transient => return error.UnsupportedType,
         };
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(ptr) -> data {{\ndata := ptr\n{s}}}\n",
+        const code = try generator.functionDefinition(
+            "\nfunction @0(ptr) -> data {\ndata := ptr\n@1}\n",
             .{ name, dynamic_body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -587,6 +531,7 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const body = switch (array.reference.location) {
             .Storage => blk: {
                 const storage_bytes = try TypeBehavior.storageBytes(array.base_type);
@@ -598,15 +543,13 @@ pub const YulUtilFunctions = struct {
                 );
                 defer self.allocator.free(multiply);
                 if (storage_size > 1) {
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "size := length\nsize := {s}({d}, length)",
+                    break :blk try generator.statements(
+                        "size := length\nsize := @0(@1, length)",
                         .{ multiply, storage_size },
                     );
                 }
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "size := length\nsize := div(add(length, sub({d}, 1)), {d})",
+                break :blk try generator.statements(
+                    "size := length\nsize := div(add(length, sub(@0, 1)), @1)",
                     .{ 32 / storage_bytes, 32 / storage_bytes },
                 );
             },
@@ -620,23 +563,19 @@ pub const YulUtilFunctions = struct {
                 );
                 defer self.allocator.free(multiply);
                 if (array.isByteArrayOrString())
-                    break :blk try self.allocator.dupe(u8, "size := length");
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "size := {s}(length, {d})",
+                    break :blk try generator.statements("size := length", .{});
+                break :blk try generator.statements(
+                    "size := @0(length, @1)",
                     .{ multiply, stride },
                 );
             },
             .Transient => return error.UnsupportedTransientReference,
         };
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(length) -> size {{\n{s}\n}}\n",
+        const code = try generator.functionDefinition(
+            "\nfunction @0(length) -> size {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -649,13 +588,12 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const data_area = try self.arrayDataAreaFunction(self.type_provider.bytesStorage());
         defer self.allocator.free(data_area);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array, index) -> slot, offset {{\noffset := sub(31, mod(index, 0x20))\nlet dataArea := {s}(array)\nslot := add(dataArea, div(index, 0x20))\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array, index) -> slot, offset {\noffset := sub(31, mod(index, 0x20))\nlet dataArea := @1(array)\nslot := add(dataArea, div(index, 0x20))\n}\n",
             .{ name, data_area },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -691,43 +629,37 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(data_area);
         const no_checks = try self.longByteArrayStorageIndexAccessNoCheckFunction();
         defer self.allocator.free(no_checks);
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-        try body.print(
-            self.allocator,
-            "let arrayLength := {s}(array)\nif iszero(lt(index, arrayLength)) {{ {s}() }}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        var body: Generated.Buffer = .{ .generator = generator };
+        try body.add(
+            "let arrayLength := @0(array)\nif iszero(lt(index, arrayLength)) { @1() }\n",
             .{ length, panic },
         );
         if (storage_bytes <= 16) {
             if (array.isByteArrayOrString()) {
-                try body.print(
-                    self.allocator,
-                    "switch lt(arrayLength, 0x20)\ncase 0 {{ slot, offset := {s}(array, index) }}\ndefault {{ offset := sub(31, mod(index, 0x20)) slot := array }}\n",
+                try body.add(
+                    "switch lt(arrayLength, 0x20)\ncase 0 { slot, offset := @0(array, index) }\ndefault { offset := sub(31, mod(index, 0x20)) slot := array }\n",
                     .{no_checks},
                 );
             } else {
                 const items_per_slot = 32 / storage_bytes;
-                try body.print(
-                    self.allocator,
-                    "let dataArea := {s}(array)\nslot := add(dataArea, div(index, {d}))\noffset := mul(mod(index, {d}), {d})\n",
+                try body.add(
+                    "let dataArea := @0(array)\nslot := add(dataArea, div(index, @1))\noffset := mul(mod(index, @2), @3)\n",
                     .{ data_area, items_per_slot, items_per_slot, storage_bytes },
                 );
             }
         } else {
             const storage_size = try TypeBehavior.storageSize(array.base_type);
-            try body.print(
-                self.allocator,
-                "let dataArea := {s}(array)\nslot := add(dataArea, mul(index, {d}))\noffset := 0\n",
+            try body.add(
+                "let dataArea := @0(array)\nslot := add(dataArea, mul(index, @1))\noffset := 0\n",
                 .{ data_area, storage_size },
             );
         }
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array, index) -> slot, offset {{\n{s}}}\n",
-            .{ name, body.items },
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array, index) -> slot, offset {\n@1}\n",
+            .{ name, body.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -756,17 +688,16 @@ pub const YulUtilFunctions = struct {
         const length = try self.arrayLengthFunction(type_ref);
         defer self.allocator.free(length);
         const stride = try TypeBehavior.memoryStride(array);
+        const generator = try self.function_collector.generator(self.evm_version);
         const dynamic_adjustment = if (array.isDynamicallySized())
-            "offset := add(offset, 32)"
+            try generator.statements("offset := add(offset, 32)", .{})
         else
-            "";
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(baseRef, index) -> addr {{\nif iszero(lt(index, {s}(baseRef))) {{ {s}() }}\nlet offset := mul(index, {d})\n{s}\naddr := add(baseRef, offset)\n}}\n",
+            Yul.Block{};
+        const code = try generator.functionDefinition(
+            "\nfunction @0(baseRef, index) -> addr {\nif iszero(lt(index, @1(baseRef))) { @2() }\nlet offset := mul(index, @3)\n@4\naddr := add(baseRef, offset)\n}\n",
             .{ name, length, panic, stride, dynamic_adjustment },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -798,31 +729,22 @@ pub const YulUtilFunctions = struct {
         else
             try self.allocator.alloc(u8, 0);
         defer self.allocator.free(static_length);
-        const parameters = if (array.isDynamicallySized())
-            "base_ref, length, index"
-        else
-            "base_ref, index";
-        const bound = if (array.isDynamicallySized()) "length" else static_length;
+        const generator = try self.function_collector.generator(self.evm_version);
+        const parameters: []const []const u8 = if (array.isDynamicallySized()) &.{ "base_ref", "length", "index" } else &.{ "base_ref", "index" };
+        const bound = if (array.isDynamicallySized()) try generator.identifier("length") else try generator.numberToken(static_length);
         const dynamic_base = TypeBehavior.isDynamicallyEncoded(array.base_type);
         const dynamic_length = TypeBehavior.isDynamicallySized(array.base_type);
-        const returns = if (dynamic_length) "addr, len" else "addr";
+        const returns: []const []const u8 = if (dynamic_length) &.{ "addr", "len" } else &.{"addr"};
         const tail = if (dynamic_base) blk: {
             const access = try self.accessCalldataTailFunction(array.base_type);
             defer self.allocator.free(access);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "addr{s} := {s}(base_ref, addr)",
-                .{ if (dynamic_length) ", len" else "", access },
-            );
-        } else try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(tail);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}({s}) -> {s} {{\nif iszero(lt(index, {s})) {{ {s}() }}\naddr := add(base_ref, mul(index, {d}))\n{s}\n}}\n",
+            break :blk try generator.statements("@0 := @1(base_ref, addr)", .{ returns, access });
+        } else Yul.Block{};
+        const code = try generator.functionDefinition(
+            "\nfunction @0(@1) -> @2 {\nif iszero(lt(index, @3)) { @4() }\naddr := add(base_ref, mul(index, @5))\n@6\n}\n",
             .{ name, parameters, returns, bound, panic, stride, tail },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -852,13 +774,12 @@ pub const YulUtilFunctions = struct {
         const length_error = try self.revertReasonIfDebugFunction("Slice is greater than length");
         defer self.allocator.free(length_error);
         const stride = try TypeBehavior.calldataStride(array);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(offset, length, startIndex, endIndex) -> offsetOut, lengthOut {{\nif gt(startIndex, endIndex) {{ {s}() }}\nif gt(endIndex, length) {{ {s}() }}\noffsetOut := add(offset, mul(startIndex, {d}))\nlengthOut := sub(endIndex, startIndex)\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(offset, length, startIndex, endIndex) -> offsetOut, lengthOut {\nif gt(startIndex, endIndex) { @1() }\nif gt(endIndex, length) { @2() }\noffsetOut := add(offset, mul(startIndex, @3))\nlengthOut := sub(endIndex, startIndex)\n}\n",
             .{ name, start_error, length_error, stride },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -894,22 +815,19 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(bad_length);
         const short_tail = try self.revertReasonIfDebugFunction("Calldata tail too short");
         defer self.allocator.free(short_tail);
+        const generator = try self.function_collector.generator(self.evm_version);
         const dynamic_body = if (dynamic)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "length := calldataload(addr)\nif gt(length, 0xffffffffffffffff) {{ {s}() }}\naddr := add(addr, 32)\nif sgt(addr, sub(calldatasize(), mul(length, {d}))) {{ {s}() }}",
+            try generator.statements(
+                "length := calldataload(addr)\nif gt(length, 0xffffffffffffffff) { @0() }\naddr := add(addr, 32)\nif sgt(addr, sub(calldatasize(), mul(length, @1))) { @2() }",
                 .{ bad_length, stride, short_tail },
             )
         else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(dynamic_body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(base_ref, ptr_to_tail) -> addr{s} {{\nlet rel_offset_of_tail := calldataload(ptr_to_tail)\nif iszero(slt(rel_offset_of_tail, sub(sub(calldatasize(), base_ref), sub({s}, 1)))) {{ {s}() }}\naddr := add(base_ref, rel_offset_of_tail)\n{s}\n}}\n",
-            .{ name, if (dynamic) ", length" else "", needed_length_text, bad_offset, dynamic_body },
+            Yul.Block{};
+        const code = try generator.functionDefinition(
+            "\nfunction @0(base_ref, ptr_to_tail) -> @1 {\nlet rel_offset_of_tail := calldataload(ptr_to_tail)\nif iszero(slt(rel_offset_of_tail, sub(sub(calldatasize(), base_ref), sub(@2, 1)))) { @3() }\naddr := add(base_ref, rel_offset_of_tail)\n@4\n}\n",
+            .{ name, @as([]const []const u8, if (dynamic) &.{ "addr", "length" } else &.{"addr"}), try generator.numberToken(needed_length_text), bad_offset, dynamic_body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -942,13 +860,12 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(ptr) -> next {{\nnext := add(ptr, {s})\n}}\n",
-            .{ name, advance },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(ptr) -> next {\nnext := add(ptr, @1)\n}\n",
+            .{ name, try generator.numberToken(advance) },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -973,6 +890,7 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(name);
         if (try self.function_collector.beginFunction(name)) {
             errdefer self.function_collector.abortFunction(name);
+            const generator = try self.function_collector.generator(self.evm_version);
             const code = if (TypeBehavior.isValueType(from.base_type)) value: {
                 if (!TypeBehavior.equals(from.base_type, to.base_type))
                     return error.InvalidType;
@@ -983,9 +901,8 @@ pub const YulUtilFunctions = struct {
                     defer self.allocator.free(encode);
                     const finalize = try self.finalizeAllocationFunction();
                     defer self.allocator.free(finalize);
-                    break :value try std.fmt.allocPrint(
-                        self.allocator,
-                        "\nfunction {s}(slot) -> memPtr {{\nmemPtr := {s}()\nlet end := {s}(slot, memPtr)\n{s}(memPtr, sub(end, memPtr))\n}}\n",
+                    break :value try generator.functionDefinition(
+                        "\nfunction @0(slot) -> memPtr {\nmemPtr := @1()\nlet end := @2(slot, memPtr)\n@3(memPtr, sub(end, memPtr))\n}\n",
                         .{ name, allocate, encode, finalize },
                     );
                 }
@@ -1008,28 +925,27 @@ pub const YulUtilFunctions = struct {
                 const write = try self.writeToMemoryFunction(to.base_type);
                 defer self.allocator.free(write);
                 const stack_size = try TypeBehavior.sizeOnStack(from.base_type);
-                const values = try indexedNamesAlloc(self.allocator, "item_", stack_size);
-                defer self.allocator.free(values);
+                const values = try generator.indexedNames("item_", stack_size);
+
                 const memory_stride = try TypeBehavior.memoryStride(to.*);
-                break :value try std.fmt.allocPrint(self.allocator,
-                    \\function {s}(slot) -> memPtr {{
-                    \\    let length := {s}(slot)
-                    \\    memPtr := {s}(length)
+                break :value try generator.functionDefinition(
+                    \\function @0(slot) -> memPtr {
+                    \\    let length := @1(slot)
+                    \\    memPtr := @2(length)
                     \\    let mpos := memPtr
-                    \\    {s}
-                    \\    for {{ let i := 0 }} lt(i, length) {{ i := add(i, 1) }} {{
-                    \\        let itemSlot, itemOffset := {s}(slot, i)
-                    \\        let {s} := {s}(itemSlot, itemOffset)
-                    \\        {s}(mpos, {s})
-                    \\        mpos := add(mpos, {d})
-                    \\    }}
-                    \\}}
-                    \\
+                    \\    @3
+                    \\    for { let i := 0 } lt(i, length) { i := add(i, 1) } {
+                    \\        let itemSlot, itemOffset := @4(slot, i)
+                    \\        let @5 := @6(itemSlot, itemOffset)
+                    \\        @7(mpos, @8)
+                    \\        mpos := add(mpos, @9)
+                    \\    }
+                    \\}
                 , .{
                     name,
                     length,
                     allocate,
-                    if (to.isDynamicallySized()) "mpos := add(mpos, 0x20)" else "",
+                    if (to.isDynamicallySized()) try generator.statements("mpos := add(mpos, 0x20)", .{}) else Yul.Block{},
                     index,
                     values,
                     read,
@@ -1055,32 +971,31 @@ pub const YulUtilFunctions = struct {
                 );
                 defer self.allocator.free(conversion);
                 const storage_size = try TypeBehavior.storageSize(from.base_type);
-                break :reference try std.fmt.allocPrint(self.allocator,
-                    \\function {s}(slot) -> memPtr {{
-                    \\    let length := {s}(slot)
-                    \\    memPtr := {s}(length)
+                break :reference try generator.functionDefinition(
+                    \\function @0(slot) -> memPtr {
+                    \\    let length := @1(slot)
+                    \\    memPtr := @2(length)
                     \\    let mpos := memPtr
-                    \\    {s}
-                    \\    let spos := {s}(slot)
-                    \\    for {{ let i := 0 }} lt(i, length) {{ i := add(i, 1) }} {{
-                    \\        mstore(mpos, {s}(spos))
+                    \\    @3
+                    \\    let spos := @4(slot)
+                    \\    for { let i := 0 } lt(i, length) { i := add(i, 1) } {
+                    \\        mstore(mpos, @5(spos))
                     \\        mpos := add(mpos, 0x20)
-                    \\        spos := add(spos, {d})
-                    \\    }}
-                    \\}}
-                    \\
+                    \\        spos := add(spos, @6)
+                    \\    }
+                    \\}
                 , .{
                     name,
                     length,
                     allocate,
-                    if (to.isDynamicallySized()) "mpos := add(mpos, 0x20)" else "",
+                    if (to.isDynamicallySized()) try generator.statements("mpos := add(mpos, 0x20)", .{}) else Yul.Block{},
                     data_area,
                     conversion,
                     storage_size,
                 });
             };
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -1130,13 +1045,13 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(src_data);
             const dst_data = try self.arrayDataAreaFunction(to_type);
             defer self.allocator.free(dst_data);
+            const generator = try self.function_collector.generator(self.evm_version);
             const stack_size = try TypeBehavior.sizeOnStack(from.base_type);
-            const stack_items = try indexedNamesAlloc(
-                self.allocator,
+            const stack_items = try generator.indexedNames(
                 "stackItem_",
                 stack_size,
             );
-            defer self.allocator.free(stack_items);
+
             const update = try self.updateStorageValueFunction(
                 from.base_type,
                 to.base_type,
@@ -1147,15 +1062,13 @@ pub const YulUtilFunctions = struct {
                 if (TypeBehavior.isDynamicallyEncoded(from.base_type)) {
                     const access = try self.accessCalldataTailFunction(from.base_type);
                     defer self.allocator.free(access);
-                    break :calldata try std.fmt.allocPrint(
-                        self.allocator,
-                        "let {s} := {s}(value, srcPtr)",
+                    break :calldata try generator.statements(
+                        "let @0 := @1(value, srcPtr)",
                         .{ stack_items, access },
                     );
                 }
-                break :calldata try std.fmt.allocPrint(
-                    self.allocator,
-                    "let {s} := srcPtr",
+                break :calldata try generator.statements(
+                    "let @0 := srcPtr",
                     .{stack_items},
                 );
             } else if (from_memory) memory: {
@@ -1164,17 +1077,15 @@ pub const YulUtilFunctions = struct {
                     false,
                 );
                 defer self.allocator.free(read);
-                break :memory try std.fmt.allocPrint(
-                    self.allocator,
-                    "let {s} := {s}(srcPtr)",
+                break :memory try generator.statements(
+                    "let @0 := @1(srcPtr)",
                     .{ stack_items, read },
                 );
-            } else try std.fmt.allocPrint(
-                self.allocator,
-                "let {s} := srcPtr",
+            } else try generator.statements(
+                "let @0 := srcPtr",
                 .{stack_items},
             );
-            defer self.allocator.free(source_read);
+
             const src_stride: u256 = if (from_calldata)
                 try TypeBehavior.calldataStride(from.*)
             else if (from_memory)
@@ -1182,27 +1093,28 @@ pub const YulUtilFunctions = struct {
             else
                 try TypeBehavior.storageSize(from.base_type);
             const destination_size = try TypeBehavior.storageSize(to.base_type);
-            const code = try std.fmt.allocPrint(self.allocator,
-                \\function {s}(slot, value{s}) {{
-                \\    {s}
-                \\    let length := {s}(value{s})
-                \\    {s}(slot, length)
-                \\    let srcPtr := {s}(value)
-                \\    let elementSlot := {s}(slot)
-                \\    for {{ let i := 0 }} lt(i, length) {{ i := add(i, 1) }} {{
-                \\        {s}
-                \\        {s}(elementSlot, {s})
-                \\        srcPtr := add(srcPtr, {d})
-                \\        elementSlot := add(elementSlot, {d})
-                \\    }}
-                \\}}
-                \\
+            const len_name = try generator.name("len");
+            const len_names: []const YulName = if (dynamic_calldata) &.{len_name} else &.{};
+            const code = try generator.functionDefinition(
+                \\function @0(slot, value, @1) {
+                \\    @2
+                \\    let length := @3(value, @4)
+                \\    @5(slot, length)
+                \\    let srcPtr := @6(value)
+                \\    let elementSlot := @7(slot)
+                \\    for { let i := 0 } lt(i, length) { i := add(i, 1) } {
+                \\        @8
+                \\        @9(elementSlot, @10)
+                \\        srcPtr := add(srcPtr, @11)
+                \\        elementSlot := add(elementSlot, @12)
+                \\    }
+                \\}
             , .{
                 name,
-                if (dynamic_calldata) ", len" else "",
-                if (from_storage) "if eq(slot, value) { leave }" else "",
+                len_names,
+                if (from_storage) try generator.statements("if eq(slot, value) { leave }", .{}) else Yul.Block{},
                 length,
-                if (dynamic_calldata) ", len" else "",
+                len_names,
                 resize,
                 src_data,
                 dst_data,
@@ -1212,8 +1124,8 @@ pub const YulUtilFunctions = struct {
                 src_stride,
                 destination_size,
             });
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -1270,58 +1182,59 @@ pub const YulUtilFunctions = struct {
                 "calldataload"
             else
                 "mload";
+            const generator = try self.function_collector.generator(self.evm_version);
             const source_assignment = if (from_storage)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "src := {s}(src)",
+                try generator.statements(
+                    "src := @0(src)",
                     .{source_data},
                 )
             else
-                try self.allocator.alloc(u8, 0);
-            defer self.allocator.free(source_assignment);
-            const code = try std.fmt.allocPrint(self.allocator,
-                \\function {s}(slot, src{s}) {{
-                \\    {s}
-                \\    let newLen := {s}(src{s})
-                \\    if gt(newLen, 0xffffffffffffffff) {{ {s}() }}
-                \\    let oldLen := {s}(sload(slot))
-                \\    {s}(slot, oldLen, newLen)
+                Yul.Block{};
+
+            const len_name = try generator.name("len");
+            const len_names: []const YulName = if (from_calldata) &.{len_name} else &.{};
+            const code = try generator.functionDefinition(
+                \\function @0(slot, src, @1) {
+                \\    @2
+                \\    let newLen := @3(src, @4)
+                \\    if gt(newLen, 0xffffffffffffffff) { @5() }
+                \\    let oldLen := @6(sload(slot))
+                \\    @7(slot, oldLen, newLen)
                 \\    let srcOffset := 0
-                \\    {s}
+                \\    @8
                 \\    switch gt(newLen, 31)
-                \\    case 1 {{
+                \\    case 1 {
                 \\        let loopEnd := and(newLen, not(0x1f))
-                \\        {s}
-                \\        let dstPtr := {s}(slot)
+                \\        @9
+                \\        let dstPtr := @10(slot)
                 \\        let i := 0
-                \\        for {{ }} lt(i, loopEnd) {{ i := add(i, 0x20) }} {{
-                \\            sstore(dstPtr, {s}(add(src, srcOffset)))
+                \\        for { } lt(i, loopEnd) { i := add(i, 0x20) } {
+                \\            sstore(dstPtr, @11(add(src, srcOffset)))
                 \\            dstPtr := add(dstPtr, 1)
-                \\            srcOffset := add(srcOffset, {d})
-                \\        }}
-                \\        if lt(loopEnd, newLen) {{
-                \\            let lastValue := {s}(add(src, srcOffset))
-                \\            sstore(dstPtr, {s}(lastValue, and(newLen, 0x1f)))
-                \\        }}
+                \\            srcOffset := add(srcOffset, @12)
+                \\        }
+                \\        if lt(loopEnd, newLen) {
+                \\            let lastValue := @13(add(src, srcOffset))
+                \\            sstore(dstPtr, @14(lastValue, and(newLen, 0x1f)))
+                \\        }
                 \\        sstore(slot, add(mul(newLen, 2), 1))
-                \\    }}
-                \\    default {{
+                \\    }
+                \\    default {
                 \\        let value := 0
-                \\        if newLen {{ value := {s}(add(src, srcOffset)) }}
-                \\        sstore(slot, {s}(value, newLen))
-                \\    }}
-                \\}}
-                \\
+                \\        if newLen { value := @15(add(src, srcOffset)) }
+                \\        sstore(slot, @16(value, newLen))
+                \\    }
+                \\}
             , .{
                 name,
-                if (from_calldata) ", len" else "",
-                if (from_storage) "if eq(slot, src) { leave }" else "",
+                len_names,
+                if (from_storage) try generator.statements("if eq(slot, src) { leave }", .{}) else Yul.Block{},
                 length,
-                if (from_calldata) ", len" else "",
+                len_names,
                 panic,
                 byte_length,
                 cleanup,
-                if (from_memory) "srcOffset := 0x20" else "",
+                if (from_memory) try generator.statements("srcOffset := 0x20", .{}) else Yul.Block{},
                 source_assignment,
                 destination_data,
                 load,
@@ -1331,8 +1244,8 @@ pub const YulUtilFunctions = struct {
                 load,
                 combine_short,
             });
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -1392,13 +1305,13 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(source_data);
             const destination_data = try self.arrayDataAreaFunction(to_type);
             defer self.allocator.free(destination_data);
+            const generator = try self.function_collector.generator(self.evm_version);
             const stack_size = try TypeBehavior.sizeOnStack(from.base_type);
-            const stack_items = try indexedNamesAlloc(
-                self.allocator,
+            const stack_items = try generator.indexedNames(
                 "stackItem_",
                 stack_size,
             );
-            defer self.allocator.free(stack_items);
+
             const items_per_slot: u8 = 32 / destination_storage_stride;
             const multiple_destination_items = items_per_slot > 1;
             var same_type_from_storage = from_storage and
@@ -1446,158 +1359,77 @@ pub const YulUtilFunctions = struct {
                 try self.allocator.alloc(u8, 0);
             defer self.allocator.free(prepare);
 
-            const update_source = if (from_storage) storage: {
-                if (!same_type_from_storage and source_storage_stride <= 16)
-                    break :storage try std.fmt.allocPrint(self.allocator,
-                        \\srcItemIndexInSlot := add(srcItemIndexInSlot, 1)
-                        \\if eq(srcItemIndexInSlot, {d}) {{
-                        \\    srcPtr := add(srcPtr, 1)
-                        \\    srcSlotValue := sload(srcPtr)
-                        \\    srcItemIndexInSlot := 0
-                        \\}}
-                        \\
-                    , .{32 / source_storage_stride});
-                break :storage try self.allocator.dupe(
-                    u8,
-                    "srcPtr := add(srcPtr, 1)\nsrcSlotValue := sload(srcPtr)\n",
-                );
-            } else try std.fmt.allocPrint(
-                self.allocator,
-                "srcPtr := add(srcPtr, {d})",
-                .{if (from_calldata)
-                    try TypeBehavior.calldataStride(from.*)
-                else
-                    try TypeBehavior.memoryStride(from.*)},
-            );
-            defer self.allocator.free(update_source);
-
-            var body: std.ArrayList(u8) = .empty;
-            defer body.deinit(self.allocator);
-            try body.print(
-                self.allocator,
-                "function {s}(dst, src{s}) {{\n",
-                .{ name, if (dynamic_calldata) ", len" else "" },
-            );
-            if (from_storage)
-                try body.appendSlice(self.allocator, "if eq(dst, src) { leave }\n");
-            try body.print(
-                self.allocator,
-                "let length := {s}(src{s})\nif gt(length, 0xffffffffffffffff) {{ {s}() }}\n{s}(dst, length)\nlet srcPtr := {s}(src)\nlet dstSlot := {s}(dst)\nlet fullSlots := div(length, {d})\n",
-                .{
-                    length_function,
-                    if (dynamic_calldata) ", len" else "",
-                    panic,
-                    resize,
-                    source_data,
-                    destination_data,
-                    items_per_slot,
-                },
-            );
-            if (from_storage)
-                try body.appendSlice(
-                    self.allocator,
-                    "let srcSlotValue := sload(srcPtr)\nlet srcItemIndexInSlot := 0\n",
-                );
-            try body.appendSlice(
-                self.allocator,
-                "for { let i := 0 } lt(i, fullSlots) { i := add(i, 1) } {\nlet dstSlotValue := 0\n",
-            );
-            if (same_type_from_storage) {
-                try body.print(
-                    self.allocator,
-                    "dstSlotValue := {s}(srcSlotValue)\n{s}\n",
-                    .{ mask_full, update_source },
-                );
-            } else {
-                if (multiple_destination_items)
-                    try body.print(
-                        self.allocator,
-                        "for {{ let j := 0 }} lt(j, {d}) {{ j := add(j, 1) }} {{\n",
-                        .{items_per_slot},
-                    );
-                if (from_storage)
-                    try body.print(
-                        self.allocator,
-                        "let {s} := {s}({s}(srcSlotValue, mul({d}, srcItemIndexInSlot)))\n",
-                        .{ stack_items, conversion, extract, source_storage_stride },
+            const source_advance: u256 = if (from_storage) 1 else if (from_calldata)
+                try TypeBehavior.calldataStride(from.*)
+            else
+                try TypeBehavior.memoryStride(from.*);
+            // Full and partial slots contain distinct mutable AST occurrences.
+            // Construct each from the same recipe; no prototype tree is retained
+            // or traversed just to clone it for the second loop.
+            var transfers: [2]Yul.Block = .{ .{}, .{} };
+            const transfer_count: usize = if (multiple_destination_items) 2 else 1;
+            for (transfers[0..transfer_count], 0..) |*transfer, mode| {
+                const partial_slot = mode == 1;
+                const update_source = if (from_storage and !same_type_from_storage and source_storage_stride <= 16)
+                    try generator.statements(
+                        "srcItemIndexInSlot := add(srcItemIndexInSlot, 1) if eq(srcItemIndexInSlot, @0) { srcPtr := add(srcPtr, 1) srcSlotValue := sload(srcPtr) srcItemIndexInSlot := 0 }",
+                        .{32 / source_storage_stride},
                     )
+                else if (from_storage)
+                    try generator.statements("srcPtr := add(srcPtr, 1) srcSlotValue := sload(srcPtr)", .{})
                 else
-                    try body.print(
-                        self.allocator,
-                        "let {s} := {s}(srcPtr)\n",
-                        .{ stack_items, read },
-                    );
-                try body.print(
-                    self.allocator,
-                    "let itemValue := {s}({s})\n",
-                    .{ prepare, stack_items },
-                );
-                if (multiple_destination_items)
-                    try body.print(
-                        self.allocator,
-                        "dstSlotValue := {s}(dstSlotValue, mul({d}, j), itemValue)\n",
-                        .{ update_slice, destination_storage_stride },
-                    )
-                else
-                    try body.appendSlice(self.allocator, "dstSlotValue := itemValue\n");
-                try body.print(self.allocator, "{s}\n", .{update_source});
-                if (multiple_destination_items)
-                    try body.appendSlice(self.allocator, "}\n");
-            }
-            try body.appendSlice(
-                self.allocator,
-                "sstore(add(dstSlot, i), dstSlotValue)\n}\n",
-            );
-            if (multiple_destination_items) {
-                try body.print(
-                    self.allocator,
-                    "let spill := sub(length, mul(fullSlots, {d}))\nif gt(spill, 0) {{\nlet dstSlotValue := 0\n",
-                    .{items_per_slot},
-                );
+                    try generator.statements("srcPtr := add(srcPtr, @0)", .{source_advance});
                 if (same_type_from_storage) {
-                    try body.print(
-                        self.allocator,
-                        "dstSlotValue := {s}(srcSlotValue, mul(spill, {d}))\n{s}\n",
-                        .{ mask_bytes, source_storage_stride, update_source },
-                    );
-                } else {
-                    try body.appendSlice(
-                        self.allocator,
-                        "for { let j := 0 } lt(j, spill) { j := add(j, 1) } {\n",
-                    );
-                    if (from_storage)
-                        try body.print(
-                            self.allocator,
-                            "let {s} := {s}({s}(srcSlotValue, mul({d}, srcItemIndexInSlot)))\n",
-                            .{ stack_items, conversion, extract, source_storage_stride },
-                        )
+                    transfer.* = if (partial_slot)
+                        try generator.statements("dstSlotValue := @0(srcSlotValue, mul(spill, @1)) @2", .{ mask_bytes, source_storage_stride, update_source })
                     else
-                        try body.print(
-                            self.allocator,
-                            "let {s} := {s}(srcPtr)\n",
-                            .{ stack_items, read },
-                        );
-                    try body.print(
-                        self.allocator,
-                        "let itemValue := {s}({s})\ndstSlotValue := {s}(dstSlotValue, mul({d}, j), itemValue)\n{s}\n}}\n",
-                        .{
-                            prepare,
-                            stack_items,
-                            update_slice,
-                            destination_storage_stride,
-                            update_source,
-                        },
-                    );
+                        try generator.statements("dstSlotValue := @0(srcSlotValue) @1", .{ mask_full, update_source });
+                } else {
+                    const read_item = if (from_storage)
+                        try generator.statements("let @0 := @1(@2(srcSlotValue, mul(@3, srcItemIndexInSlot)))", .{ stack_items, conversion, extract, source_storage_stride })
+                    else
+                        try generator.statements("let @0 := @1(srcPtr)", .{ stack_items, read });
+                    const insert_item = if (multiple_destination_items)
+                        try generator.statements("dstSlotValue := @0(dstSlotValue, mul(@1, j), itemValue)", .{ update_slice, destination_storage_stride })
+                    else
+                        try generator.statements("dstSlotValue := itemValue", .{});
+                    const item = try generator.statements("@0 let itemValue := @1(@2) @3 @4", .{ read_item, prepare, stack_items, insert_item, update_source });
+                    transfer.* = if (multiple_destination_items)
+                        try generator.statements("for { let j := 0 } lt(j, @0) { j := add(j, 1) } { @1 }", .{ if (partial_slot) try generator.identifier("spill") else try generator.expression("@0", .{items_per_slot}), item })
+                    else
+                        try generator.statements("{ @0 }", .{item});
                 }
-                try body.appendSlice(
-                    self.allocator,
-                    "sstore(add(dstSlot, fullSlots), dstSlotValue)\n}\n",
-                );
             }
-            try body.appendSlice(self.allocator, "}\n");
-            const code = try body.toOwnedSlice(self.allocator);
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+            const spill = if (multiple_destination_items)
+                try generator.statements(
+                    "let spill := sub(length, mul(fullSlots, @0)) if gt(spill, 0) { let dstSlotValue := 0 @1 sstore(add(dstSlot, fullSlots), dstSlotValue) }",
+                    .{ items_per_slot, transfers[1] },
+                )
+            else
+                Yul.Block{};
+            const len_name = try generator.name("len");
+            const len_names: []const YulName = if (dynamic_calldata) &.{len_name} else &.{};
+            const alias_guard = if (from_storage) try generator.statements("if eq(dst, src) { leave }", .{}) else Yul.Block{};
+            const source_setup = if (from_storage) try generator.statements("let srcSlotValue := sload(srcPtr) let srcItemIndexInSlot := 0", .{}) else Yul.Block{};
+            const code = try generator.functionDefinition(
+                \\function @0(dst, src, @1) {
+                \\    @2
+                \\    let length := @3(src, @1)
+                \\    if gt(length, 0xffffffffffffffff) { @4() }
+                \\    @5(dst, length)
+                \\    let srcPtr := @6(src)
+                \\    let dstSlot := @7(dst)
+                \\    let fullSlots := div(length, @8)
+                \\    @9
+                \\    for { let i := 0 } lt(i, fullSlots) { i := add(i, 1) } {
+                \\        let dstSlotValue := 0
+                \\        @10
+                \\        sstore(add(dstSlot, i), dstSlotValue)
+                \\    }
+                \\    @11
+                \\}
+            , .{ name, len_names, alias_guard, length_function, panic, resize, source_data, destination_data, items_per_slot, source_setup, transfers[0], spill });
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -1656,15 +1488,8 @@ pub const YulUtilFunctions = struct {
             const from_calldata = from.reference.location == .CallData;
             if (!from_storage and !from_memory and !from_calldata)
                 return error.InvalidType;
-            var body: std.ArrayList(u8) = .empty;
-            defer body.deinit(self.allocator);
-            try body.print(
-                self.allocator,
-                "function {s}(slot, value) {{\n",
-                .{name},
-            );
-            if (from_storage)
-                try body.appendSlice(self.allocator, "if iszero(eq(slot, value)) {\n");
+            const generator = try self.function_collector.generator(self.evm_version);
+            var body: Generated.Buffer = .{ .generator = generator };
             for (from_members.items, to_members.items, to_offsets.offsets) |
                 from_member,
                 to_member,
@@ -1675,12 +1500,11 @@ pub const YulUtilFunctions = struct {
                     return error.InvalidType;
                 const to_offset = maybe_to_offset orelse return error.InvalidType;
                 const stack_size = try TypeBehavior.sizeOnStack(member_type);
-                const member_values = try indexedNamesAlloc(
-                    self.allocator,
+                const member_values = try generator.indexedNames(
                     "memberValue_",
                     stack_size,
                 );
-                defer self.allocator.free(member_values);
+
                 const member_source_offset: u256 = if (from_calldata)
                     try TypeBehavior.structCalldataOffsetOfMember(
                         from,
@@ -1737,64 +1561,49 @@ pub const YulUtilFunctions = struct {
                     to_offset.byte_offset,
                 );
                 defer self.allocator.free(update);
-                try body.print(
-                    self.allocator,
-                    "{{\nlet memberSlot := add(slot, {d})\nlet memberSrcPtr := add(value, {d})\n",
-                    .{ to_offset.slot, member_source_offset },
-                );
+                var member_body: Generated.Buffer = .{ .generator = generator };
                 if (from_calldata) {
                     if (calldata_access) |access| {
-                        try body.print(
-                            self.allocator,
-                            "let {s} := {s}(value, memberSrcPtr)\n",
+                        try member_body.add(
+                            "let @0 := @1(value, memberSrcPtr)\n",
                             .{ member_values, access },
                         );
                     } else {
-                        try body.print(
-                            self.allocator,
-                            "let {s} := memberSrcPtr\n",
+                        try member_body.add(
+                            "let @0 := memberSrcPtr\n",
                             .{member_values},
                         );
                     }
                     if (read) |read_function| {
-                        try body.print(
-                            self.allocator,
-                            "{s} := {s}({s})\n",
+                        try member_body.add(
+                            "@0 := @1(@2)\n",
                             .{ member_values, read_function, member_values },
                         );
                     }
                 } else if (from_memory) {
-                    try body.print(
-                        self.allocator,
-                        "let {s} := {s}(memberSrcPtr)\n",
+                    try member_body.add(
+                        "let @0 := @1(memberSrcPtr)\n",
                         .{ member_values, read.? },
                     );
                 } else {
                     if (read) |read_function| {
-                        try body.print(
-                            self.allocator,
-                            "let {s} := {s}(memberSrcPtr)\n",
+                        try member_body.add(
+                            "let @0 := @1(memberSrcPtr)\n",
                             .{ member_values, read_function },
                         );
                     } else {
-                        try body.print(
-                            self.allocator,
-                            "let {s} := memberSrcPtr\n",
+                        try member_body.add(
+                            "let @0 := memberSrcPtr\n",
                             .{member_values},
                         );
                     }
                 }
-                try body.print(
-                    self.allocator,
-                    "{s}(memberSlot, {s})\n}}\n",
-                    .{ update, member_values },
-                );
+                try body.add("{ let memberSlot := add(slot, @0) let memberSrcPtr := add(value, @1) @2 @3(memberSlot, @4) }", .{ to_offset.slot, member_source_offset, member_body.take(), update, member_values });
             }
-            if (from_storage) try body.appendSlice(self.allocator, "}\n");
-            try body.appendSlice(self.allocator, "}\n");
-            const code = try body.toOwnedSlice(self.allocator);
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+            const members = body.take();
+            const guarded = if (from_storage) try generator.statements("if iszero(eq(slot, value)) { @0 }", .{members}) else members;
+            const code = try generator.functionDefinition("function @0(slot, value) { @1 }", .{ name, guarded });
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -1830,12 +1639,12 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(length);
             const data_area = try self.arrayDataAreaFunction(from_type);
             defer self.allocator.free(data_area);
+            const generator = try self.function_collector.generator(self.evm_version);
             const extract = if (from_calldata) blk: {
                 const cleanup = try self.cleanupFunction(to_type);
                 defer self.allocator.free(cleanup);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "value := {s}(calldataload(dataArea))",
+                break :blk try generator.statements(
+                    "value := @0(calldataload(dataArea))",
                     .{cleanup},
                 );
             } else blk: {
@@ -1849,13 +1658,12 @@ pub const YulUtilFunctions = struct {
                 else
                     try self.readFromMemory(to_type);
                 defer self.allocator.free(read);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "value := {s}(dataArea)",
+                break :blk try generator.statements(
+                    "value := @0(dataArea)",
                     .{read},
                 );
             };
-            defer self.allocator.free(extract);
+
             const shift = try self.shiftLeftFunctionDynamic();
             defer self.allocator.free(shift);
             const fixed_bits: usize = @as(usize, fixed.bytes) * 8;
@@ -1868,45 +1676,25 @@ pub const YulUtilFunctions = struct {
             const mask = try compactHex(self.allocator, mask_value);
             defer self.allocator.free(mask);
             const data_area_setup = if (from_memory)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "dataArea := {s}(array)",
+                try generator.statements(
+                    "dataArea := @0(array)",
                     .{data_area},
                 )
             else if (from_storage)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "if gt(length, 31) {{ dataArea := {s}(array) }}",
+                try generator.statements(
+                    "if gt(length, 31) { dataArea := @0(array) }",
                     .{data_area},
                 )
             else
-                try self.allocator.alloc(u8, 0);
-            defer self.allocator.free(data_area_setup);
-            const code = try std.fmt.allocPrint(self.allocator,
-                \\function {s}(array{s}) -> value {{
-                \\    let length := {s}(array{s})
-                \\    let dataArea := array
-                \\    {s}
-                \\    {s}
-                \\    if lt(length, {d}) {{
-                \\        value := and(value, {s}(mul(8, sub({d}, length)), {s}))
-                \\    }}
-                \\}}
-                \\
-            , .{
-                name,
-                if (from_calldata) ", len" else "",
-                length,
-                if (from_calldata) ", len" else "",
-                data_area_setup,
-                extract,
-                fixed.bytes,
-                shift,
-                fixed.bytes,
-                mask,
-            });
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+                Yul.Block{};
+
+            const len_name = try generator.name("len");
+            const len_names: []const YulName = if (from_calldata) &.{len_name} else &.{};
+            const code = try generator.functionDefinition(
+                "function @0(array, @1) -> value { let length := @2(array, @1) let dataArea := array @3 @4 if lt(length, @5) { value := and(value, @6(mul(8, sub(@5, length)), @7)) } }",
+                .{ name, len_names, length, data_area_setup, extract, fixed.bytes, shift, try generator.numberToken(mask) },
+            );
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -1928,74 +1716,57 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(name);
         if (try self.function_collector.beginFunction(name)) {
             errdefer self.function_collector.abortFunction(name);
+            const generator = try self.function_collector.generator(self.evm_version);
             const code = if (from_type.asTuple()) |from_tuple| tuple: {
                 const to_tuple = to_type.asTuple() orelse return error.InvalidType;
                 if (from_tuple.components.len != to_tuple.components.len)
                     return error.InvalidType;
                 var source_stack_size: usize = 0;
                 var destination_stack_size: usize = 0;
-                var conversions: std.ArrayList(u8) = .empty;
-                defer conversions.deinit(self.allocator);
+                var conversions: Generated.Buffer = .{ .generator = generator };
                 for (from_tuple.components, to_tuple.components) |maybe_from, maybe_to| {
                     const component_from = maybe_from orelse return error.InvalidType;
                     const from_size = try TypeBehavior.sizeOnStack(component_from);
                     if (maybe_to) |component_to| {
                         const to_size = try TypeBehavior.sizeOnStack(component_to);
-                        const converted = try indexedRangeNamesAlloc(
-                            self.allocator,
+                        const converted = try generator.indexedNameRange(
                             "converted",
                             destination_stack_size,
                             destination_stack_size + to_size,
                         );
-                        defer self.allocator.free(converted);
-                        const values = try indexedRangeNamesAlloc(
-                            self.allocator,
+
+                        const values = try generator.indexedNameRange(
                             "value",
                             source_stack_size,
                             source_stack_size + from_size,
                         );
-                        defer self.allocator.free(values);
+
                         const conversion = try self.conversionFunction(
                             component_from,
                             component_to,
                         );
                         defer self.allocator.free(conversion);
-                        try conversions.print(
-                            self.allocator,
-                            "{s}{s}{s}({s})\n",
-                            .{
-                                converted,
-                                if (to_size == 0) "" else " := ",
-                                conversion,
-                                values,
-                            },
-                        );
+                        if (to_size == 0)
+                            try conversions.add("@0(@1)", .{ conversion, values })
+                        else
+                            try conversions.add("@0 := @1(@2)", .{ converted, conversion, values });
                         destination_stack_size += to_size;
                     }
                     source_stack_size += from_size;
                 }
-                const values = try indexedNamesAlloc(
-                    self.allocator,
+                const values = try generator.indexedNames(
                     "value",
                     source_stack_size,
                 );
-                defer self.allocator.free(values);
-                const converted = try indexedNamesAlloc(
-                    self.allocator,
+
+                const converted = try generator.indexedNames(
                     "converted",
                     destination_stack_size,
                 );
-                defer self.allocator.free(converted);
-                break :tuple try std.fmt.allocPrint(
-                    self.allocator,
-                    "\nfunction {s}({s}){s}{s} {{\n{s}}}\n",
-                    .{
-                        name,
-                        values,
-                        if (destination_stack_size == 0) "" else " -> ",
-                        converted,
-                        conversions.items,
-                    },
+
+                break :tuple try generator.functionDefinition(
+                    "function @0(@1) -> @2 { @3 }",
+                    .{ name, values, converted, conversions.take() },
                 );
             } else string_literal: {
                 const literal = switch (from_type.payload) {
@@ -2018,10 +1789,9 @@ pub const YulUtilFunctions = struct {
                             value,
                         );
                         defer self.allocator.free(word);
-                        break :string_literal try std.fmt.allocPrint(
-                            self.allocator,
-                            "\nfunction {s}() -> converted {{\nconverted := {s}\n}}\n",
-                            .{ name, word },
+                        break :string_literal try generator.functionDefinition(
+                            "\nfunction @0() -> converted {\nconverted := @1\n}\n",
+                            .{ name, try generator.numberToken(word) },
                         );
                     },
                     .Array => |array| {
@@ -2030,17 +1800,16 @@ pub const YulUtilFunctions = struct {
                             return error.InvalidType;
                         const copy = try self.copyLiteralToMemoryFunction(literal);
                         defer self.allocator.free(copy);
-                        break :string_literal try std.fmt.allocPrint(
-                            self.allocator,
-                            "\nfunction {s}() -> converted {{\nconverted := {s}()\n}}\n",
+                        break :string_literal try generator.functionDefinition(
+                            "\nfunction @0() -> converted {\nconverted := @1()\n}\n",
                             .{ name, copy },
                         );
                     },
                     else => return error.InvalidType,
                 }
             };
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -2081,8 +1850,9 @@ pub const YulUtilFunctions = struct {
                 (from.reference.location == .Memory and to.reference.location == .Memory) or
                 (from.reference.location == .CallData and to.reference.location == .CallData) or
                 to.reference.location == .Storage;
+            const generator = try self.function_collector.generator(self.evm_version);
             const body = if (same_representation)
-                try self.allocator.dupe(u8, "converted := value")
+                try generator.statements("converted := value", .{})
             else if (to.reference.location == .Memory and
                 from.reference.location == .Storage)
             storage: {
@@ -2091,31 +1861,22 @@ pub const YulUtilFunctions = struct {
                     to_type,
                 );
                 defer self.allocator.free(copy);
-                break :storage try std.fmt.allocPrint(
-                    self.allocator,
-                    "converted := {s}(value)",
+                break :storage try generator.statements(
+                    "converted := @0(value)",
                     .{copy},
                 );
             } else if (to.reference.location == .Memory and
                 from.reference.location == .CallData)
             calldata: {
                 const length_expression = if (from.isDynamicallySized())
-                    "length"
-                else blk: {
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "{d}",
-                        .{from.length.?},
-                    );
-                };
-                defer if (!from.isDynamicallySized())
-                    self.allocator.free(length_expression);
+                    try generator.identifier("length")
+                else
+                    try generator.expression("@0", .{from.length.?});
                 if (self.calldata_to_memory_abi_decoder) |provider| {
                     const decoder = try provider.generate(to_type);
                     defer self.allocator.free(decoder);
-                    break :calldata try std.fmt.allocPrint(
-                        self.allocator,
-                        "// Copy the array to a free position in memory\nconverted :=\n{s}(value, {s}, calldatasize())",
+                    break :calldata try generator.statements(
+                        "// Copy the array to a free position in memory\nconverted :=\n@0(value, @1, calldatasize())",
                         .{ decoder, length_expression },
                     );
                 }
@@ -2124,49 +1885,23 @@ pub const YulUtilFunctions = struct {
                     to_type,
                 );
                 defer self.allocator.free(copy);
-                break :calldata try std.fmt.allocPrint(
-                    self.allocator,
-                    "converted := {s}(value, {s})",
+                break :calldata try generator.statements(
+                    "converted := @0(value, @1)",
                     .{ copy, length_expression },
                 );
             } else return error.UnsupportedType;
-            defer self.allocator.free(body);
-            const output_length = if (to_dynamic_calldata)
-                if (from.isDynamicallySized()) "length" else length: {
-                    break :length try std.fmt.allocPrint(
-                        self.allocator,
-                        "{d}",
-                        .{from.length.?},
-                    );
-                }
-            else
-                "";
-            defer if (to_dynamic_calldata and !from.isDynamicallySized())
-                self.allocator.free(output_length);
+
             const output_length_statement = if (to_dynamic_calldata)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "outLength := {s}",
-                    .{output_length},
-                )
+                try generator.statements("outLength := @0", .{if (from.isDynamicallySized()) try generator.identifier("length") else try generator.expression("@0", .{from.length.?})})
             else
-                try self.allocator.alloc(u8, 0);
-            defer self.allocator.free(output_length_statement);
-            const code = try std.fmt.allocPrint(self.allocator,
-                \\function {s}(value{s}) -> converted{s} {{
-                \\    {s}
-                \\    {s}
-                \\}}
-                \\
-            , .{
-                name,
-                if (from_dynamic_calldata) ", length" else "",
-                if (to_dynamic_calldata) ", outLength" else "",
-                body,
-                output_length_statement,
-            });
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+                Yul.Block{};
+            const parameters: []const []const u8 = if (from_dynamic_calldata) &.{ "value", "length" } else &.{"value"};
+            const returns: []const []const u8 = if (to_dynamic_calldata) &.{ "converted", "outLength" } else &.{"converted"};
+            const code = try generator.functionDefinition(
+                "function @0(@1) -> @2 { @3 @4 }",
+                .{ name, parameters, returns, body, output_length_statement },
+            );
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -2196,6 +1931,7 @@ pub const YulUtilFunctions = struct {
             errdefer self.function_collector.abortFunction(name);
             const allocate = try self.allocateMemoryArrayFunction(to_type);
             defer self.allocator.free(allocate);
+            const generator = try self.function_collector.generator(self.evm_version);
             const code = if (from.isByteArrayOrString()) bytes: {
                 if (!to.isByteArrayOrString()) return error.InvalidType;
                 const copy = try self.copyToMemoryFunction(true, true);
@@ -2204,13 +1940,12 @@ pub const YulUtilFunctions = struct {
                     "ABI decoding: byte array data too short",
                 );
                 defer self.allocator.free(short);
-                break :bytes try std.fmt.allocPrint(self.allocator,
-                    \\function {s}(offset, length) -> array {{
-                    \\    if gt(add(offset, length), calldatasize()) {{ {s}() }}
-                    \\    array := {s}(length)
-                    \\    {s}(offset, add(array, 0x20), length)
-                    \\}}
-                    \\
+                break :bytes try generator.functionDefinition(
+                    \\function @0(offset, length) -> array {
+                    \\    if gt(add(offset, length), calldatasize()) { @1() }
+                    \\    array := @2(length)
+                    \\    @3(offset, add(array, 0x20), length)
+                    \\}
                 , .{ name, short, allocate, copy });
             } else ordinary: {
                 const source_stride = try TypeBehavior.calldataStride(from.*);
@@ -2219,18 +1954,16 @@ pub const YulUtilFunctions = struct {
                 const destination_size = try TypeBehavior.sizeOnStack(to.base_type);
                 if (source_size == 0 or destination_size == 0)
                     return error.UnsupportedType;
-                const source_values = try indexedNamesAlloc(
-                    self.allocator,
+                const source_values = try generator.indexedNames(
                     "sourceValue_",
                     source_size,
                 );
-                defer self.allocator.free(source_values);
-                const converted_values = try indexedNamesAlloc(
-                    self.allocator,
+
+                const converted_values = try generator.indexedNames(
                     "convertedValue_",
                     destination_size,
                 );
-                defer self.allocator.free(converted_values);
+
                 const conversion = try self.conversionFunction(
                     from.base_type,
                     to.base_type,
@@ -2241,50 +1974,46 @@ pub const YulUtilFunctions = struct {
                 const source = if (TypeBehavior.isDynamicallyEncoded(from.base_type)) dynamic: {
                     const access = try self.accessCalldataTailFunction(from.base_type);
                     defer self.allocator.free(access);
-                    break :dynamic try std.fmt.allocPrint(
-                        self.allocator,
-                        "let {s} := {s}(offset, src)",
+                    break :dynamic try generator.statements(
+                        "let @0 := @1(offset, src)",
                         .{ source_values, access },
                     );
                 } else if (TypeBehavior.isValueType(from.base_type)) scalar: {
                     const read = try self.readFromCalldata(from.base_type);
                     defer self.allocator.free(read);
-                    break :scalar try std.fmt.allocPrint(
-                        self.allocator,
-                        "let {s} := {s}(src)",
+                    break :scalar try generator.statements(
+                        "let @0 := @1(src)",
                         .{ source_values, read },
                     );
-                } else try std.fmt.allocPrint(
-                    self.allocator,
-                    "let {s} := src",
+                } else try generator.statements(
+                    "let @0 := src",
                     .{source_values},
                 );
-                defer self.allocator.free(source);
+
                 const short = try self.revertReasonIfDebugFunction(
                     "ABI decoding: calldata array data too short",
                 );
                 defer self.allocator.free(short);
-                break :ordinary try std.fmt.allocPrint(self.allocator,
-                    \\function {s}(offset, length) -> array {{
-                    \\    let srcEnd := add(offset, mul(length, {d}))
-                    \\    if or(lt(srcEnd, offset), gt(srcEnd, calldatasize())) {{ {s}() }}
-                    \\    array := {s}(length)
+                break :ordinary try generator.functionDefinition(
+                    \\function @0(offset, length) -> array {
+                    \\    let srcEnd := add(offset, mul(length, @1))
+                    \\    if or(lt(srcEnd, offset), gt(srcEnd, calldatasize())) { @2() }
+                    \\    array := @3(length)
                     \\    let dst := array
-                    \\    {s}
-                    \\    for {{ let src := offset }} lt(src, srcEnd) {{ src := add(src, {d}) }} {{
-                    \\        {s}
-                    \\        let {s} := {s}({s})
-                    \\        {s}(dst, {s})
-                    \\        dst := add(dst, {d})
-                    \\    }}
-                    \\}}
-                    \\
+                    \\    @4
+                    \\    for { let src := offset } lt(src, srcEnd) { src := add(src, @5) } {
+                    \\        @6
+                    \\        let @7 := @8(@9)
+                    \\        @10(dst, @11)
+                    \\        dst := add(dst, @12)
+                    \\    }
+                    \\}
                 , .{
                     name,
                     source_stride,
                     short,
                     allocate,
-                    if (to.isDynamicallySized()) "dst := add(dst, 0x20)" else "",
+                    if (to.isDynamicallySized()) try generator.statements("dst := add(dst, 0x20)", .{}) else Yul.Block{},
                     source_stride,
                     source,
                     converted_values,
@@ -2295,8 +2024,8 @@ pub const YulUtilFunctions = struct {
                     destination_stride,
                 });
             };
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -2359,14 +2088,8 @@ pub const YulUtilFunctions = struct {
                     head_size,
                     try TypeBehavior.calldataHeadSize(member.type_ref),
                 ) catch return error.Overflow;
-            var body: std.ArrayList(u8) = .empty;
-            defer body.deinit(self.allocator);
-            try body.print(self.allocator,
-                \\function {s}(offset) -> value {{
-                \\    if gt(add(offset, {d}), calldatasize()) {{ {s}() }}
-                \\    value := {s}()
-                \\
-            , .{ name, head_size, short, allocate });
+            const generator = try self.function_collector.generator(self.evm_version);
+            var body: Generated.Buffer = .{ .generator = generator };
             for (source_members.items, target_members.items) |source_member, target_member| {
                 const source_type = source_member.type_ref;
                 const target_type = target_member.type_ref;
@@ -2374,18 +2097,16 @@ pub const YulUtilFunctions = struct {
                 const target_size = try TypeBehavior.sizeOnStack(target_type);
                 if (source_size == 0 or target_size == 0)
                     return error.UnsupportedType;
-                const source_values = try indexedNamesAlloc(
-                    self.allocator,
+                const source_values = try generator.indexedNames(
                     "sourceValue_",
                     source_size,
                 );
-                defer self.allocator.free(source_values);
-                const converted_values = try indexedNamesAlloc(
-                    self.allocator,
+
+                const converted_values = try generator.indexedNames(
                     "convertedValue_",
                     target_size,
                 );
-                defer self.allocator.free(converted_values);
+
                 const calldata_offset = try TypeBehavior.structCalldataOffsetOfMember(
                     from,
                     source_member.name,
@@ -2397,32 +2118,28 @@ pub const YulUtilFunctions = struct {
                 const source = if (TypeBehavior.isDynamicallyEncoded(source_type)) dynamic: {
                     const access = try self.accessCalldataTailFunction(source_type);
                     defer self.allocator.free(access);
-                    break :dynamic try std.fmt.allocPrint(
-                        self.allocator,
-                        "let {s} := {s}(offset, add(offset, {d}))",
+                    break :dynamic try generator.statements(
+                        "let @0 := @1(offset, add(offset, @2))",
                         .{ source_values, access, calldata_offset },
                     );
                 } else if (TypeBehavior.isValueType(source_type)) scalar: {
                     const read = try self.readFromCalldata(source_type);
                     defer self.allocator.free(read);
-                    break :scalar try std.fmt.allocPrint(
-                        self.allocator,
-                        "let {s} := {s}(add(offset, {d}))",
+                    break :scalar try generator.statements(
+                        "let @0 := @1(add(offset, @2))",
                         .{ source_values, read, calldata_offset },
                     );
-                } else try std.fmt.allocPrint(
-                    self.allocator,
-                    "let {s} := add(offset, {d})",
+                } else try generator.statements(
+                    "let @0 := add(offset, @1)",
                     .{ source_values, calldata_offset },
                 );
-                defer self.allocator.free(source);
+
                 const conversion = try self.conversionFunction(source_type, target_type);
                 defer self.allocator.free(conversion);
                 const write = try self.writeToMemoryFunction(target_type);
                 defer self.allocator.free(write);
-                try body.print(
-                    self.allocator,
-                    "{{ {s} let {s} := {s}({s}) {s}(add(value, {d}), {s}) }}\n",
+                try body.add(
+                    "{ @0 let @1 := @2(@3) @4(add(value, @5), @6) }\n",
                     .{
                         source,
                         converted_values,
@@ -2434,10 +2151,11 @@ pub const YulUtilFunctions = struct {
                     },
                 );
             }
-            try body.appendSlice(self.allocator, "}\n");
-            const code = try body.toOwnedSlice(self.allocator);
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+            const code = try generator.functionDefinition(
+                "function @0(offset) -> value { if gt(add(offset, @1), calldatasize()) { @2() } value := @3() @4 }",
+                .{ name, head_size, short, allocate, body.take() },
+            );
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -2473,36 +2191,21 @@ pub const YulUtilFunctions = struct {
         }
         if (try self.function_collector.beginFunction(name.items)) {
             errdefer self.function_collector.abortFunction(name.items);
-            const parameters = try indexedNamesAlloc(
-                self.allocator,
+            const generator = try self.function_collector.generator(self.evm_version);
+            const parameters = try generator.indexedNames(
                 "param_",
                 total_parameters,
             );
-            defer self.allocator.free(parameters);
+
             const allocate = try self.allocateUnboundedFunction();
             defer self.allocator.free(allocate);
             const finalize = try self.finalizeAllocationFunction();
             defer self.allocator.free(finalize);
-            const code = try std.fmt.allocPrint(self.allocator,
-                \\function {s}({s}) -> outPtr {{
-                \\    outPtr := {s}()
-                \\    let dataStart := add(outPtr, 0x20)
-                \\    let dataEnd := {s}(dataStart{s}{s})
-                \\    mstore(outPtr, sub(dataEnd, dataStart))
-                \\    {s}(outPtr, sub(dataEnd, outPtr))
-                \\}}
-                \\
-            , .{
-                name.items,
-                parameters,
-                allocate,
-                packed_encoder_name,
-                if (parameters.len == 0) "" else ", ",
-                parameters,
-                finalize,
-            });
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name.items, code);
+            const code = try generator.functionDefinition(
+                "function @0(@1) -> outPtr { outPtr := @2() let dataStart := add(outPtr, 0x20) let dataEnd := @3(dataStart, @1) mstore(outPtr, sub(dataEnd, dataStart)) @4(outPtr, sub(dataEnd, outPtr)) }",
+                .{ name.items, parameters, allocate, packed_encoder_name, finalize },
+            );
+            try self.function_collector.finishGeneratedFunction(name.items, code);
         }
         return self.function_collector.copyFunctionName(name.items);
     }
@@ -2537,32 +2240,20 @@ pub const YulUtilFunctions = struct {
                     stack_size,
                     try TypeBehavior.sizeOnStack(type_ref),
                 ) catch return error.Overflow;
-            const variables = try indexedRangeNamesAlloc(
-                self.allocator,
+            const generator = try self.function_collector.generator(self.evm_version);
+            const variables = try generator.indexedNameRange(
                 "var_",
                 1,
                 1 + stack_size,
             );
-            defer self.allocator.free(variables);
+
             const allocate = try self.allocateUnboundedFunction();
             defer self.allocator.free(allocate);
-            const code = try std.fmt.allocPrint(self.allocator,
-                \\function {s}({s}) -> hash {{
-                \\    let pos := {s}()
-                \\    let end := {s}(pos{s}{s})
-                \\    hash := keccak256(pos, sub(end, pos))
-                \\}}
-                \\
-            , .{
-                name.items,
-                variables,
-                allocate,
-                packed_encoder_name,
-                if (variables.len == 0) "" else ", ",
-                variables,
-            });
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name.items, code);
+            const code = try generator.functionDefinition(
+                "function @0(@1) -> hash { let pos := @2() let end := @3(pos, @1) hash := keccak256(pos, sub(end, pos)) }",
+                .{ name.items, variables, allocate, packed_encoder_name },
+            );
+            try self.function_collector.finishGeneratedFunction(name.items, code);
         }
         return self.function_collector.copyFunctionName(name.items);
     }
@@ -2608,13 +2299,13 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(name);
             if (try self.function_collector.beginFunction(name)) {
                 errdefer self.function_collector.abortFunction(name);
-                const code = try std.fmt.allocPrint(
-                    self.allocator,
-                    "\nfunction {s}(offset, length) -> outOffset, outLength {{\noutOffset := offset\noutLength := length\n}}\n",
+                const generator = try self.function_collector.generator(self.evm_version);
+                const code = try generator.functionDefinition(
+                    "\nfunction @0(offset, length) -> outOffset, outLength {\noutOffset := offset\noutLength := length\n}\n",
                     .{name},
                 );
-                defer self.allocator.free(code);
-                try self.function_collector.finishFunction(name, code);
+
+                try self.function_collector.finishGeneratedFunction(name, code);
             }
             return self.function_collector.copyFunctionName(name);
         }
@@ -2651,20 +2342,19 @@ pub const YulUtilFunctions = struct {
             if (!(try self.function_collector.beginFunction(name)))
                 return self.function_collector.copyFunctionName(name);
             errdefer self.function_collector.abortFunction(name);
+            const generator = try self.function_collector.generator(self.evm_version);
             const code = if (from_function.kind == .External)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "\nfunction {s}(addr, functionId) -> outAddr, outFunctionId {{\noutAddr := addr\noutFunctionId := functionId\n}}\n",
+                try generator.functionDefinition(
+                    "\nfunction @0(addr, functionId) -> outAddr, outFunctionId {\noutAddr := addr\noutFunctionId := functionId\n}\n",
                     .{name},
                 )
             else
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "\nfunction {s}(functionId) -> outFunctionId {{\noutFunctionId := functionId\n}}\n",
+                try generator.functionDefinition(
+                    "\nfunction @0(functionId) -> outFunctionId {\noutFunctionId := functionId\n}\n",
                     .{name},
                 );
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+
+            try self.function_collector.finishGeneratedFunction(name, code);
             return self.function_collector.copyFunctionName(name);
         }
         if (try TypeBehavior.sizeOnStack(from) != 1 or
@@ -2702,6 +2392,7 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
 
         const body = switch (from_category) {
             .Address, .Contract => blk: {
@@ -2711,9 +2402,8 @@ pub const YulUtilFunctions = struct {
                 } } };
                 const convert = try self.conversionFunction(&uint160, to);
                 defer self.allocator.free(convert);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "converted := {s}(value)",
+                break :blk try generator.statements(
+                    "converted := @0(value)",
                     .{convert},
                 );
             },
@@ -2725,9 +2415,8 @@ pub const YulUtilFunctions = struct {
                     } } };
                     const convert = try self.conversionFunction(from, &uint160);
                     defer self.allocator.free(convert);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "converted := {s}(value)",
+                    break :blk try generator.statements(
+                        "converted := @0(value)",
                         .{convert},
                     );
                 }
@@ -2742,18 +2431,16 @@ pub const YulUtilFunctions = struct {
                     );
                 } else try self.identityFunction();
                 defer self.allocator.free(convert);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "converted := {s}({s}({s}(value)))",
+                break :blk try generator.statements(
+                    "converted := @0(@1(@2(value)))",
                     .{ clean_output, convert, clean_input },
                 );
             },
             .Bool, .Enum => blk: {
                 const clean = try self.cleanupFunction(from);
                 defer self.allocator.free(clean);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "converted := {s}(value)",
+                break :blk try generator.statements(
+                    "converted := @0(value)",
                     .{clean},
                 );
             },
@@ -2770,9 +2457,8 @@ pub const YulUtilFunctions = struct {
                     defer self.allocator.free(shift);
                     const convert = try self.conversionFunction(&integer, to);
                     defer self.allocator.free(convert);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "converted := {s}({s}(value))",
+                    break :blk try generator.statements(
+                        "converted := @0(@1(value))",
                         .{ convert, shift },
                     );
                 }
@@ -2783,9 +2469,8 @@ pub const YulUtilFunctions = struct {
                     } } };
                     const convert = try self.conversionFunction(from, &uint160);
                     defer self.allocator.free(convert);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "converted := {s}(value)",
+                    break :blk try generator.statements(
+                        "converted := @0(value)",
                         .{convert},
                     );
                 }
@@ -2794,9 +2479,8 @@ pub const YulUtilFunctions = struct {
                 const clean_type = if (to_bytes <= from_bytes) to else from;
                 const clean = try self.cleanupFunction(clean_type);
                 defer self.allocator.free(clean);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "converted := {s}(value)",
+                break :blk try generator.statements(
+                    "converted := @0(value)",
                     .{clean},
                 );
             },
@@ -2805,7 +2489,7 @@ pub const YulUtilFunctions = struct {
                 const to_struct = to.payload.Struct;
                 if (from_struct.reference.location == to_struct.reference.location and
                     to_struct.reference.isPointer())
-                    break :blk try self.allocator.dupe(u8, "converted := value");
+                    break :blk try generator.statements("converted := value", .{});
                 if (to_struct.reference.location != .Memory or
                     from_struct.reference.location == .Memory)
                     return error.UnsupportedType;
@@ -2821,19 +2505,17 @@ pub const YulUtilFunctions = struct {
                 defer self.allocator.free(read);
                 break :blk if (from_struct.reference.location == .CallData and
                     self.calldata_to_memory_abi_decoder != null)
-                    try std.fmt.allocPrint(
-                        self.allocator,
-                        "converted := {s}(value, calldatasize())",
+                    try generator.statements(
+                        "converted := @0(value, calldatasize())",
                         .{read},
                     )
                 else
-                    try std.fmt.allocPrint(
-                        self.allocator,
-                        "converted := {s}(value)",
+                    try generator.statements(
+                        "converted := @0(value)",
                         .{read},
                     );
             },
-            .Mapping => try self.allocator.dupe(u8, "converted := value"),
+            .Mapping => try generator.statements("converted := value", .{}),
             .TypeType => blk: {
                 const actual = from.payload.TypeType.actual_type;
                 const contract = switch (actual.payload) {
@@ -2843,18 +2525,17 @@ pub const YulUtilFunctions = struct {
                 if (contract.declaration.nodeKind() != .contract_definition or
                     contract.declaration.payload.contract_definition.contract_kind != .Library)
                     return error.InvalidType;
-                break :blk try self.allocator.dupe(u8, "converted := value");
+                break :blk try generator.statements("converted := value", .{});
             },
             else => return error.UnsupportedType,
         };
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> converted {{\n{s}\n}}\n",
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> converted {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -2868,21 +2549,18 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const expression = if (self.evm_version.hasBitwiseShifting())
-            try std.fmt.allocPrint(self.allocator, "shl({d}, value)", .{bits})
+            try generator.expression("shl(@0, value)", .{bits})
         else blk: {
-            const multiplier = try compactHex(self.allocator, @as(u256, 1) << @intCast(bits));
-            defer self.allocator.free(multiplier);
-            break :blk try std.fmt.allocPrint(self.allocator, "mul(value, {s})", .{multiplier});
+            const factor = try compactHex(self.allocator, @as(u256, 1) << @intCast(bits));
+            defer self.allocator.free(factor);
+            break :blk try generator.expression("mul(value, @0)", .{try generator.numberToken(factor)});
         };
-        defer self.allocator.free(expression);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> newValue {{\nnewValue :=\n\n{s}\n\n}}\n",
+        try self.function_collector.finishGeneratedFunction(name, try generator.functionDefinition(
+            "function @0(value) -> newValue { newValue := @1 }",
             .{ name, expression },
-        );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        ));
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -2900,52 +2578,40 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const expression = if (self.evm_version.hasBitwiseShifting())
-            try std.fmt.allocPrint(self.allocator, "shr({d}, value)", .{bits})
+            try generator.expression("shr(@0, value)", .{bits})
         else blk: {
-            const divisor = try compactHex(self.allocator, @as(u256, 1) << @intCast(bits));
-            defer self.allocator.free(divisor);
-            break :blk try std.fmt.allocPrint(self.allocator, "div(value, {s})", .{divisor});
+            const factor = try compactHex(self.allocator, @as(u256, 1) << @intCast(bits));
+            defer self.allocator.free(factor);
+            break :blk try generator.expression("div(value, @0)", .{try generator.numberToken(factor)});
         };
-        defer self.allocator.free(expression);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> newValue {{\nnewValue :=\n\n{s}\n\n}}\n",
+        try self.function_collector.finishGeneratedFunction(name, try generator.functionDefinition(
+            "function @0(value) -> newValue { newValue := @1 }",
             .{ name, expression },
-        );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        ));
         return self.function_collector.copyFunctionName(name);
     }
 
     pub fn shiftLeftFunctionDynamic(self: *YulUtilFunctions) UtilError![]u8 {
-        return self.collectSimple(
-            "shift_left_dynamic",
-            if (self.evm_version.hasBitwiseShifting())
-                "function shift_left_dynamic(bits, value) -> newValue { newValue := shl(bits, value) }\n"
-            else
-                "function shift_left_dynamic(bits, value) -> newValue { newValue := mul(value, exp(2, bits)) }\n",
-        );
+        return if (self.evm_version.hasBitwiseShifting())
+            self.collectTemplate("shift_left_dynamic", "function shift_left_dynamic(bits, value) -> newValue { newValue := shl(bits, value) }")
+        else
+            self.collectTemplate("shift_left_dynamic", "function shift_left_dynamic(bits, value) -> newValue { newValue := mul(value, exp(2, bits)) }");
     }
 
     pub fn shiftRightFunctionDynamic(self: *YulUtilFunctions) UtilError![]u8 {
-        return self.collectSimple(
-            "shift_right_unsigned_dynamic",
-            if (self.evm_version.hasBitwiseShifting())
-                "\nfunction shift_right_unsigned_dynamic(bits, value) -> newValue {\nnewValue :=\n\nshr(bits, value)\n\n}\n"
-            else
-                "\nfunction shift_right_unsigned_dynamic(bits, value) -> newValue {\nnewValue :=\n\ndiv(value, exp(2, bits))\n\n}\n",
-        );
+        return if (self.evm_version.hasBitwiseShifting())
+            self.collectTemplate("shift_right_unsigned_dynamic", "function shift_right_unsigned_dynamic(bits, value) -> newValue { newValue := shr(bits, value) }")
+        else
+            self.collectTemplate("shift_right_unsigned_dynamic", "function shift_right_unsigned_dynamic(bits, value) -> newValue { newValue := div(value, exp(2, bits)) }");
     }
 
     pub fn shiftRightSignedFunctionDynamic(self: *YulUtilFunctions) UtilError![]u8 {
-        return self.collectSimple(
-            "shift_right_signed_dynamic",
-            if (self.evm_version.hasBitwiseShifting())
-                "\nfunction shift_right_signed_dynamic(bits, value) -> result {\nresult := sar(bits, value)\n}\n"
-            else
-                "\nfunction shift_right_signed_dynamic(bits, value) -> result {\nlet divisor := exp(2, bits)\nlet xor_mask := sub(0, slt(value, 0))\nresult := xor(div(xor(value, xor_mask), divisor), xor_mask)\n}\n",
-        );
+        return if (self.evm_version.hasBitwiseShifting())
+            self.collectTemplate("shift_right_signed_dynamic", "function shift_right_signed_dynamic(bits, value) -> result { result := sar(bits, value) }")
+        else
+            self.collectTemplate("shift_right_signed_dynamic", "function shift_right_signed_dynamic(bits, value) -> result { let divisor := exp(2, bits) let xor_mask := sub(0, slt(value, 0)) result := xor(div(xor(value, xor_mask), divisor), xor_mask) }");
     }
 
     pub fn typedShiftLeftFunction(
@@ -2997,13 +2663,12 @@ pub const YulUtilFunctions = struct {
         else
             try self.shiftRightFunctionDynamic();
         defer self.allocator.free(shift);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value, bits) -> result {{\nbits := {s}(bits)\nresult := {s}({s}(bits, {s}(value)))\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value, bits) -> result {\nbits := @1(bits)\nresult := @2(@3(bits, @4(value)))\n}\n",
             .{ name, clean_amount, cleanup, shift, cleanup },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3014,13 +2679,12 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const shift = try self.shiftRightFunctionDynamic();
         defer self.allocator.free(shift);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(data, bytes) -> result {{\nlet mask := not({s}(mul(8, bytes), not(0)))\nresult := and(data, mask)\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(data, bytes) -> result {\nlet mask := not(@1(mul(8, bytes), not(0)))\nresult := and(data, mask)\n}\n",
             .{ name, shift },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3046,13 +2710,12 @@ pub const YulUtilFunctions = struct {
             (@as(u256, 1) << @intCast(bytes * 8)) - 1;
         const mask_text = try compactHex(self.allocator, mask);
         defer self.allocator.free(mask_text);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(data) -> result {{\nresult := and(data, {s})\n}}\n",
-            .{ name, mask_text },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(data) -> result {\nresult := and(data, @1)\n}\n",
+            .{ name, try generator.numberToken(mask_text) },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3063,32 +2726,31 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const shift = try self.shiftLeftFunctionDynamic();
         defer self.allocator.free(shift);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(data, bytes) -> result {{\nlet mask := not({s}(mul(8, bytes), not(0)))\nresult := and(data, mask)\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(data, bytes) -> result {\nlet mask := not(@1(mul(8, bytes), not(0)))\nresult := and(data, mask)\n}\n",
             .{ name, shift },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
     pub fn divide32CeilFunction(self: *YulUtilFunctions) UtilError![]u8 {
-        return self.collectSimple(
+        return self.collectTemplate(
             "divide_by_32_ceil",
             "function divide_by_32_ceil(value) -> result { result := div(add(value, 31), 32) }\n",
         );
     }
 
     pub fn allocateUnboundedFunction(self: *YulUtilFunctions) UtilError![]u8 {
-        return self.collectSimple(
+        return self.collectTemplate(
             "allocate_unbounded",
             "\nfunction allocate_unbounded() -> memPtr {\nmemPtr := mload(64)\n}\n",
         );
     }
 
     pub fn roundUpFunction(self: *YulUtilFunctions) UtilError![]u8 {
-        return self.collectSimple(
+        return self.collectTemplate(
             "round_up_to_mul_of_32",
             "function round_up_to_mul_of_32(value) -> result { result := and(add(value, 31), not(31)) }\n",
         );
@@ -3103,13 +2765,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(round_up);
         const panic = try self.panicFunction(.resource_error);
         defer self.allocator.free(panic);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "function {s}(memPtr, size) {{ let newFreePtr := add(memPtr, {s}(size)) if or(gt(newFreePtr, 0xffffffffffffffff), lt(newFreePtr, memPtr)) {{ {s}() }} mstore(64, newFreePtr) }}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "function @0(memPtr, size) { let newFreePtr := add(memPtr, @1(size)) if or(gt(newFreePtr, 0xffffffffffffffff), lt(newFreePtr, memPtr)) { @2() } mstore(64, newFreePtr) }\n",
             .{ name, round_up, panic },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3123,21 +2784,20 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (forward) blk: {
             const allocate = try self.allocateUnboundedFunction();
             defer self.allocator.free(allocate);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}() {{\nlet pos := {s}()\nreturndatacopy(pos, 0, returndatasize())\nrevert(pos, returndatasize())\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0() {\nlet pos := @1()\nreturndatacopy(pos, 0, returndatasize())\nrevert(pos, returndatasize())\n}\n",
                 .{ name, allocate },
             );
-        } else try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}() {{\nrevert(0, 0)\n}}\n",
+        } else try generator.functionDefinition(
+            "\nfunction @0() {\nrevert(0, 0)\n}\n",
             .{name},
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3150,13 +2810,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(unbounded);
         const finalize = try self.finalizeAllocationFunction();
         defer self.allocator.free(finalize);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "function {s}(size) -> memPtr {{ memPtr := {s}() {s}(memPtr, size) }}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "function @0(size) -> memPtr { memPtr := @1() @2(memPtr, size) }\n",
             .{ name, unbounded, finalize },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3187,13 +2846,14 @@ pub const YulUtilFunctions = struct {
             .{identifier},
         );
         defer self.allocator.free(name);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(dataStart, dataSizeInBytes) {{\ncalldatacopy(dataStart, calldatasize(), dataSizeInBytes)\n}}\n",
+        if (!(try self.function_collector.beginFunction(name))) return self.function_collector.copyFunctionName(name);
+        errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
+        try self.function_collector.finishGeneratedFunction(name, try generator.functionDefinition(
+            "function @0(dataStart, dataSizeInBytes) { calldatacopy(dataStart, calldatasize(), dataSizeInBytes) }",
             .{name},
-        );
-        defer self.allocator.free(code);
-        return self.collectSimple(name, code);
+        ));
+        return self.function_collector.copyFunctionName(name);
     }
 
     pub fn zeroComplexMemoryArrayFunction(
@@ -3220,13 +2880,12 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const zero = try self.zeroValueFunction(array.base_type, false);
         defer self.allocator.free(zero);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(dataStart, dataSizeInBytes) {{\nfor {{ let i := 0 }} lt(i, dataSizeInBytes) {{ i := add(i, 32) }} {{\nmstore(add(dataStart, i), {s}())\n}}\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(dataStart, dataSizeInBytes) {\nfor { let i := 0 } lt(i, dataSizeInBytes) { i := add(i, 32) } {\nmstore(add(dataStart, i), @1())\n}\n}\n",
             .{ name, zero },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3257,18 +2916,17 @@ pub const YulUtilFunctions = struct {
         // first in the rendered Yul body.
         const allocation_size = try self.arrayAllocationSizeFunction(array_type);
         defer self.allocator.free(allocation_size);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(length) -> memPtr {{\nlet allocSize := {s}(length)\nmemPtr := {s}(allocSize)\n{s}\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(length) -> memPtr {\nlet allocSize := @1(length)\nmemPtr := @2(allocSize)\n@3\n}\n",
             .{
                 name,
                 allocation_size,
                 allocation,
-                if (array.isDynamicallySized()) "mstore(memPtr, length)" else "",
+                if (array.isDynamicallySized()) try generator.statements("mstore(memPtr, length)", .{}) else Yul.Block{},
             },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3298,17 +2956,16 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(allocation_size);
         const zero = try self.zeroMemoryArrayFunction(array_type);
         defer self.allocator.free(zero);
+        const generator = try self.function_collector.generator(self.evm_version);
         const dynamic_setup = if (array.isDynamicallySized())
-            "dataStart := add(dataStart, 32)\ndataSize := sub(dataSize, 32)"
+            try generator.statements("dataStart := add(dataStart, 32)\ndataSize := sub(dataSize, 32)", .{})
         else
-            "";
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(length) -> memPtr {{\nmemPtr := {s}(length)\nlet dataStart := memPtr\nlet dataSize := {s}(length)\n{s}\n{s}(dataStart, dataSize)\n}}\n",
+            Yul.Block{};
+        const code = try generator.functionDefinition(
+            "\nfunction @0(length) -> memPtr {\nmemPtr := @1(length)\nlet dataStart := memPtr\nlet dataSize := @2(length)\n@3\n@4(dataStart, dataSize)\n}\n",
             .{ name, allocate, allocation_size, dynamic_setup, zero },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3335,13 +2992,12 @@ pub const YulUtilFunctions = struct {
         const allocation = try self.allocationFunction();
         defer self.allocator.free(allocation);
         const size = try TypeBehavior.memoryDataSize(struct_type);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}() -> memPtr {{\nmemPtr := {s}({d})\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0() -> memPtr {\nmemPtr := @1(@2)\n}\n",
             .{ name, allocation, size },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3373,26 +3029,23 @@ pub const YulUtilFunctions = struct {
             structure,
         );
         defer self.allocator.free(members);
-        var stores: std.ArrayList(u8) = .empty;
-        defer stores.deinit(self.allocator);
+        const generator = try self.function_collector.generator(self.evm_version);
+        var stores: Generated.Buffer = .{ .generator = generator };
         for (members) |member| {
             if (try TypeBehavior.memoryHeadSize(member) != 32)
                 return error.InvalidType;
             const zero = try self.zeroValueFunction(member, false);
             defer self.allocator.free(zero);
-            try stores.print(
-                self.allocator,
-                "mstore(offset, {s}())\noffset := add(offset, 32)\n",
+            try stores.add(
+                "mstore(offset, @0())\noffset := add(offset, 32)\n",
                 .{zero},
             );
         }
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}() -> memPtr {{\nmemPtr := {s}()\nlet offset := memPtr\n{s}}}\n",
-            .{ name, allocate, stores.items },
+        const code = try generator.functionDefinition(
+            "\nfunction @0() -> memPtr {\nmemPtr := @1()\nlet offset := memPtr\n@2}\n",
+            .{ name, allocate, stores.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3435,23 +3088,20 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (type_ref.asReference() != null) blk: {
             if (from_calldata or try TypeBehavior.sizeOnStack(type_ref) != 1)
                 return error.InvalidType;
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(memPtr) -> value {{\nvalue := mload(memPtr)\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(memPtr) -> value {\nvalue := mload(memPtr)\n}\n",
                 .{name},
             );
         } else blk: {
             if (!TypeBehavior.isValueType(type_ref)) return error.UnsupportedType;
             const external_function = type_ref.asFunction() != null and
                 type_ref.payload.Function.kind == .External;
-            const return_variables = if (external_function)
-                "addr, selector"
-            else
-                "returnValue";
-            const load = if (from_calldata) "calldataload(ptr)" else "mload(ptr)";
+            const return_variables: []const []const u8 = if (external_function) &.{ "addr", "selector" } else &.{"returnValue"};
+            const load = try generator.expression("@0(ptr)", .{if (from_calldata) "calldataload" else "mload"});
             const validate = if (from_calldata) try self.validatorFunction(type_ref, true) else null;
             defer if (validate) |value| self.allocator.free(value);
             const split = if (external_function) try self.splitExternalFunctionIdFunction() else null;
@@ -3462,35 +3112,30 @@ pub const YulUtilFunctions = struct {
             const cleanup = try self.cleanupFunction(type_ref);
             defer self.allocator.free(cleanup);
             const post_load = if (from_calldata)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "let value := {s}\n{s}(value)",
+                try generator.statements(
+                    "let value := @0\n@1(value)",
                     .{ load, validate.? },
                 )
             else
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "let value := {s}({s})",
+                try generator.statements(
+                    "let value := @0(@1)",
                     .{ cleanup, load },
                 );
-            defer self.allocator.free(post_load);
+
             const result = if (split) |split_name|
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "addr, selector := {s}(value)",
+                try generator.statements(
+                    "addr, selector := @0(value)",
                     .{split_name},
                 )
             else
-                try self.allocator.dupe(u8, "returnValue := value");
-            defer self.allocator.free(result);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(ptr) -> {s} {{\n{s}\n{s}\n}}\n",
+                try generator.statements("returnValue := value", .{});
+
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(ptr) -> @1 {\n@2\n@3\n}\n",
                 .{ name, return_variables, post_load, result },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3510,43 +3155,39 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (type_ref.asReference()) |reference| blk: {
             if (reference.location != .Memory) return error.InvalidType;
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(memPtr, value) {{\nmstore(memPtr, value)\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(memPtr, value) {\nmstore(memPtr, value)\n}\n",
                 .{name},
             );
         } else if (type_ref.asFunction()) |function| blk: {
             if (function.kind == .External) {
                 const combine = try self.combineExternalFunctionIdFunction();
                 defer self.allocator.free(combine);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "\nfunction {s}(memPtr, addr, selector) {{\nmstore(memPtr, {s}(addr, selector))\n}}\n",
+                break :blk try generator.functionDefinition(
+                    "\nfunction @0(memPtr, addr, selector) {\nmstore(memPtr, @1(addr, selector))\n}\n",
                     .{ name, combine },
                 );
             }
             if (!TypeBehavior.isValueType(type_ref)) return error.UnsupportedType;
             const cleanup = try self.cleanupFunction(type_ref);
             defer self.allocator.free(cleanup);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(memPtr, value) {{\nmstore(memPtr, {s}(value))\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(memPtr, value) {\nmstore(memPtr, @1(value))\n}\n",
                 .{ name, cleanup },
             );
         } else blk: {
             if (!TypeBehavior.isValueType(type_ref)) return error.UnsupportedType;
             const cleanup = try self.cleanupFunction(type_ref);
             defer self.allocator.free(cleanup);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(memPtr, value) {{\nmstore(memPtr, {s}(value))\n}}\n",
+            break :blk try generator.functionDefinition(
+                "\nfunction @0(memPtr, value) {\nmstore(memPtr, @1(value))\n}\n",
                 .{ name, cleanup },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3579,13 +3220,9 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
-        const keys = try indexedNamesAlloc(
-            self.allocator,
-            "key_",
-            stack_size,
-        );
-        defer self.allocator.free(keys);
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = if (TypeBehavior.isDynamicallySized(mapping.key_type)) dynamic: {
+            const keys = try generator.indexedNames("key_", stack_size);
             const encoder = packed_encoder_name orelse return error.InvalidType;
             const uint_type = self.type_provider.uint256();
             const hash = try self.packedHashFunction(
@@ -3594,17 +3231,9 @@ pub const YulUtilFunctions = struct {
                 encoder,
             );
             defer self.allocator.free(hash);
-            break :dynamic try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(slot{s}{s}) -> dataSlot {{\ndataSlot := {s}({s}{s}slot)\n}}\n",
-                .{
-                    name,
-                    if (keys.len == 0) "" else ", ",
-                    keys,
-                    hash,
-                    keys,
-                    if (keys.len == 0) "" else ", ",
-                },
+            break :dynamic try generator.functionDefinition(
+                "function @0(slot, @1) -> dataSlot { dataSlot := @2(@1, slot) }",
+                .{ name, keys, hash },
             );
         } else static: {
             if (packed_encoder_name != null or stack_size > 1 or
@@ -3615,20 +3244,17 @@ pub const YulUtilFunctions = struct {
                 mapping.key_type,
             );
             defer self.allocator.free(conversion);
-            break :static try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(slot{s}{s}) -> dataSlot {{\nmstore(0, {s}({s}))\nmstore(0x20, slot)\ndataSlot := keccak256(0, 0x40)\n}}\n",
-                .{
-                    name,
-                    if (keys.len == 0) "" else ", ",
-                    keys,
-                    conversion,
-                    keys,
-                },
+            // Match solc's static-key name. Renaming this parameter can change
+            // optimizer name allocation and, subsequently, inlining decisions.
+            const key = [_]YulName{try generator.name("key")};
+            const keys = key[0..stack_size];
+            break :static try generator.functionDefinition(
+                "function @0(slot, @1) -> dataSlot { mstore(0, @2(@1)) mstore(0x20, slot) dataSlot := keccak256(0, 0x40) }",
+                .{ name, keys, conversion },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3649,22 +3275,21 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
-        const body = try self.cleanupBodyAlloc(type_ref);
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> cleaned {{\n{s}\n}}\n",
+        const body = try self.cleanupBody(type_ref);
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> cleaned {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
-    fn cleanupBodyAlloc(
+    fn cleanupBody(
         self: *YulUtilFunctions,
         type_ref: *const Types.Type,
-    ) UtilError![]u8 {
+    ) UtilError!Yul.Block {
+        const generator = try self.function_collector.generator(self.evm_version);
         return switch (type_ref.payload) {
             .Address => blk: {
                 const uint160 = Types.Type{ .payload = .{ .Integer = .{
@@ -3673,64 +3298,58 @@ pub const YulUtilFunctions = struct {
                 } } };
                 const cleanup = try self.cleanupFunction(&uint160);
                 defer self.allocator.free(cleanup);
-                break :blk std.fmt.allocPrint(
-                    self.allocator,
-                    "cleaned := {s}(value)",
+                break :blk generator.statements(
+                    "cleaned := @0(value)",
                     .{cleanup},
                 );
             },
             .Contract => blk: {
-                const address = Types.Type{ .payload = .{ .Address = .{
-                    .state_mutability = .NonPayable,
-                } } };
-                const cleanup = try self.cleanupFunction(&address);
+                const address = (try TypeBehavior.encodingType(self.type_provider, type_ref)) orelse
+                    return error.InvalidType;
+                const cleanup = try self.cleanupFunction(address);
                 defer self.allocator.free(cleanup);
-                break :blk std.fmt.allocPrint(
-                    self.allocator,
-                    "cleaned := {s}(value)",
+                break :blk generator.statements(
+                    "cleaned := @0(value)",
                     .{cleanup},
                 );
             },
             .Integer => |integer| if (integer.bits == 256)
-                self.allocator.dupe(u8, "cleaned := value")
+                generator.statements("cleaned := value", .{})
             else if (integer.isSigned())
-                std.fmt.allocPrint(
-                    self.allocator,
-                    "cleaned := signextend({d}, value)",
+                generator.statements(
+                    "cleaned := signextend(@0, value)",
                     .{integer.bits / 8 - 1},
                 )
             else blk: {
                 const mask = (@as(u256, 1) << @intCast(integer.bits)) - 1;
                 const rendered = try compactHex(self.allocator, mask);
                 defer self.allocator.free(rendered);
-                break :blk std.fmt.allocPrint(
-                    self.allocator,
-                    "cleaned := and(value, {s})",
-                    .{rendered},
+                break :blk generator.statements(
+                    "cleaned := and(value, @0)",
+                    .{try generator.numberToken(rendered)},
                 );
             },
-            .RationalNumber => self.allocator.dupe(u8, "cleaned := value"),
-            .Bool => self.allocator.dupe(u8, "cleaned := iszero(iszero(value))"),
+            .RationalNumber => generator.statements("cleaned := value", .{}),
+            .Bool => generator.statements("cleaned := iszero(iszero(value))", .{}),
             .Function => |function| switch (function.kind) {
                 .External => blk: {
                     const bytes24 = Types.Type{ .payload = .{ .FixedBytes = .{ .bytes = 24 } } };
                     const cleanup = try self.cleanupFunction(&bytes24);
                     defer self.allocator.free(cleanup);
-                    break :blk std.fmt.allocPrint(
-                        self.allocator,
-                        "cleaned := {s}(value)",
+                    break :blk generator.statements(
+                        "cleaned := @0(value)",
                         .{cleanup},
                     );
                 },
-                .Internal => self.allocator.dupe(u8, "cleaned := value"),
+                .Internal => generator.statements("cleaned := value", .{}),
                 else => error.UnsupportedType,
             },
             .Array, .Struct, .Mapping => if (TypeBehavior.dataStoredIn(type_ref, .Storage))
-                self.allocator.dupe(u8, "cleaned := value")
+                generator.statements("cleaned := value", .{})
             else
                 error.UnsupportedType,
             .FixedBytes => |fixed| if (fixed.bytes == 32)
-                self.allocator.dupe(u8, "cleaned := value")
+                generator.statements("cleaned := value", .{})
             else if (fixed.bytes == 0)
                 error.InvalidType
             else blk: {
@@ -3739,22 +3358,20 @@ pub const YulUtilFunctions = struct {
                 const mask = low_mask << @intCast(256 - bits);
                 const rendered = try compactHex(self.allocator, mask);
                 defer self.allocator.free(rendered);
-                break :blk std.fmt.allocPrint(
-                    self.allocator,
-                    "cleaned := and(value, {s})",
-                    .{rendered},
+                break :blk generator.statements(
+                    "cleaned := and(value, @0)",
+                    .{try generator.numberToken(rendered)},
                 );
             },
             .Enum => blk: {
                 const validator = try self.validatorFunction(type_ref, false);
                 defer self.allocator.free(validator);
-                break :blk std.fmt.allocPrint(
-                    self.allocator,
-                    "cleaned := value {s}(value)",
+                break :blk generator.statements(
+                    "cleaned := value @0(value)",
                     .{validator},
                 );
             },
-            .InaccessibleDynamic => self.allocator.dupe(u8, "cleaned := 0"),
+            .InaccessibleDynamic => generator.statements("cleaned := 0", .{}),
             else => error.UnsupportedType,
         };
     }
@@ -3781,26 +3398,23 @@ pub const YulUtilFunctions = struct {
                 return error.InvalidType,
             else => type_ref,
         };
+        const generator = try self.function_collector.generator(self.evm_version);
         const storage_bytes = try TypeBehavior.storageBytes(encoding_type);
         const expression = if (encoding_type.asInteger()) |integer|
             if (integer.isSigned() and storage_bytes != 32)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "signextend({d}, value)",
+                try generator.expression(
+                    "signextend(@0, value)",
                     .{storage_bytes - 1},
                 )
             else
                 try self.storageCleanupExpression(encoding_type, storage_bytes)
         else
             try self.storageCleanupExpression(encoding_type, storage_bytes);
-        defer self.allocator.free(expression);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> cleaned {{\ncleaned := {s}\n}}\n",
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> cleaned {\ncleaned := @1\n}\n",
             .{ name, expression },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3823,13 +3437,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(shift);
         const cleanup = try self.cleanupFromStorageFunction(type_ref);
         defer self.allocator.free(cleanup);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot_value, offset) -> value {{\nvalue := {s}({s}(mul(offset, 8), slot_value))\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot_value, offset) -> value {\nvalue := @1(@2(mul(offset, 8), slot_value))\n}\n",
             .{ name, cleanup, shift },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3851,13 +3464,12 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const extract = try self.extractFromStorageValueDynamicFunction(type_ref);
         defer self.allocator.free(extract);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot, offset) -> value {{\nvalue := {s}(sload(slot), offset)\n\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot, offset) -> value {\nvalue := @1(sload(slot), offset)\n\n}\n",
             .{ name, extract },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3881,13 +3493,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(shift);
         const cleanup = try self.cleanupFromStorageFunction(type_ref);
         defer self.allocator.free(cleanup);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot_value) -> value {{\nvalue := {s}({s}(slot_value))\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot_value) -> value {\nvalue := @1(@2(slot_value))\n}\n",
             .{ name, cleanup, shift },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3910,13 +3521,12 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const extract = try self.extractFromStorageValueFunction(type_ref, offset);
         defer self.allocator.free(extract);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot) -> value {{\nvalue := {s}(sload(slot))\n\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot) -> value {\nvalue := @1(sload(slot))\n\n}\n",
             .{ name, extract },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -3967,13 +3577,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(panic);
         const read = try self.readFromStorageReferenceType(type_ref);
         defer self.allocator.free(read);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot, offset) -> value {{\nif gt(offset, 0) {{ {s}() }}\nvalue := {s}(slot)\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot, offset) -> value {\nif gt(offset, 0) { @1() }\nvalue := @2(slot)\n}\n",
             .{ name, panic, read },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4015,41 +3624,37 @@ pub const YulUtilFunctions = struct {
         else
             try self.extractFromStorageValueDynamicFunction(type_ref);
         defer self.allocator.free(extract);
+        const generator = try self.function_collector.generator(self.evm_version);
         const extracted_call = if (offset == null)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s}(slot), offset)",
+            try generator.expression(
+                "@0(@1(slot), offset)",
                 .{ extract, if (location == .Transient) "tload" else "sload" },
             )
         else
-            try std.fmt.allocPrint(
-                self.allocator,
-                "{s}({s}(slot))",
+            try generator.expression(
+                "@0(@1(slot))",
                 .{ extract, if (location == .Transient) "tload" else "sload" },
             );
-        defer self.allocator.free(extracted_call);
+
         const body = if (external_split) blk: {
             const split = try self.splitExternalFunctionIdFunction();
             defer self.allocator.free(split);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "let value := {s}\naddr, selector := {s}(value)",
+            break :blk try generator.statements(
+                "let value := @0\naddr, selector := @1(value)",
                 .{ extracted_call, split },
             );
-        } else try std.fmt.allocPrint(self.allocator, "value := {s}", .{extracted_call});
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot{s}) -> {s} {{\n{s}\n}}\n",
+        } else try generator.statements("value := @0", .{extracted_call});
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(@1) -> @2 {\n@3\n}\n",
             .{
                 name,
-                if (offset == null) ", offset" else "",
-                if (external_split) "addr, selector" else "value",
+                @as([]const []const u8, if (offset == null) &.{ "slot", "offset" } else &.{"slot"}),
+                @as([]const []const u8, if (external_split) &.{ "addr", "selector" } else &.{"value"}),
                 body,
             },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4086,8 +3691,6 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
-        const allocate = try self.allocateMemoryStructFunction(type_ref);
-        defer self.allocator.free(allocate);
         const members = try TypeBehavior.structMemoryMemberTypesAlloc(
             self.type_provider,
             self.allocator,
@@ -4099,8 +3702,8 @@ pub const YulUtilFunctions = struct {
             structure,
         );
         defer self.allocator.free(offsets.offsets);
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
+        const generator = try self.function_collector.generator(self.evm_version);
+        var body: Generated.Buffer = .{ .generator = generator };
         var memory_offset: u256 = 0;
         for (members, offsets.offsets) |member, maybe_offset| {
             const storage_offset = maybe_offset orelse return error.InvalidType;
@@ -4108,12 +3711,11 @@ pub const YulUtilFunctions = struct {
                 return error.InvalidType;
             const stack_size = try TypeBehavior.sizeOnStack(member);
             if (stack_size == 0) return error.InvalidType;
-            const values = try indexedNamesAlloc(
-                self.allocator,
+            const values = try generator.indexedNames(
                 "memberValue_",
                 stack_size,
             );
-            defer self.allocator.free(values);
+
             const read = try self.readFromStorage(
                 member,
                 storage_offset.byte_offset,
@@ -4123,9 +3725,8 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(read);
             const write = try self.writeToMemoryFunction(member);
             defer self.allocator.free(write);
-            try body.print(
-                self.allocator,
-                "{{ let {s} := {s}(add(slot, {d})) {s}(add(value, {d}), {s}) }}\n",
+            try body.add(
+                "{ let @0 := @1(add(slot, @2)) @3(add(value, @4), @5) }\n",
                 .{ values, read, storage_offset.slot, write, memory_offset, values },
             );
             memory_offset = std.math.add(
@@ -4134,13 +3735,15 @@ pub const YulUtilFunctions = struct {
                 try TypeBehavior.memoryHeadSize(member),
             ) catch return error.Overflow;
         }
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot) -> value {{\nvalue := {s}()\n{s}}}\n",
-            .{ name, allocate, body.items },
+        // solc requests member read/write helpers before the allocator.
+        // This declaration order affects optimizer naming and inlining.
+        const allocate = try self.allocateMemoryStructFunction(type_ref);
+        defer self.allocator.free(allocate);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot) -> value {\nvalue := @1()\n@2}\n",
+            .{ name, allocate, body.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4194,13 +3797,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(mask_text);
         const shift = try self.shiftLeftFunction(shift_bits);
         defer self.allocator.free(shift);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value, toInsert) -> result {{\nlet mask := {s}\ntoInsert := {s}(toInsert)\nvalue := and(value, not(mask))\nresult := or(value, and(toInsert, mask))\n}}\n",
-            .{ name, mask_text, shift },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value, toInsert) -> result {\nlet mask := @1\ntoInsert := @2(toInsert)\nvalue := and(value, not(mask))\nresult := or(value, and(toInsert, mask))\n}\n",
+            .{ name, try generator.numberToken(mask_text), shift },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4227,13 +3829,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(mask_text);
         const shift = try self.shiftLeftFunctionDynamic();
         defer self.allocator.free(shift);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value, shiftBytes, toInsert) -> result {{\nlet shiftBits := mul(shiftBytes, 8)\nlet mask := {s}(shiftBits, {s})\ntoInsert := {s}(shiftBits, toInsert)\nvalue := and(value, not(mask))\nresult := or(value, and(toInsert, mask))\n}}\n",
-            .{ name, shift, mask_text, shift },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value, shiftBytes, toInsert) -> result {\nlet shiftBits := mul(shiftBytes, 8)\nlet mask := @1(shiftBits, @2)\ntoInsert := @3(shiftBits, toInsert)\nvalue := and(value, not(mask))\nresult := or(value, and(toInsert, mask))\n}\n",
+            .{ name, shift, try generator.numberToken(mask_text), shift },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4253,6 +3854,7 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const external_function = type_ref.asFunction() != null and
             type_ref.payload.Function.kind == .External;
         if (external_function) {
@@ -4261,13 +3863,11 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(prepare);
             const combine = try self.combineExternalFunctionIdFunction();
             defer self.allocator.free(combine);
-            const code = try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(addr, selector) -> ret {{\nret := {s}({s}(addr, selector))\n}}\n",
+            const code = try generator.functionDefinition(
+                "\nfunction @0(addr, selector) -> ret {\nret := @1(@2(addr, selector))\n}\n",
                 .{ name, prepare, combine },
             );
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+            try self.function_collector.finishGeneratedFunction(name, code);
             return self.function_collector.copyFunctionName(name);
         }
         if (try TypeBehavior.sizeOnStack(type_ref) != 1)
@@ -4276,16 +3876,13 @@ pub const YulUtilFunctions = struct {
             const bytes = try TypeBehavior.storageBytes(type_ref);
             const shift = try self.shiftRightFunction(256 - @as(usize, bytes) * 8);
             defer self.allocator.free(shift);
-            break :blk try std.fmt.allocPrint(self.allocator, "{s}(value)", .{shift});
-        } else try self.allocator.dupe(u8, "value");
-        defer self.allocator.free(expression);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> ret {{\nret := {s}\n}}\n",
+            break :blk try generator.expression("@0(value)", .{shift});
+        } else try generator.identifier("value");
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> ret {\nret := @1\n}\n",
             .{ name, expression },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4336,6 +3933,9 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
+        const generator = try self.function_collector.generator(self.evm_version);
+        const offset_name = try generator.name("offset");
+        const offset_names: []const YulName = if (offset == null) &.{offset_name} else &.{};
         const code = if (TypeBehavior.isValueType(to_type)) value: {
             if (!TypeBehavior.isImplicitlyConvertibleTo(from_type, to_type))
                 return error.InvalidType;
@@ -4343,14 +3943,13 @@ pub const YulUtilFunctions = struct {
             if (storage_bytes == 0 or storage_bytes > 32) return error.InvalidType;
             const from_size = try TypeBehavior.sizeOnStack(from_type);
             const to_size = try TypeBehavior.sizeOnStack(to_type);
-            const from_values = try indexedNamesAlloc(self.allocator, "value_", from_size);
-            defer self.allocator.free(from_values);
-            const to_values = try indexedNamesAlloc(
-                self.allocator,
+            const from_values = try generator.indexedNames("value_", from_size);
+
+            const to_values = try generator.indexedNames(
                 "convertedValue_",
                 to_size,
             );
-            defer self.allocator.free(to_values);
+
             const update = if (offset) |value_offset|
                 try self.updateByteSliceFunction(storage_bytes, value_offset)
             else
@@ -4360,12 +3959,11 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(conversion);
             const prepare = try self.prepareStoreFunction(to_type);
             defer self.allocator.free(prepare);
-            break :value try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(slot, {s}{s}) {{\nlet {s} := {s}({s})\n{s}(slot, {s}({s}(slot), {s}{s}({s})))\n}}\n",
+            break :value try generator.functionDefinition(
+                "\nfunction @0(slot, @1, @2) {\nlet @3 := @4(@5)\n@6(slot, @7(@8(slot), @9, @10(@11)))\n}\n",
                 .{
                     name,
-                    if (offset == null) "offset, " else "",
+                    offset_names,
                     from_values,
                     to_values,
                     conversion,
@@ -4373,7 +3971,7 @@ pub const YulUtilFunctions = struct {
                     if (location == .Transient) "tstore" else "sstore",
                     update,
                     if (location == .Transient) "tload" else "sload",
-                    if (offset == null) "offset, " else "",
+                    offset_names,
                     prepare,
                     to_values,
                 },
@@ -4387,14 +3985,13 @@ pub const YulUtilFunctions = struct {
             const panic = try self.panicFunction(.generic);
             defer self.allocator.free(panic);
             const guard = if (dynamic_offset)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "if offset {{ {s}() }}",
+                try generator.statements(
+                    "if offset { @0() }",
                     .{panic},
                 )
             else
-                try self.allocator.alloc(u8, 0);
-            defer self.allocator.free(guard);
+                Yul.Block{};
+
             if (from_type.category() == .StringLiteral) {
                 const target = to_type.asArray() orelse return error.InvalidType;
                 if (!target.isByteArrayOrString()) return error.InvalidType;
@@ -4402,15 +3999,14 @@ pub const YulUtilFunctions = struct {
                     from_type.payload.StringLiteral.value,
                 );
                 defer self.allocator.free(copy);
-                break :reference try std.fmt.allocPrint(
-                    self.allocator,
-                    "\nfunction {s}(slot{s}) {{\n{s}\n{s}(slot)\n}}\n",
-                    .{ name, if (dynamic_offset) ", offset" else "", guard, copy },
+                break :reference try generator.functionDefinition(
+                    "\nfunction @0(slot, @1) {\n@2\n@3(slot)\n}\n",
+                    .{ name, offset_names, guard, copy },
                 );
             }
             const from_size = try TypeBehavior.sizeOnStack(from_type);
-            const values = try indexedNamesAlloc(self.allocator, "value_", from_size);
-            defer self.allocator.free(values);
+            const values = try generator.indexedNames("value_", from_size);
+
             const copy = switch (from_type.payload) {
                 .Array => self.copyArrayToStorageFunction(from_type, to_type),
                 .ArraySlice => |slice| self.copyArrayToStorageFunction(
@@ -4422,12 +4018,11 @@ pub const YulUtilFunctions = struct {
             };
             const copy_name = try copy;
             defer self.allocator.free(copy_name);
-            break :reference try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(slot, {s}{s}) {{\n{s}\n{s}(slot, {s})\n}}\n",
+            break :reference try generator.functionDefinition(
+                "\nfunction @0(slot, @1, @2) {\n@3\n@4(slot, @5)\n}\n",
                 .{
                     name,
-                    if (dynamic_offset) "offset, " else "",
+                    offset_names,
                     values,
                     guard,
                     copy_name,
@@ -4435,8 +4030,7 @@ pub const YulUtilFunctions = struct {
                 },
             );
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4470,6 +4064,7 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const body = if (TypeBehavior.isValueType(type_ref)) blk: {
             const stack_size = try TypeBehavior.sizeOnStack(type_ref);
             if (stack_size == 0) return error.UnsupportedType;
@@ -4482,11 +4077,10 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(update);
             const zero = try self.zeroValueFunction(type_ref, true);
             defer self.allocator.free(zero);
-            const values = try indexedNamesAlloc(self.allocator, "zero_", stack_size);
-            defer self.allocator.free(values);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "let {s} := {s}()\n{s}(slot, offset, {s})",
+            const values = try generator.indexedNames("zero_", stack_size);
+
+            break :blk try generator.statements(
+                "let @0 := @1()\n@2(slot, offset, @3)",
                 .{ values, zero, update, values },
             );
         } else switch (type_ref.payload) {
@@ -4495,9 +4089,8 @@ pub const YulUtilFunctions = struct {
                 defer self.allocator.free(clear);
                 const panic = try self.panicFunction(.generic);
                 defer self.allocator.free(panic);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "if iszero(eq(offset, 0)) {{ {s}() }}\n{s}(slot)",
+                break :blk try generator.statements(
+                    "if iszero(eq(offset, 0)) { @0() }\n@1(slot)",
                     .{ panic, clear },
                 );
             },
@@ -4506,22 +4099,19 @@ pub const YulUtilFunctions = struct {
                 defer self.allocator.free(clear);
                 const panic = try self.panicFunction(.generic);
                 defer self.allocator.free(panic);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "if iszero(eq(offset, 0)) {{ {s}() }}\n{s}(slot)",
+                break :blk try generator.statements(
+                    "if iszero(eq(offset, 0)) { @0() }\n@1(slot)",
                     .{ panic, clear },
                 );
             },
             else => return error.UnsupportedType,
         };
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot, offset) {{\n{s}\n}}\n",
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot, offset) {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4548,31 +4138,29 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(length);
         const index = try self.storageArrayIndexAccessFunction(type_ref);
         defer self.allocator.free(index);
+        const generator = try self.function_collector.generator(self.evm_version);
         const clear_statement = if (array.base_type.category() == .Mapping)
-            try self.allocator.alloc(u8, 0)
+            Yul.Block{}
         else blk: {
             const clear = try self.storageSetToZeroFunction(array.base_type);
             defer self.allocator.free(clear);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}(slot, offset)",
+            break :blk try generator.statements(
+                "@0(slot, offset)",
                 .{clear},
             );
         };
-        defer self.allocator.free(clear_statement);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(array) {{
-            \\    let oldLen := {s}(array)
-            \\    if iszero(oldLen) {{ {s}() }}
+
+        const code = try generator.functionDefinition(
+            \\function @0(array) {
+            \\    let oldLen := @1(array)
+            \\    if iszero(oldLen) { @2() }
             \\    let newLen := sub(oldLen, 1)
-            \\    let slot, offset := {s}(array, newLen)
-            \\    {s}
+            \\    let slot, offset := @3(array, newLen)
+            \\    @4
             \\    sstore(array, newLen)
-            \\}}
-            \\
+            \\}
         , .{ name, length, panic, index, clear_statement });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4607,28 +4195,27 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(index);
         const clear = try self.storageSetToZeroFunction(array.base_type);
         defer self.allocator.free(clear);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(array) {{
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0(array) {
             \\    let data := sload(array)
-            \\    let oldLen := {s}(data)
-            \\    if iszero(oldLen) {{ {s}() }}
+            \\    let oldLen := @1(data)
+            \\    if iszero(oldLen) { @2() }
             \\    switch oldLen
-            \\    case 32 {{ {s}(array, 31) }}
-            \\    default {{
+            \\    case 32 { @3(array, 31) }
+            \\    default {
             \\        let newLen := sub(oldLen, 1)
             \\        switch lt(oldLen, 32)
-            \\        case 1 {{ sstore(array, {s}(data, newLen)) }}
-            \\        default {{
-            \\            let slot, offset := {s}(array, newLen)
-            \\            {s}(slot, offset)
+            \\        case 1 { sstore(array, @4(data, newLen)) }
+            \\        default {
+            \\            let slot, offset := @5(array, newLen)
+            \\            @6(slot, offset)
             \\            sstore(array, sub(data, 2))
-            \\        }}
-            \\    }}
-            \\}}
-            \\
+            \\        }
+            \\    }
+            \\}
         , .{ name, extract, panic, transit, encode, index, clear });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4658,13 +4245,8 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
         const value_count = try TypeBehavior.sizeOnStack(from_type);
-        const values = try indexedNamesAlloc(self.allocator, "value_", value_count);
-        defer self.allocator.free(values);
-        const arguments = if (value_count == 0)
-            try self.allocator.alloc(u8, 0)
-        else
-            try std.fmt.allocPrint(self.allocator, ", {s}", .{values});
-        defer self.allocator.free(arguments);
+        const generator = try self.function_collector.generator(self.evm_version);
+        const values = try generator.indexedNames("value_", value_count);
         const panic = try self.panicFunction(.resource_error);
         defer self.allocator.free(panic);
         const extract = if (array.isByteArrayOrString())
@@ -4688,35 +4270,34 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(shift);
         const body = if (array.isByteArrayOrString()) bytes: {
             if (value_count != 1) return error.InvalidType;
-            break :bytes try std.fmt.allocPrint(self.allocator,
+            break :bytes try generator.statements(
                 \\let data := sload(array)
-                \\let oldLen := {s}(data)
-                \\if iszero(lt(oldLen, 0x10000000000000000)) {{ {s}() }}
+                \\let oldLen := @0(data)
+                \\if iszero(lt(oldLen, 0x10000000000000000)) { @1() }
                 \\switch gt(oldLen, 31)
-                \\case 0 {{
-                \\    let value := byte(0, {s})
+                \\case 0 {
+                \\    let value := byte(0, @2)
                 \\    switch oldLen
-                \\    case 31 {{
-                \\        let dataArea := {s}(array)
+                \\    case 31 {
+                \\        let dataArea := @3(array)
                 \\        data := and(data, not(0xff))
                 \\        sstore(dataArea, or(and(0xff, value), data))
                 \\        sstore(array, 65)
-                \\    }}
-                \\    default {{
+                \\    }
+                \\    default {
                 \\        data := add(data, 2)
                 \\        let shiftBits := mul(8, sub(31, oldLen))
-                \\        let valueShifted := {s}(shiftBits, and(0xff, value))
-                \\        let mask := {s}(shiftBits, 0xff)
+                \\        let valueShifted := @4(shiftBits, and(0xff, value))
+                \\        let mask := @5(shiftBits, 0xff)
                 \\        data := or(and(data, not(mask)), valueShifted)
                 \\        sstore(array, data)
-                \\    }}
-                \\}}
-                \\default {{
+                \\    }
+                \\}
+                \\default {
                 \\    sstore(array, add(data, 2))
-                \\    let slot, offset := {s}(array, oldLen)
-                \\    {s}(slot, offset, {s})
-                \\}}
-                \\
+                \\    let slot, offset := @6(array, oldLen)
+                \\    @7(slot, offset, @8)
+                \\}
             , .{
                 extract,
                 panic,
@@ -4728,22 +4309,19 @@ pub const YulUtilFunctions = struct {
                 store,
                 values,
             });
-        } else try std.fmt.allocPrint(self.allocator,
+        } else try generator.statements(
             \\let oldLen := sload(array)
-            \\if iszero(lt(oldLen, 0x10000000000000000)) {{ {s}() }}
+            \\if iszero(lt(oldLen, 0x10000000000000000)) { @0() }
             \\sstore(array, add(oldLen, 1))
-            \\let slot, offset := {s}(array, oldLen)
-            \\{s}(slot, offset, {s})
-            \\
+            \\let slot, offset := @1(array, oldLen)
+            \\@2(slot, offset, @3)
         , .{ panic, index, store, values });
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array{s}) {{\n{s}}}\n",
-            .{ name, arguments, body },
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array, @1) {\n@2}\n",
+            .{ name, values, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4782,27 +4360,24 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(length);
         const index = try self.storageArrayIndexAccessFunction(type_ref);
         defer self.allocator.free(index);
+        const generator = try self.function_collector.generator(self.evm_version);
         const body = if (array.isByteArrayOrString()) blk: {
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "let data := sload(array)\nlet oldLen := {s}(data)\n{s}(array, data, oldLen, add(oldLen, 1))",
+            break :blk try generator.statements(
+                "let data := sload(array)\nlet oldLen := @0(data)\n@1(array, data, oldLen, add(oldLen, 1))",
                 .{ extract, increase },
             );
         } else blk: {
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "let oldLen := {s}(array)\nif iszero(lt(oldLen, 0x10000000000000000)) {{ {s}() }}\nsstore(array, add(oldLen, 1))",
+            break :blk try generator.statements(
+                "let oldLen := @0(array)\nif iszero(lt(oldLen, 0x10000000000000000)) { @1() }\nsstore(array, add(oldLen, 1))",
                 .{ length, panic },
             );
         };
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array) -> slot, offset {{\n{s}\nslot, offset := {s}(array, oldLen)\n}}\n",
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array) -> slot, offset {\n@1\nslot, offset := @2(array, oldLen)\n}\n",
             .{ name, body, index },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4815,13 +4390,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(shift);
         const ones = try compactHex(self.allocator, std.math.maxInt(u256));
         defer self.allocator.free(ones);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot, offset) {{\nlet mask := {s}(mul(8, sub(32, offset)), {s})\nsstore(slot, and(mask, sload(slot)))\n}}\n",
-            .{ name, shift, ones },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot, offset) {\nlet mask := @1(mul(8, sub(32, offset)), @2)\nsstore(slot, and(mask, sload(slot)))\n}\n",
+            .{ name, shift, try generator.numberToken(ones) },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4850,13 +4424,12 @@ pub const YulUtilFunctions = struct {
         const clear = try self.storageSetToZeroFunction(clear_type);
         defer self.allocator.free(clear);
         const increment = try TypeBehavior.storageSize(type_ref);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(startSlot, slotCount) {{\nfor {{ let i := 0 }} lt(i, slotCount) {{ i := add(i, {d}) }} {{\n{s}(add(startSlot, i), 0)\n}}\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(startSlot, slotCount) {\nfor { let i := 0 } lt(i, slotCount) { i := add(i, @1) } {\n@2(add(startSlot, i), 0)\n}\n}\n",
             .{ name, increment, clear },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4880,12 +4453,13 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const body = if (array.isDynamicallySized()) blk: {
             const resize = try self.resizeArrayFunction(type_ref);
             defer self.allocator.free(resize);
-            break :blk try std.fmt.allocPrint(self.allocator, "{s}(slot, 0)", .{resize});
+            break :blk try generator.statements("@0(slot, 0)", .{resize});
         } else if (array.base_type.category() == .Mapping)
-            try self.allocator.alloc(u8, 0)
+            Yul.Block{}
         else blk: {
             const base_bytes = try TypeBehavior.storageBytes(array.base_type);
             const clear_type = if (base_bytes < 32)
@@ -4896,20 +4470,17 @@ pub const YulUtilFunctions = struct {
             defer self.allocator.free(clear);
             const to_size = try self.arrayConvertLengthToSize(type_ref);
             defer self.allocator.free(to_size);
-            break :blk try std.fmt.allocPrint(
-                self.allocator,
-                "{s}(slot, {s}({d}))",
+            break :blk try generator.statements(
+                "@0(slot, @1(@2))",
                 .{ clear, to_size, array.length.? },
             );
         };
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot) {{\n{s}\n}}\n",
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot) {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -4947,8 +4518,8 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(offsets.offsets);
         var cleared_slots = std.AutoHashMap(u256, void).init(self.allocator);
         defer cleared_slots.deinit();
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
+        const generator = try self.function_collector.generator(self.evm_version);
+        var body: Generated.Buffer = .{ .generator = generator };
         for (members.items, offsets.offsets) |member_entry, maybe_offset| {
             const member = member_entry.type_ref;
             if (member.category() == .Mapping) continue;
@@ -4957,29 +4528,25 @@ pub const YulUtilFunctions = struct {
             if (bytes < 32) {
                 if (cleared_slots.contains(offset.slot)) continue;
                 try cleared_slots.put(offset.slot, {});
-                try body.print(
-                    self.allocator,
-                    "sstore(add(slot, {d}), 0)\n",
+                try body.add(
+                    "sstore(add(slot, @0), 0)\n",
                     .{offset.slot},
                 );
             } else {
                 if (offset.byte_offset != 0) return error.InvalidType;
                 const clear = try self.storageSetToZeroFunction(member);
                 defer self.allocator.free(clear);
-                try body.print(
-                    self.allocator,
-                    "{s}(add(slot, {d}), 0)\n",
+                try body.add(
+                    "@0(add(slot, @1), 0)\n",
                     .{ clear, offset.slot },
                 );
             }
         }
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(slot) {{\n{s}}}\n",
-            .{ name, body.items },
+        const code = try generator.functionDefinition(
+            "\nfunction @0(slot) {\n@1}\n",
+            .{ name, body.take() },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5012,28 +4579,26 @@ pub const YulUtilFunctions = struct {
         else
             try self.allocator.alloc(u8, 0);
         defer self.allocator.free(clear);
+        const generator = try self.function_collector.generator(self.evm_version);
         const clear_statement = if (array.base_type.category() != .Mapping)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "{s}(array, oldLen, newLen)",
+            try generator.statements(
+                "@0(array, oldLen, newLen)",
                 .{clear},
             )
         else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(clear_statement);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array, newLen) {{\nif gt(newLen, 0x10000000000000000) {{ {s}() }}\nlet oldLen := {s}(array)\n{s}\n{s}\n}}\n",
+            Yul.Block{};
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array, newLen) {\nif gt(newLen, 0x10000000000000000) { @1() }\nlet oldLen := @2(array)\n@3\n@4\n}\n",
             .{
                 name,
                 panic,
                 length,
-                if (array.isDynamicallySized()) "sstore(array, newLen)" else "",
+                if (array.isDynamicallySized()) try generator.statements("sstore(array, newLen)", .{}) else Yul.Block{},
                 clear_statement,
             },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5065,11 +4630,7 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(to_size);
         const data_area = try self.arrayDataAreaFunction(type_ref);
         defer self.allocator.free(data_area);
-        const clear_type = if (storage_bytes < 32)
-            self.type_provider.uint256()
-        else
-            array.base_type;
-        const clear_range = try self.clearStorageRangeFunction(clear_type);
+        const clear_range = try self.clearStorageRangeFunction(array.base_type);
         defer self.allocator.free(clear_range);
         const uses_packing = storage_bytes <= 16;
         // Whiskers resolves every substitution in insertion order even when a
@@ -5077,22 +4638,20 @@ pub const YulUtilFunctions = struct {
         // for unpacked arrays as well so collector order matches upstream.
         const partial = try self.partialClearStorageSlotFunction();
         defer self.allocator.free(partial);
+        const generator = try self.function_collector.generator(self.evm_version);
         const packed_body = if (uses_packing)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "let offset := mul(mod(startIndex, {d}), {d})\nif gt(offset, 0) {{ {s}(sub(deleteStart, 1), offset) }}",
+            try generator.statements(
+                "let offset := mul(mod(startIndex, @0), @1)\nif gt(offset, 0) { @2(sub(deleteStart, 1), offset) }",
                 .{ 32 / storage_bytes, storage_bytes, partial },
             )
         else
-            try self.allocator.alloc(u8, 0);
-        defer self.allocator.free(packed_body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array, len, startIndex) {{\nif lt(startIndex, len) {{\nlet oldSlotCount := {s}(len)\nlet newSlotCount := {s}(startIndex)\nlet arrayDataStart := {s}(array)\nlet deleteStart := add(arrayDataStart, newSlotCount)\n{s}\n{s}(deleteStart, sub(oldSlotCount, newSlotCount))\n}}\n}}\n",
+            Yul.Block{};
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array, len, startIndex) {\nif lt(startIndex, len) {\nlet oldSlotCount := @1(len)\nlet newSlotCount := @2(startIndex)\nlet arrayDataStart := @3(array)\nlet deleteStart := add(arrayDataStart, newSlotCount)\n@4\n@5(deleteStart, sub(oldSlotCount, newSlotCount))\n}\n}\n",
             .{ name, to_size, to_size, data_area, packed_body, clear_range },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5120,13 +4679,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(decrease);
         const increase = try self.increaseByteArraySizeFunction(type_ref);
         defer self.allocator.free(increase);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array, newLen) {{\nlet data := sload(array)\nlet oldLen := {s}(data)\nif gt(newLen, oldLen) {{ {s}(array, data, oldLen, newLen) }}\nif lt(newLen, oldLen) {{ {s}(array, data, oldLen, newLen) }}\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array, newLen) {\nlet data := sload(array)\nlet oldLen := @1(data)\nif gt(newLen, oldLen) { @2(array, data, oldLen, newLen) }\nif lt(newLen, oldLen) { @3(array, data, oldLen, newLen) }\n}\n",
             .{ name, extract, increase, decrease },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5158,13 +4716,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(divide);
         const clear = try self.clearStorageRangeFunction(array.base_type);
         defer self.allocator.free(clear);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array, len, startIndex) {{\nif gt(len, 31) {{\nif gt(len, startIndex) {{\nlet dataArea := {s}(array)\nlet oldSlotCount := {s}(len)\nlet newSlotCount := {s}(startIndex)\nif lt(startIndex, 32) {{ newSlotCount := 0 }}\nlet deleteStart := add(dataArea, newSlotCount)\n{s}(deleteStart, sub(oldSlotCount, newSlotCount))\n}}\n}}\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array, len, startIndex) {\nif gt(len, 31) {\nif gt(len, startIndex) {\nlet dataArea := @1(array)\nlet oldSlotCount := @2(len)\nlet newSlotCount := @3(startIndex)\nif lt(startIndex, 32) { newSlotCount := 0 }\nlet deleteStart := add(dataArea, newSlotCount)\n@4(deleteStart, sub(oldSlotCount, newSlotCount))\n}\n}\n}\n",
             .{ name, data_area, divide, divide, clear },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5177,13 +4734,12 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const mask = try self.maskBytesFunctionDynamic();
         defer self.allocator.free(mask);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(data, len) -> used {{\ndata := {s}(data, len)\nused := or(data, mul(2, len))\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(data, len) -> used {\ndata := @1(data, len)\nused := or(data, mul(2, len))\n}\n",
             .{ name, mask },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5212,13 +4768,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(data_area);
         const encode = try self.shortByteArrayEncodeUsedAreaSetLengthFunction();
         defer self.allocator.free(encode);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(array, len) {{\nlet dataPos := {s}(array)\nlet data := {s}(sload(dataPos), len)\nsstore(array, data)\nsstore(dataPos, 0)\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(array, len) {\nlet dataPos := @1(array)\nlet data := @2(sload(dataPos), len)\nsstore(array, data)\nsstore(dataPos, 0)\n}\n",
             .{ name, data_area, encode },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5243,25 +4798,24 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(data_area);
         const encode = try self.shortByteArrayEncodeUsedAreaSetLengthFunction();
         defer self.allocator.free(encode);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(array, data, oldLen, newLen) {{
-            \\if gt(newLen, 0x10000000000000000) {{ {s}() }}
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0(array, data, oldLen, newLen) {
+            \\if gt(newLen, 0x10000000000000000) { @1() }
             \\switch lt(oldLen, 32)
-            \\case 0 {{ sstore(array, add(mul(2, newLen), 1)) }}
-            \\default {{
+            \\case 0 { sstore(array, add(mul(2, newLen), 1)) }
+            \\default {
             \\    switch lt(newLen, 32)
-            \\    case 0 {{
+            \\    case 0 {
             \\        data := and(not(0xff), data)
-            \\        sstore({s}(array), data)
+            \\        sstore(@2(array), data)
             \\        sstore(array, add(mul(2, newLen), 1))
-            \\    }}
-            \\    default {{ sstore(array, {s}(data, newLen)) }}
-            \\}}
-            \\}}
-            \\
+            \\    }
+            \\    default { sstore(array, @3(data, newLen)) }
+            \\}
+            \\}
         , .{ name, panic, data_area, encode });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5294,30 +4848,30 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(transit);
         const encode = try self.shortByteArrayEncodeUsedAreaSetLengthFunction();
         defer self.allocator.free(encode);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(array, data, oldLen, newLen) {{
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0(array, data, oldLen, newLen) {
             \\switch lt(newLen, 32)
-            \\case 0 {{
-            \\    let newSlots := {s}(newLen)
-            \\    let oldSlots := {s}(oldLen)
-            \\    let arrayDataStart := {s}(array)
+            \\case 0 {
+            \\    let newSlots := @1(newLen)
+            \\    let oldSlots := @2(oldLen)
+            \\    let arrayDataStart := @3(array)
             \\    let deleteStart := add(arrayDataStart, newSlots)
             \\    let offset := and(newLen, 0x1f)
-            \\    if offset {{ {s}(sub(deleteStart, 1), offset) }}
-            \\    if gt(oldSlots, newSlots) {{ {s}(deleteStart, sub(oldSlots, newSlots)) }}
+            \\    if offset { @4(sub(deleteStart, 1), offset) }
+            \\    if gt(oldSlots, newSlots) { @5(deleteStart, sub(oldSlots, newSlots)) }
             \\    sstore(array, or(mul(2, newLen), 1))
-            \\}}
-            \\default {{
+            \\}
+            \\default {
             \\    switch gt(oldLen, 31)
-            \\    case 1 {{
-            \\        let arrayDataStart := {s}(array)
-            \\        {s}(add(arrayDataStart, 1), sub({s}(oldLen), 1))
-            \\        {s}(array, newLen)
-            \\    }}
-            \\    default {{ sstore(array, {s}(data, newLen)) }}
-            \\}}
-            \\}}
-            \\
+            \\    case 1 {
+            \\        let arrayDataStart := @6(array)
+            \\        @7(add(arrayDataStart, 1), sub(@8(oldLen), 1))
+            \\        @9(array, newLen)
+            \\    }
+            \\    default { sstore(array, @10(data, newLen)) }
+            \\}
+            \\}
         , .{
             name,
             divide,
@@ -5331,8 +4885,7 @@ pub const YulUtilFunctions = struct {
             transit,
             encode,
         });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5354,18 +4907,19 @@ pub const YulUtilFunctions = struct {
         self: *YulUtilFunctions,
         type_ref: *const Types.Type,
         storage_bytes: u8,
-    ) UtilError![]u8 {
-        if (storage_bytes == 32) return self.allocator.dupe(u8, "value");
+    ) UtilError!Yul.Expression {
+        const generator = try self.function_collector.generator(self.evm_version);
+        if (storage_bytes == 32) return generator.identifier("value");
         if (try TypeBehavior.leftAligned(type_ref)) {
             const shift = try self.shiftLeftFunction(256 - 8 * @as(usize, storage_bytes));
             defer self.allocator.free(shift);
-            return std.fmt.allocPrint(self.allocator, "{s}(value)", .{shift});
+            return generator.expression("@0(value)", .{shift});
         }
         const bits: std.math.Log2Int(u256) = @intCast(8 * @as(usize, storage_bytes));
         const mask = (@as(u256, 1) << bits) - 1;
         const rendered = try compactHex(self.allocator, mask);
         defer self.allocator.free(rendered);
-        return std.fmt.allocPrint(self.allocator, "and(value, {s})", .{rendered});
+        return generator.expression("and(value, @0)", .{try generator.numberToken(rendered)});
     }
 
     pub fn validatorFunction(
@@ -5385,6 +4939,7 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
+        const generator = try self.function_collector.generator(self.evm_version);
         var panic_code: PanicCode = .generic;
         const condition = switch (type_ref.payload) {
             .Enum => |enum_type| blk: {
@@ -5392,13 +4947,12 @@ pub const YulUtilFunctions = struct {
                     enum_type.declaration.payload.enum_definition.members.len == 0)
                     return error.InvalidType;
                 panic_code = .enum_conversion_error;
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "lt(value, {d})",
+                break :blk try generator.expression(
+                    "lt(value, @0)",
                     .{enum_type.declaration.payload.enum_definition.members.len},
                 );
             },
-            .InaccessibleDynamic => try self.allocator.dupe(u8, "1"),
+            .InaccessibleDynamic => try generator.expression("1", .{}),
             .Address,
             .Integer,
             .RationalNumber,
@@ -5414,30 +4968,28 @@ pub const YulUtilFunctions = struct {
             => blk: {
                 const cleanup = try self.cleanupFunction(type_ref);
                 defer self.allocator.free(cleanup);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "eq(value, {s}(value))",
+                break :blk try generator.expression(
+                    "eq(value, @0(value))",
                     .{cleanup},
                 );
             },
             else => return error.UnsupportedType,
         };
-        defer self.allocator.free(condition);
+
         const failure = if (revert_on_failure)
-            try self.allocator.dupe(u8, "revert(0, 0)")
+            try generator.statements("revert(0, 0)", .{})
         else blk: {
             const panic = try self.panicFunction(panic_code);
             defer self.allocator.free(panic);
-            break :blk try std.fmt.allocPrint(self.allocator, "{s}()", .{panic});
+            break :blk try generator.statements("@0()", .{panic});
         };
-        defer self.allocator.free(failure);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) {{\nif iszero({s}) {{ {s} }}\n}}\n",
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) {\nif iszero(@1) { @2 }\n}\n",
             .{ name, condition, failure },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5459,76 +5011,68 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
 
+        const generator = try self.function_collector.generator(self.evm_version);
         const code = switch (type_ref.payload) {
             .Function => |function| if (function.kind == .External and split_function_types)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "function {s}() -> retAddress, retFunction {{ retAddress := 0 retFunction := 0 }}\n",
+                try generator.functionDefinition(
+                    "function @0() -> retAddress, retFunction { retAddress := 0 retFunction := 0 }\n",
                     .{name},
                 )
             else
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "function {s}() -> ret {{ ret := 0 }}\n",
+                try generator.functionDefinition(
+                    "function @0() -> ret { ret := 0 }\n",
                     .{name},
                 ),
             .Array => |array| if (array.reference.location == .CallData)
                 if (array.isDynamicallySized())
-                    try std.fmt.allocPrint(
-                        self.allocator,
-                        "function {s}() -> offset, length {{ offset := calldatasize() length := 0 }}\n",
+                    try generator.functionDefinition(
+                        "function @0() -> offset, length { offset := calldatasize() length := 0 }\n",
                         .{name},
                     )
                 else
-                    try std.fmt.allocPrint(
-                        self.allocator,
-                        "function {s}() -> offset {{ offset := calldatasize() }}\n",
+                    try generator.functionDefinition(
+                        "function @0() -> offset { offset := calldatasize() }\n",
                         .{name},
                     )
             else if (array.reference.location == .Memory)
                 if (array.isDynamicallySized())
-                    try std.fmt.allocPrint(
-                        self.allocator,
-                        "function {s}() -> ret {{ ret := 96 }}\n",
+                    try generator.functionDefinition(
+                        "function @0() -> ret { ret := 96 }\n",
                         .{name},
                     )
                 else blk: {
                     const allocate = try self.allocateAndInitializeMemoryArrayFunction(type_ref);
                     defer self.allocator.free(allocate);
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "function {s}() -> ret {{ ret := {s}({d}) }}\n",
+                    break :blk try generator.functionDefinition(
+                        "function @0() -> ret { ret := @1(@2) }\n",
                         .{ name, allocate, array.length.? },
                     );
                 }
             else
                 return error.UnsupportedType,
             .Struct => |structure| if (structure.reference.location == .CallData)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "function {s}() -> offset {{ offset := calldatasize() }}\n",
+                try generator.functionDefinition(
+                    "function @0() -> offset { offset := calldatasize() }\n",
                     .{name},
                 )
             else if (structure.reference.location == .Memory) blk: {
                 const allocate = try self.allocateAndInitializeMemoryStructFunction(type_ref);
                 defer self.allocator.free(allocate);
-                break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "function {s}() -> ret {{ ret := {s}() }}\n",
+                break :blk try generator.functionDefinition(
+                    "function @0() -> ret { ret := @1() }\n",
                     .{ name, allocate },
                 );
             } else return error.UnsupportedType,
             else => if (TypeBehavior.isValueType(type_ref))
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "\nfunction {s}() -> ret {{\nret := 0\n}}\n",
+                try generator.functionDefinition(
+                    "\nfunction @0() -> ret {\nret := 0\n}\n",
                     .{name},
                 )
             else
                 return error.UnsupportedType,
         };
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5549,13 +5093,12 @@ pub const YulUtilFunctions = struct {
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
         const selector = FunctionSelector.selectorFromSignatureU256("Panic(uint256)");
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}() {{\nmstore(0, {d})\nmstore(4, {s})\nrevert(0, 0x24)\n}}\n",
-            .{ name, selector, rendered_code },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0() {\nmstore(0, @1)\nmstore(4, @2)\nrevert(0, 0x24)\n}\n",
+            .{ name, selector, try generator.numberToken(rendered_code) },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5569,17 +5112,17 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const shift = try self.shiftRightFunction(224);
         defer self.allocator.free(shift);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}() -> sig {{
-            \\    if gt(returndatasize(), 3) {{
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0() -> sig {
+            \\    if gt(returndatasize(), 3) {
             \\        returndatacopy(0, 0, 4)
-            \\        sig := {s}(mload(0))
-            \\    }}
-            \\}}
-            \\
+            \\        sig := @1(mload(0))
+            \\    }
+            \\}
         , .{ name, shift });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5595,25 +5138,25 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(allocate);
         const finalize = try self.finalizeAllocationFunction();
         defer self.allocator.free(finalize);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}() -> ret {{
-            \\    if lt(returndatasize(), 0x44) {{ leave }}
-            \\    let data := {s}()
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0() -> ret {
+            \\    if lt(returndatasize(), 0x44) { leave }
+            \\    let data := @1()
             \\    returndatacopy(data, 4, sub(returndatasize(), 4))
             \\    let offset := mload(data)
-            \\    if or(gt(offset, 0xffffffffffffffff), gt(add(offset, 0x24), returndatasize())) {{ leave }}
+            \\    if or(gt(offset, 0xffffffffffffffff), gt(add(offset, 0x24), returndatasize())) { leave }
             \\    let msg := add(data, offset)
             \\    let length := mload(msg)
-            \\    if gt(length, 0xffffffffffffffff) {{ leave }}
+            \\    if gt(length, 0xffffffffffffffff) { leave }
             \\    let end := add(add(msg, 0x20), length)
-            \\    if gt(end, add(data, sub(returndatasize(), 4))) {{ leave }}
-            \\    {s}(data, add(offset, add(0x20, length)))
+            \\    if gt(end, add(data, sub(returndatasize(), 4))) { leave }
+            \\    @2(data, add(offset, add(0x20, length)))
             \\    ret := msg
-            \\}}
-            \\
+            \\}
         , .{ name, allocate, finalize });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5621,7 +5164,7 @@ pub const YulUtilFunctions = struct {
         self: *YulUtilFunctions,
     ) UtilError![]u8 {
         if (!self.evm_version.supportsReturndata()) return error.InvalidType;
-        return self.collectSimple("try_decode_panic_data",
+        return self.collectTemplate("try_decode_panic_data",
             \\function try_decode_panic_data() -> success, data {
             \\    if gt(returndatasize(), 0x23) {
             \\        returndatacopy(0, 4, 0x20)
@@ -5647,26 +5190,25 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(allocate);
         const empty = try self.zeroValueFunction(bytes_memory, true);
         defer self.allocator.free(empty);
+        const generator = try self.function_collector.generator(self.evm_version);
         const body = if (self.evm_version.supportsReturndata())
-            try std.fmt.allocPrint(self.allocator,
+            try generator.statements(
                 \\switch returndatasize()
-                \\case 0 {{ data := {s}() }}
-                \\default {{
-                \\    data := {s}(returndatasize())
+                \\case 0 { data := @0() }
+                \\default {
+                \\    data := @1(returndatasize())
                 \\    returndatacopy(add(data, 0x20), 0, returndatasize())
-                \\}}
-                \\
+                \\}
             , .{ empty, allocate })
         else
-            try std.fmt.allocPrint(self.allocator, "data := {s}()", .{empty});
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "function {s}() -> data {{\n{s}\n}}\n",
+            try generator.statements("data := @0()", .{empty});
+
+        const code = try generator.functionDefinition(
+            "function @0() -> data {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5678,7 +5220,7 @@ pub const YulUtilFunctions = struct {
         contract_name: []const u8,
         contract_id: i64,
         creation_object_name: []const u8,
-        return_parameters: []const u8,
+        return_parameters: []const []const u8,
         decoder_name: []const u8,
     ) UtilError![]u8 {
         const name = try std.fmt.allocPrint(
@@ -5691,38 +5233,35 @@ pub const YulUtilFunctions = struct {
             errdefer self.function_collector.abortFunction(name);
             const allocate = try self.allocationFunction();
             defer self.allocator.free(allocate);
+            const generator = try self.function_collector.generator(self.evm_version);
             const decode_statement = if (return_parameters.len == 0)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}(memoryDataOffset, add(memoryDataOffset, argSize))",
+                try generator.statements(
+                    "@0(memoryDataOffset, add(memoryDataOffset, argSize))",
                     .{decoder_name},
                 )
             else
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s} := {s}(memoryDataOffset, add(memoryDataOffset, argSize))",
+                try generator.statements(
+                    "@0 := @1(memoryDataOffset, add(memoryDataOffset, argSize))",
                     .{ return_parameters, decoder_name },
                 );
-            defer self.allocator.free(decode_statement);
-            const code = try std.fmt.allocPrint(self.allocator,
-                \\function {s}(){s}{s} {{
-                \\    let programSize := datasize("{s}")
+
+            const code = try generator.functionDefinition(
+                \\function @0() -> @1 {
+                \\    let programSize := datasize(@2)
                 \\    let argSize := sub(codesize(), programSize)
-                \\    let memoryDataOffset := {s}(argSize)
+                \\    let memoryDataOffset := @3(argSize)
                 \\    codecopy(memoryDataOffset, programSize, argSize)
-                \\    {s}
-                \\}}
-                \\
+                \\    @4
+                \\}
             , .{
                 name,
-                if (return_parameters.len == 0) "" else " -> ",
                 return_parameters,
-                creation_object_name,
+                try generator.string(creation_object_name, .builtin),
                 allocate,
                 decode_statement,
             });
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -5736,16 +5275,16 @@ pub const YulUtilFunctions = struct {
             self.type_provider.bytesMemory(),
         );
         defer self.allocator.free(allocate);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(addr) -> mpos {{
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0(addr) -> mpos {
             \\    let length := extcodesize(addr)
-            \\    mpos := {s}(length)
+            \\    mpos := @1(length)
             \\    extcodecopy(addr, add(mpos, 0x20), 0, length)
-            \\}}
-            \\
+            \\}
         , .{ name, allocate });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5761,14 +5300,14 @@ pub const YulUtilFunctions = struct {
         const uint32_type = try self.type_provider.integer(32, .Unsigned);
         const selector_cleanup = try self.cleanupFunction(uint32_type);
         defer self.allocator.free(selector_cleanup);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(leftAddress, leftSelector, rightAddress, rightSelector) -> result {{
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0(leftAddress, leftSelector, rightAddress, rightSelector) -> result {
             \\    result := and(
-            \\        eq({s}(leftAddress), {s}(rightAddress)),
-            \\        eq({s}(leftSelector), {s}(rightSelector))
+            \\        eq(@1(leftAddress), @2(rightAddress)),
+            \\        eq(@3(leftSelector), @4(rightSelector))
             \\    )
-            \\}}
-            \\
+            \\}
         , .{
             name,
             address_cleanup,
@@ -5776,8 +5315,8 @@ pub const YulUtilFunctions = struct {
             selector_cleanup,
             selector_cleanup,
         });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5789,19 +5328,19 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
+        const generator = try self.function_collector.generator(self.evm_version);
         const failure = if (is_assert) blk: {
             const panic = try self.panicFunction(.assert);
             defer self.allocator.free(panic);
-            break :blk try std.fmt.allocPrint(self.allocator, "{s}()", .{panic});
-        } else try self.allocator.dupe(u8, "revert(0, 0)");
-        defer self.allocator.free(failure);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(condition) {{\nif iszero(condition) {{ {s} }}\n}}\n",
+            break :blk try generator.statements("@0()", .{panic});
+        } else try generator.statements("revert(0, 0)", .{});
+
+        const code = try generator.functionDefinition(
+            "\nfunction @0(condition) {\nif iszero(condition) { @1 }\n}\n",
             .{ name, failure },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -5812,11 +5351,11 @@ pub const YulUtilFunctions = struct {
         self: *YulUtilFunctions,
         signature: []const u8,
         parameter_types: []const *const Types.Type,
-        argument_names: []const u8,
+        argument_names: []const []const u8,
         encoder_name: []const u8,
         pos_variable: ?[]const u8,
         end_variable: ?[]const u8,
-    ) UtilError![]u8 {
+    ) UtilError!Yul.Block {
         if ((pos_variable == null) != (end_variable == null))
             return error.InvalidType;
         var static_size: usize = 0;
@@ -5845,40 +5384,22 @@ pub const YulUtilFunctions = struct {
         else
             try self.allocator.alloc(u8, 0);
         defer self.allocator.free(allocate);
+        const generator = try self.function_collector.generator(self.evm_version);
         const allocation_expression = if (needs_allocation)
-            try std.fmt.allocPrint(self.allocator, "{s}()", .{allocate})
+            try generator.expression("@0()", .{allocate})
         else
-            try self.allocator.dupe(u8, "0");
-        defer self.allocator.free(allocation_expression);
+            try generator.expression("0", .{});
         const selector = FunctionSelector.selectorFromSignatureU256(signature);
-        return std.fmt.allocPrint(self.allocator,
-            \\{{
-            \\    let {s} := {s}
-            \\    mstore({s}, {d})
-            \\    let {s} := {s}(add({s}, 4){s}{s})
-            \\    revert({s}, sub({s}, {s}))
-            \\}}
-            \\
-        , .{
-            position,
-            allocation_expression,
-            position,
-            selector,
-            end,
-            encoder_name,
-            position,
-            if (argument_names.len == 0) "" else ", ",
-            argument_names,
-            position,
-            end,
-            position,
-        });
+        return generator.statements(
+            "let @0 := @1 mstore(@0, @2) let @3 := @4(add(@0, 4), @5) revert(@0, sub(@3, @0))",
+            .{ position, allocation_expression, selector, end, encoder_name, argument_names },
+        );
     }
 
     pub fn requireOrAssertWithMessageFunction(
         self: *YulUtilFunctions,
         message_type: *const Types.Type,
-        argument_names: []const u8,
+        argument_names: []const []const u8,
         encoder_name: []const u8,
     ) UtilError![]u8 {
         const identifier = try TypeBehavior.compatibilityIdentifierAlloc(self.allocator, self.compatibility_ids, message_type);
@@ -5899,19 +5420,13 @@ pub const YulUtilFunctions = struct {
                 null,
                 null,
             );
-            defer self.allocator.free(revert);
-            const code = try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(condition{s}{s}) {{\nif iszero(condition) {s}\n}}\n",
-                .{
-                    name,
-                    if (argument_names.len == 0) "" else ", ",
-                    argument_names,
-                    revert,
-                },
+
+            const generator = try self.function_collector.generator(self.evm_version);
+            const code = try generator.functionDefinition(
+                "function @0(condition, @1) { if iszero(condition) { @2 } }",
+                .{ name, argument_names, revert },
             );
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -5923,7 +5438,7 @@ pub const YulUtilFunctions = struct {
         error_signature: []const u8,
         argument_types: []const *const Types.Type,
         parameter_types: []const *const Types.Type,
-        argument_names: []const u8,
+        argument_names: []const []const u8,
         encoder_name: []const u8,
     ) UtilError![]u8 {
         var name: std.ArrayList(u8) = .empty;
@@ -5948,19 +5463,13 @@ pub const YulUtilFunctions = struct {
                 null,
                 null,
             );
-            defer self.allocator.free(revert);
-            const code = try std.fmt.allocPrint(
-                self.allocator,
-                "\nfunction {s}(condition{s}{s}) {{\nif iszero(condition) {s}\n}}\n",
-                .{
-                    name.items,
-                    if (argument_names.len == 0) "" else ", ",
-                    argument_names,
-                    revert,
-                },
+
+            const generator = try self.function_collector.generator(self.evm_version);
+            const code = try generator.functionDefinition(
+                "function @0(condition, @1) { if iszero(condition) { @2 } }",
+                .{ name.items, argument_names, revert },
             );
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name.items, code);
+            try self.function_collector.finishGeneratedFunction(name.items, code);
         }
         return self.function_collector.copyFunctionName(name.items);
     }
@@ -5980,32 +5489,32 @@ pub const YulUtilFunctions = struct {
         if (!(try self.function_collector.beginFunction(name)))
             return self.function_collector.copyFunctionName(name);
         errdefer self.function_collector.abortFunction(name);
-        const body = try self.revertReasonIfDebugBodyAlloc(message);
-        defer self.allocator.free(body);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}() {{\n{s}\n}}\n",
+        const body = try self.revertReasonIfDebugBody(message);
+
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0() {\n@1\n}\n",
             .{ name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
-    pub fn revertReasonIfDebugBodyAlloc(
+    pub fn revertReasonIfDebugBody(
         self: *YulUtilFunctions,
         message: []const u8,
-    ) UtilError![]u8 {
+    ) UtilError!Yul.Block {
+        const generator = try self.function_collector.generator(self.evm_version);
+
         if (@intFromEnum(self.revert_strings) < @intFromEnum(DebugSettings.RevertStrings.Debug) or
             message.len == 0)
-            return self.allocator.dupe(u8, "revert(0, 0)");
+            return generator.statements("revert(0, 0)", .{});
         const allocate = try self.allocateUnboundedFunction();
         defer self.allocator.free(allocate);
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        try output.print(
-            self.allocator,
-            "let start := {s}() let pos := start mstore(pos, {d}) pos := add(pos, 4) mstore(pos, 0x20) pos := add(pos, 0x20) mstore(pos, {d}) pos := add(pos, 0x20) ",
+        var output: Generated.Buffer = .{ .generator = generator };
+        try output.add(
+            "let start := @0() let pos := start mstore(pos, @1) pos := add(pos, 4) mstore(pos, 0x20) pos := add(pos, 0x20) mstore(pos, @2) pos := add(pos, 0x20) ",
             .{
                 allocate,
                 FunctionSelector.selectorFromSignatureU256("Error(string)"),
@@ -6021,25 +5530,16 @@ pub const YulUtilFunctions = struct {
             const value = std.mem.readInt(u256, &word, .big);
             const rendered = try compactHex(self.allocator, value);
             defer self.allocator.free(rendered);
-            try output.print(
-                self.allocator,
-                "mstore(add(pos, {d}), {s}) ",
-                .{ word_index * 32, rendered },
+            try output.add(
+                "mstore(add(pos, @0), @1) ",
+                .{ word_index * 32, try generator.numberToken(rendered) },
             );
         }
-        try output.print(
-            self.allocator,
-            "revert(start, {d})",
+        try output.add(
+            "revert(start, @0)",
             .{4 + 32 + 32 + words * 32},
         );
-        return output.toOwnedSlice(self.allocator);
-    }
-
-    pub fn revertReasonIfDebugBody(
-        self: *YulUtilFunctions,
-        message: []const u8,
-    ) UtilError![]u8 {
-        return self.revertReasonIfDebugBodyAlloc(message);
+        return output.take();
     }
 
     pub fn overflowCheckedIntAddFunction(
@@ -6143,26 +5643,22 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(maximum);
         const minimum = try compactHex(self.allocator, TypeBehavior.integerMin(integer));
         defer self.allocator.free(minimum);
+        const generator = try self.function_collector.generator(self.evm_version);
         const call = if (integer.isSigned())
-            try std.fmt.allocPrint(
-                self.allocator,
-                "power := {s}(base, exponent, {s}, {s})",
-                .{ exponentiation, minimum, maximum },
+            try generator.statements(
+                "power := @0(base, exponent, @1, @2)",
+                .{ exponentiation, try generator.numberToken(minimum), try generator.numberToken(maximum) },
             )
         else
-            try std.fmt.allocPrint(
-                self.allocator,
-                "power := {s}(base, exponent, {s})",
-                .{ exponentiation, maximum },
+            try generator.statements(
+                "power := @0(base, exponent, @1)",
+                .{ exponentiation, try generator.numberToken(maximum) },
             );
-        defer self.allocator.free(call);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(base, exponent) -> power {{\nbase := {s}(base)\nexponent := {s}(exponent)\n{s}\n}}\n",
+        const code = try generator.functionDefinition(
+            "\nfunction @0(base, exponent) -> power {\nbase := @1(base)\nexponent := @2(exponent)\n@3\n}\n",
             .{ name, base_cleanup, exponent_cleanup, call },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -6242,31 +5738,22 @@ pub const YulUtilFunctions = struct {
             else
                 try self.allocator.alloc(u8, 0);
             defer self.allocator.free(panic);
-            const base_text = try std.fmt.allocPrint(
-                self.allocator,
-                "{d}",
-                .{base_value.toU256Wrapping()},
-            );
-            defer self.allocator.free(base_text);
+            const generator = try self.function_collector.generator(self.evm_version);
             const check = if (needs_check)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "if gt(exponent, {d}) {{ {s}() }}",
+                try generator.statements(
+                    "if gt(exponent, @0) { @1() }",
                     .{ exponent_upper_bound, panic },
                 )
             else
-                try self.allocator.alloc(u8, 0);
-            defer self.allocator.free(check);
-            const code = try std.fmt.allocPrint(self.allocator,
-                \\function {s}(exponent) -> power {{
-                \\    exponent := {s}(exponent)
-                \\    {s}
-                \\    power := exp({s}, exponent)
-                \\}}
-                \\
-            , .{ name, cleanup, check, base_text });
-            defer self.allocator.free(code);
-            try self.function_collector.finishFunction(name, code);
+                Yul.Block{};
+            const code = try generator.functionDefinition(
+                \\function @0(exponent) -> power {
+                \\    exponent := @1(exponent)
+                \\    @2
+                \\    power := exp(@3, exponent)
+                \\}
+            , .{ name, cleanup, check, base_value.toU256Wrapping() });
+            try self.function_collector.finishGeneratedFunction(name, code);
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -6280,31 +5767,30 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(panic);
         const loop = try self.overflowCheckedExpLoopFunction();
         defer self.allocator.free(loop);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(base, exponent, max) -> power {{
-            \\if iszero(exponent) {{ power := 1 leave }}
-            \\if iszero(base) {{ power := 0 leave }}
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0(base, exponent, max) -> power {
+            \\if iszero(exponent) { power := 1 leave }
+            \\if iszero(base) { power := 0 leave }
             \\switch base
-            \\case 1 {{ power := 1 leave }}
-            \\case 2 {{
-            \\    if gt(exponent, 255) {{ {s}() }}
+            \\case 1 { power := 1 leave }
+            \\case 2 {
+            \\    if gt(exponent, 255) { @1() }
             \\    power := exp(2, exponent)
-            \\    if gt(power, max) {{ {s}() }}
+            \\    if gt(power, max) { @2() }
             \\    leave
-            \\}}
-            \\if or(and(lt(base, 11), lt(exponent, 78)), and(lt(base, 307), lt(exponent, 32))) {{
+            \\}
+            \\if or(and(lt(base, 11), lt(exponent, 78)), and(lt(base, 307), lt(exponent, 32))) {
             \\    power := exp(base, exponent)
-            \\    if gt(power, max) {{ {s}() }}
+            \\    if gt(power, max) { @3() }
             \\    leave
-            \\}}
-            \\power, base := {s}(1, base, exponent, max)
-            \\if gt(power, div(max, base)) {{ {s}() }}
+            \\}
+            \\power, base := @4(1, base, exponent, max)
+            \\if gt(power, div(max, base)) { @5() }
             \\power := mul(power, base)
-            \\}}
-            \\
+            \\}
         , .{ name, panic, panic, panic, loop, panic });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -6319,28 +5805,27 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(loop);
         const shift = try self.shiftRightFunction(1);
         defer self.allocator.free(shift);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(base, exponent, min, max) -> power {{
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0(base, exponent, min, max) -> power {
             \\switch exponent
-            \\case 0 {{ power := 1 leave }}
-            \\case 1 {{ power := base leave }}
-            \\if iszero(base) {{ power := 0 leave }}
+            \\case 0 { power := 1 leave }
+            \\case 1 { power := base leave }
+            \\if iszero(base) { power := 0 leave }
             \\power := 1
             \\switch sgt(base, 0)
-            \\case 1 {{ if gt(base, div(max, base)) {{ {s}() }} }}
-            \\case 0 {{ if slt(base, sdiv(max, base)) {{ {s}() }} }}
-            \\if and(exponent, 1) {{ power := base }}
+            \\case 1 { if gt(base, div(max, base)) { @1() } }
+            \\case 0 { if slt(base, sdiv(max, base)) { @2() } }
+            \\if and(exponent, 1) { power := base }
             \\base := mul(base, base)
-            \\exponent := {s}(exponent)
-            \\power, base := {s}(power, base, exponent, max)
-            \\if and(sgt(power, 0), gt(power, div(max, base))) {{ {s}() }}
-            \\if and(slt(power, 0), slt(power, sdiv(min, base))) {{ {s}() }}
+            \\exponent := @3(exponent)
+            \\power, base := @4(power, base, exponent, max)
+            \\if and(sgt(power, 0), gt(power, div(max, base))) { @5() }
+            \\if and(slt(power, 0), slt(power, sdiv(min, base))) { @6() }
             \\power := mul(power, base)
-            \\}}
-            \\
+            \\}
         , .{ name, panic, panic, shift, loop, panic, panic });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -6353,21 +5838,20 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(panic);
         const shift = try self.shiftRightFunction(1);
         defer self.allocator.free(shift);
-        const code = try std.fmt.allocPrint(self.allocator,
-            \\function {s}(_power, _base, exponent, max) -> power, base {{
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            \\function @0(_power, _base, exponent, max) -> power, base {
             \\power := _power
             \\base := _base
-            \\for {{ }} gt(exponent, 1) {{ }} {{
-            \\    if gt(base, div(max, base)) {{ {s}() }}
-            \\    if and(exponent, 1) {{ power := mul(power, base) }}
+            \\for { } gt(exponent, 1) { } {
+            \\    if gt(base, div(max, base)) { @1() }
+            \\    if and(exponent, 1) { power := mul(power, base) }
             \\    base := mul(base, base)
-            \\    exponent := {s}(exponent)
-            \\}}
-            \\}}
-            \\
+            \\    exponent := @2(exponent)
+            \\}
+            \\}
         , .{ name, panic, shift });
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -6400,18 +5884,17 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(base_cleanup);
         const exponent_cleanup = try self.cleanupFunction(&exponent_type);
         defer self.allocator.free(exponent_cleanup);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(base, exponent) -> power {{\nbase := {s}(base)\nexponent := {s}(exponent)\npower := {s}(exp(base, exponent))\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(base, exponent) -> power {\nbase := @1(base)\nexponent := @2(exponent)\npower := @3(exp(base, exponent))\n}\n",
             .{ name, base_cleanup, exponent_cleanup, base_cleanup },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
     pub fn erc7201(self: *YulUtilFunctions) UtilError![]u8 {
-        return self.collectSimple(
+        return self.collectTemplate(
             "erc7201",
             "function erc7201(namespaceIDDataPtr, namespaceIDLength) -> slot { let innerKeccak := keccak256(namespaceIDDataPtr, namespaceIDLength) mstore(0, sub(innerKeccak, 1)) slot := and(keccak256(0, 32), not(0xff)) }\n",
         );
@@ -6436,13 +5919,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(cleanup);
         const minimum = try compactHex(self.allocator, TypeBehavior.integerMin(integer));
         defer self.allocator.free(minimum);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> ret {{\nvalue := {s}(value)\nif eq(value, {s}) {{ {s}() }}\nret := sub(value, 1)\n}}\n",
-            .{ name, cleanup, minimum, panic },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> ret {\nvalue := @1(value)\nif eq(value, @2) { @3() }\nret := sub(value, 1)\n}\n",
+            .{ name, cleanup, try generator.numberToken(minimum), panic },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -6472,13 +5954,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(cleanup);
         const maximum = try compactHex(self.allocator, TypeBehavior.integerMax(integer));
         defer self.allocator.free(maximum);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> ret {{\nvalue := {s}(value)\nif eq(value, {s}) {{ {s}() }}\nret := add(value, 1)\n}}\n",
-            .{ name, cleanup, maximum, panic },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> ret {\nvalue := @1(value)\nif eq(value, @2) { @3() }\nret := add(value, 1)\n}\n",
+            .{ name, cleanup, try generator.numberToken(maximum), panic },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -6509,13 +5990,12 @@ pub const YulUtilFunctions = struct {
         defer self.allocator.free(panic);
         const minimum = try compactHex(self.allocator, TypeBehavior.integerMin(integer));
         defer self.allocator.free(minimum);
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> ret {{\nvalue := {s}(value)\nif eq(value, {s}) {{ {s}() }}\nret := sub(0, value)\n}}\n",
-            .{ name, cleanup, minimum, panic },
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> ret {\nvalue := @1(value)\nif eq(value, @2) { @3() }\nret := sub(0, value)\n}\n",
+            .{ name, cleanup, try generator.numberToken(minimum), panic },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -6555,18 +6035,17 @@ pub const YulUtilFunctions = struct {
 
         const cleanup = try self.cleanupFunction(&type_ref);
         defer self.allocator.free(cleanup);
+        const generator = try self.function_collector.generator(self.evm_version);
         const expression = switch (operation) {
-            .decrement => "sub(value, 1)",
-            .increment => "add(value, 1)",
-            .negate => "sub(0, value)",
+            .decrement => try generator.expression("sub(value, 1)", .{}),
+            .increment => try generator.expression("add(value, 1)", .{}),
+            .negate => try generator.expression("sub(0, value)", .{}),
         };
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(value) -> ret {{\nret := {s}({s})\n}}\n",
+        const code = try generator.functionDefinition(
+            "\nfunction @0(value) -> ret {\nret := @1(@2)\n}\n",
             .{ name, cleanup, expression },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
@@ -6608,44 +6087,40 @@ pub const YulUtilFunctions = struct {
         errdefer self.function_collector.abortFunction(name);
         const cleanup = try self.cleanupFunction(&type_ref);
         defer self.allocator.free(cleanup);
-        const body = try self.integerBinaryBodyAlloc(operation, integer, cleanup);
-        defer self.allocator.free(body);
+        const body = try self.integerBinaryBody(operation, integer, cleanup);
         const result_name = switch (operation) {
             .checked_add, .wrapping_add => "sum",
             .checked_sub, .wrapping_sub => "diff",
             .checked_mul, .wrapping_mul => "product",
             .checked_div, .wrapping_div, .modulo => "r",
         };
-        const code = try std.fmt.allocPrint(
-            self.allocator,
-            "\nfunction {s}(x, y) -> {s} {{\n{s}\n}}\n",
+        const generator = try self.function_collector.generator(self.evm_version);
+        const code = try generator.functionDefinition(
+            "\nfunction @0(x, y) -> @1 {\n@2\n}\n",
             .{ name, result_name, body },
         );
-        defer self.allocator.free(code);
-        try self.function_collector.finishFunction(name, code);
+        try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
     }
 
-    fn integerBinaryBodyAlloc(
+    fn integerBinaryBody(
         self: *YulUtilFunctions,
         operation: IntegerBinaryOperation,
         integer: Types.IntegerType,
         cleanup: []const u8,
-    ) UtilError![]u8 {
+    ) UtilError!Yul.Block {
+        const generator = try self.function_collector.generator(self.evm_version);
         switch (operation) {
-            .wrapping_add => return std.fmt.allocPrint(
-                self.allocator,
-                "sum := {s}(add(x, y))",
+            .wrapping_add => return generator.statements(
+                "sum := @0(add(x, y))",
                 .{cleanup},
             ),
-            .wrapping_sub => return std.fmt.allocPrint(
-                self.allocator,
-                "diff := {s}(sub(x, y))",
+            .wrapping_sub => return generator.statements(
+                "diff := @0(sub(x, y))",
                 .{cleanup},
             ),
-            .wrapping_mul => return std.fmt.allocPrint(
-                self.allocator,
-                "product := {s}(mul(x, y))",
+            .wrapping_mul => return generator.statements(
+                "product := @0(mul(x, y))",
                 .{cleanup},
             ),
             else => {},
@@ -6667,77 +6142,65 @@ pub const YulUtilFunctions = struct {
         return switch (operation) {
             .checked_add => if (integer.isSigned())
                 if (integer.bits == 256)
-                    std.fmt.allocPrint(
-                        self.allocator,
-                        "x := {0s}(x) y := {0s}(y) sum := add(x, y) if or(and(iszero(slt(x, 0)), slt(sum, y)), and(slt(x, 0), iszero(slt(sum, y)))) {{ {1s}() }}",
+                    generator.statements(
+                        "x := @0(x) y := @0(y) sum := add(x, y) if or(and(iszero(slt(x, 0)), slt(sum, y)), and(slt(x, 0), iszero(slt(sum, y)))) { @1() }",
                         .{ cleanup, panic_overflow },
                     )
                 else
-                    std.fmt.allocPrint(
-                        self.allocator,
-                        "x := {0s}(x) y := {0s}(y) sum := add(x, y) if or(sgt(sum, {1s}), slt(sum, {2s})) {{ {3s}() }}",
-                        .{ cleanup, max_text, min_text, panic_overflow },
+                    generator.statements(
+                        "x := @0(x) y := @0(y) sum := add(x, y) if or(sgt(sum, @1), slt(sum, @2)) { @3() }",
+                        .{ cleanup, try generator.numberToken(max_text), try generator.numberToken(min_text), panic_overflow },
                     )
             else if (integer.bits == 256)
-                std.fmt.allocPrint(
-                    self.allocator,
-                    "x := {0s}(x)\ny := {0s}(y)\nsum := add(x, y)\n\nif gt(x, sum) {{ {1s}() }}\n",
+                generator.statements(
+                    "x := @0(x)\ny := @0(y)\nsum := add(x, y)\n\nif gt(x, sum) { @1() }\n",
                     .{ cleanup, panic_overflow },
                 )
             else
-                std.fmt.allocPrint(
-                    self.allocator,
-                    "x := {0s}(x) y := {0s}(y) sum := add(x, y) if gt(sum, {1s}) {{ {2s}() }}",
-                    .{ cleanup, max_text, panic_overflow },
+                generator.statements(
+                    "x := @0(x) y := @0(y) sum := add(x, y) if gt(sum, @1) { @2() }",
+                    .{ cleanup, try generator.numberToken(max_text), panic_overflow },
                 ),
             .checked_sub => if (integer.isSigned())
                 if (integer.bits == 256)
-                    std.fmt.allocPrint(
-                        self.allocator,
-                        "x := {0s}(x) y := {0s}(y) diff := sub(x, y) if or(and(iszero(slt(y, 0)), sgt(diff, x)), and(slt(y, 0), slt(diff, x))) {{ {1s}() }}",
+                    generator.statements(
+                        "x := @0(x) y := @0(y) diff := sub(x, y) if or(and(iszero(slt(y, 0)), sgt(diff, x)), and(slt(y, 0), slt(diff, x))) { @1() }",
                         .{ cleanup, panic_overflow },
                     )
                 else
-                    std.fmt.allocPrint(
-                        self.allocator,
-                        "x := {0s}(x) y := {0s}(y) diff := sub(x, y) if or(slt(diff, {1s}), sgt(diff, {2s})) {{ {3s}() }}",
-                        .{ cleanup, min_text, max_text, panic_overflow },
+                    generator.statements(
+                        "x := @0(x) y := @0(y) diff := sub(x, y) if or(slt(diff, @1), sgt(diff, @2)) { @3() }",
+                        .{ cleanup, try generator.numberToken(min_text), try generator.numberToken(max_text), panic_overflow },
                     )
             else if (integer.bits == 256)
-                std.fmt.allocPrint(
-                    self.allocator,
-                    "x := {0s}(x) y := {0s}(y) diff := sub(x, y) if gt(diff, x) {{ {1s}() }}",
+                generator.statements(
+                    "x := @0(x) y := @0(y) diff := sub(x, y) if gt(diff, x) { @1() }",
                     .{ cleanup, panic_overflow },
                 )
             else
-                std.fmt.allocPrint(
-                    self.allocator,
-                    "x := {0s}(x) y := {0s}(y) diff := sub(x, y) if gt(diff, {1s}) {{ {2s}() }}",
-                    .{ cleanup, max_text, panic_overflow },
+                generator.statements(
+                    "x := @0(x) y := @0(y) diff := sub(x, y) if gt(diff, @1) { @2() }",
+                    .{ cleanup, try generator.numberToken(max_text), panic_overflow },
                 ),
             .checked_mul => if (integer.bits <= 128)
-                std.fmt.allocPrint(
-                    self.allocator,
-                    "x := {0s}(x) y := {0s}(y) let product_raw := mul(x, y) product := {0s}(product_raw) if iszero(eq(product, product_raw)) {{ {1s}() }}",
+                generator.statements(
+                    "x := @0(x) y := @0(y) let product_raw := mul(x, y) product := @0(product_raw) if iszero(eq(product, product_raw)) { @1() }",
                     .{ cleanup, panic_overflow },
                 )
             else if (integer.isSigned())
                 if (integer.bits == 256)
-                    std.fmt.allocPrint(
-                        self.allocator,
-                        "x := {0s}(x) y := {0s}(y) let product_raw := mul(x, y) product := {0s}(product_raw) if and(slt(x, 0), eq(y, {1s})) {{ {2s}() }} if iszero(or(iszero(x), eq(y, sdiv(product, x)))) {{ {2s}() }}",
-                        .{ cleanup, min_text, panic_overflow },
+                    generator.statements(
+                        "x := @0(x) y := @0(y) let product_raw := mul(x, y) product := @0(product_raw) if and(slt(x, 0), eq(y, @1)) { @2() } if iszero(or(iszero(x), eq(y, sdiv(product, x)))) { @2() }",
+                        .{ cleanup, try generator.numberToken(min_text), panic_overflow },
                     )
                 else
-                    std.fmt.allocPrint(
-                        self.allocator,
-                        "x := {0s}(x) y := {0s}(y) let product_raw := mul(x, y) product := {0s}(product_raw) if iszero(or(iszero(x), eq(y, sdiv(product, x)))) {{ {1s}() }}",
+                    generator.statements(
+                        "x := @0(x) y := @0(y) let product_raw := mul(x, y) product := @0(product_raw) if iszero(or(iszero(x), eq(y, sdiv(product, x)))) { @1() }",
                         .{ cleanup, panic_overflow },
                     )
             else
-                std.fmt.allocPrint(
-                    self.allocator,
-                    "x := {0s}(x) y := {0s}(y) let product_raw := mul(x, y) product := {0s}(product_raw) if iszero(or(iszero(x), eq(y, div(product, x)))) {{ {1s}() }}",
+                generator.statements(
+                    "x := @0(x) y := @0(y) let product_raw := mul(x, y) product := @0(product_raw) if iszero(or(iszero(x), eq(y, div(product, x)))) { @1() }",
                     .{ cleanup, panic_overflow },
                 ),
             .checked_div, .wrapping_div => blk: {
@@ -6750,35 +6213,29 @@ pub const YulUtilFunctions = struct {
                     null;
                 defer if (panic_underflow) |value| self.allocator.free(value);
                 if (integer.isSigned() and operation == .checked_div) {
-                    break :blk std.fmt.allocPrint(
-                        self.allocator,
-                        "x := {0s}(x) y := {0s}(y) if iszero(y) {{ {1s}() }} if and(eq(x, {2s}), eq(y, sub(0, 1))) {{ {3s}() }} r := sdiv(x, y)",
-                        .{ cleanup, panic_div_zero, min_text, panic_underflow.? },
+                    break :blk generator.statements(
+                        "x := @0(x) y := @0(y) if iszero(y) { @1() } if and(eq(x, @2), eq(y, sub(0, 1))) { @3() } r := sdiv(x, y)",
+                        .{ cleanup, panic_div_zero, try generator.numberToken(min_text), panic_underflow.? },
                     );
                 }
-                break :blk std.fmt.allocPrint(
-                    self.allocator,
-                    "x := {0s}(x) y := {0s}(y) if iszero(y) {{ {1s}() }} r := {2s}div(x, y)",
-                    .{ cleanup, panic_div_zero, if (integer.isSigned()) "s" else "" },
+                break :blk generator.statements(
+                    "x := @0(x) y := @0(y) if iszero(y) { @1() } r := @2(x, y)",
+                    .{ cleanup, panic_div_zero, if (integer.isSigned()) "sdiv" else "div" },
                 );
             },
-            .modulo => std.fmt.allocPrint(
-                self.allocator,
-                "x := {0s}(x) y := {0s}(y) if iszero(y) {{ {1s}() }} r := {2s}mod(x, y)",
-                .{ cleanup, panic_overflow, if (integer.isSigned()) "s" else "" },
+            .modulo => generator.statements(
+                "x := @0(x) y := @0(y) if iszero(y) { @1() } r := @2(x, y)",
+                .{ cleanup, panic_overflow, if (integer.isSigned()) "smod" else "mod" },
             ),
             else => unreachable,
         };
     }
 
-    fn collectSimple(
-        self: *YulUtilFunctions,
-        name: []const u8,
-        code: []const u8,
-    ) UtilError![]u8 {
+    fn collectTemplate(self: *YulUtilFunctions, name: []const u8, comptime source: []const u8) UtilError![]u8 {
         if (try self.function_collector.beginFunction(name)) {
             errdefer self.function_collector.abortFunction(name);
-            try self.function_collector.finishFunction(name, code);
+            const generator = try self.function_collector.generator(self.evm_version);
+            try self.function_collector.finishGeneratedFunction(name, try generator.functionDefinition(source, .{}));
         }
         return self.function_collector.copyFunctionName(name);
     }
@@ -6786,29 +6243,6 @@ pub const YulUtilFunctions = struct {
 
 fn compactHex(allocator: std.mem.Allocator, value: u256) std.mem.Allocator.Error![]u8 {
     return Numeric.toCompactHexWithPrefixAlloc(u256, allocator, value);
-}
-
-fn indexedNamesAlloc(
-    allocator: std.mem.Allocator,
-    prefix: []const u8,
-    count: usize,
-) std.mem.Allocator.Error![]u8 {
-    return indexedRangeNamesAlloc(allocator, prefix, 0, count);
-}
-
-fn indexedRangeNamesAlloc(
-    allocator: std.mem.Allocator,
-    prefix: []const u8,
-    start: usize,
-    end: usize,
-) std.mem.Allocator.Error![]u8 {
-    var names: std.ArrayList(u8) = .empty;
-    errdefer names.deinit(allocator);
-    for (start..end) |index| {
-        if (index != start) try names.appendSlice(allocator, ", ");
-        try names.print(allocator, "{s}{d}", .{ prefix, index });
-    }
-    return names.toOwnedSlice(allocator);
 }
 
 fn consumeGenerated(
@@ -6819,7 +6253,7 @@ fn consumeGenerated(
     try std.testing.expect(generated.len != 0);
 }
 
-test "scalar helpers are generated once in dependency order" {
+test "Yul AST scalar helpers are generated once in dependency order" {
     var type_provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
     defer type_provider.deinit();
     var collector = CollectorModule.MultiUseYulFunctionCollector.init(std.testing.allocator);
@@ -6846,7 +6280,7 @@ test "scalar helpers are generated once in dependency order" {
     );
     defer std.testing.allocator.free(checked_add);
     try std.testing.expectEqualStrings("checked_add_t_uint256", checked_add);
-    const code = try collector.requestedFunctionsAlloc();
+    const code = try collector.testFunctionsAlloc();
     defer std.testing.allocator.free(code);
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -6856,7 +6290,46 @@ test "scalar helpers are generated once in dependency order" {
     try std.testing.expect(std.mem.find(u8, code, "if gt(x, sum)") != null);
 }
 
-test "checked multiplication retains upstream width-specific overflow checks" {
+test "Yul AST mapping keys retain static and dynamic parameter conventions" {
+    const allocator = std.testing.allocator;
+    var provider = try TypeProviderModule.TypeProvider.init(allocator);
+    defer provider.deinit();
+    var collector = CollectorModule.MultiUseYulFunctionCollector.init(allocator);
+    defer collector.deinit();
+    var utils = YulUtilFunctions.init(
+        allocator,
+        &provider,
+        CompatibilityIdResolver.legacyNodeIds(),
+        EVMVersion.current(),
+        .Default,
+        &collector,
+    );
+    const integer_mapping = try provider.mapping(provider.uint256(), "", provider.uint256(), "");
+    const bytes_mapping = try provider.mapping(try provider.fixedBytes(32), "", provider.uint256(), "");
+    const string_mapping = try provider.mapping(provider.stringStorage(), "", provider.uint256(), "");
+    const cases = [_]struct {
+        mapping: *const Types.Type,
+        key: *const Types.Type,
+        encoder: ?[]const u8 = null,
+        parameters: []const []const u8,
+    }{
+        .{ .mapping = integer_mapping, .key = provider.uint256(), .parameters = &.{ "slot", "key" } },
+        .{ .mapping = bytes_mapping, .key = try provider.stringLiteral("key"), .parameters = &.{"slot"} },
+        .{ .mapping = string_mapping, .key = provider.stringMemory(), .encoder = "encode_memory_key", .parameters = &.{ "slot", "key_0" } },
+        .{ .mapping = string_mapping, .key = provider.stringCalldata(), .encoder = "encode_calldata_key", .parameters = &.{ "slot", "key_0", "key_1" } },
+    };
+    for (cases) |case| {
+        const name = try utils.mappingIndexAccessFunction(case.mapping, case.key, case.encoder);
+        defer allocator.free(name);
+        const function = collector.generated.items[collector.generated.items.len - 1];
+        try std.testing.expectEqualStrings(name, try function.name.str());
+        try std.testing.expectEqual(case.parameters.len, function.parameters.items.len);
+        for (case.parameters, function.parameters.items) |expected, actual|
+            try std.testing.expectEqualStrings(expected, try actual.name.str());
+    }
+}
+
+test "Yul AST checked multiplication retains upstream width-specific overflow checks" {
     var type_provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
     defer type_provider.deinit();
     var collector = CollectorModule.MultiUseYulFunctionCollector.init(std.testing.allocator);
@@ -6870,11 +6343,12 @@ test "checked multiplication retains upstream width-specific overflow checks" {
         &collector,
     );
 
-    const uint32_body = try utils.integerBinaryBodyAlloc(
+    const uint32_tree = try utils.integerBinaryBody(
         .checked_mul,
         .{ .bits = 32, .modifier = .Unsigned },
         "cleanup_t_uint32",
     );
+    const uint32_body = try renderArithmeticTestBody(&collector, &uint32_tree);
     defer std.testing.allocator.free(uint32_body);
     try std.testing.expect(std.mem.find(
         u8,
@@ -6883,25 +6357,27 @@ test "checked multiplication retains upstream width-specific overflow checks" {
     ) != null);
     try std.testing.expect(std.mem.find(u8, uint32_body, "div(product, x)") == null);
 
-    const int200_body = try utils.integerBinaryBodyAlloc(
+    const int200_tree = try utils.integerBinaryBody(
         .checked_mul,
         .{ .bits = 200, .modifier = .Signed },
         "cleanup_t_int200",
     );
+    const int200_body = try renderArithmeticTestBody(&collector, &int200_tree);
     defer std.testing.allocator.free(int200_body);
     try std.testing.expect(std.mem.find(u8, int200_body, "sdiv(product, x)") != null);
     try std.testing.expect(std.mem.find(u8, int200_body, "if and(slt(x, 0)") == null);
 
-    const int256_body = try utils.integerBinaryBodyAlloc(
+    const int256_tree = try utils.integerBinaryBody(
         .checked_mul,
         .{ .bits = 256, .modifier = .Signed },
         "cleanup_t_int256",
     );
+    const int256_body = try renderArithmeticTestBody(&collector, &int256_tree);
     defer std.testing.allocator.free(int256_body);
     try std.testing.expect(std.mem.find(u8, int256_body, "if and(slt(x, 0)") != null);
 }
 
-test "string literal to fixed bytes conversion emits upstream numeric value" {
+test "Yul AST string literal to fixed bytes conversion emits upstream numeric value" {
     const allocator = std.testing.allocator;
     var type_provider = try TypeProviderModule.TypeProvider.init(allocator);
     defer type_provider.deinit();
@@ -6920,7 +6396,7 @@ test "string literal to fixed bytes conversion emits upstream numeric value" {
     const bytes1 = try type_provider.fixedBytes(1);
     const conversion = try utils.conversionFunction(string_zero, bytes1);
     defer allocator.free(conversion);
-    const code = try collector.requestedFunctionsAlloc();
+    const code = try collector.testFunctionsAlloc();
     defer allocator.free(code);
 
     try std.testing.expect(std.mem.find(u8, code, "converted := \"0\"") == null);
@@ -6931,7 +6407,7 @@ test "string literal to fixed bytes conversion emits upstream numeric value" {
     ) != null);
 }
 
-test "panic and empty-message revert helpers match stable names and payloads" {
+test "Yul AST panic and empty-message revert helpers match stable names and payloads" {
     var type_provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
     defer type_provider.deinit();
     var collector = CollectorModule.MultiUseYulFunctionCollector.init(std.testing.allocator);
@@ -6953,13 +6429,13 @@ test "panic and empty-message revert helpers match stable names and payloads" {
         "revert_error_c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
         revert,
     );
-    const code = try collector.requestedFunctionsAlloc();
+    const code = try collector.testFunctionsAlloc();
     defer std.testing.allocator.free(code);
     try std.testing.expect(std.mem.find(u8, code, "mstore(4, 0x11)") != null);
     try std.testing.expect(std.mem.find(u8, code, "revert(0, 0)") != null);
 }
 
-test "storage updates accept implicitly convertible rational literal sources" {
+test "Yul AST storage updates accept implicitly convertible rational literal sources" {
     var type_provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
     defer type_provider.deinit();
     var collector = CollectorModule.MultiUseYulFunctionCollector.init(std.testing.allocator);
@@ -6985,7 +6461,7 @@ test "storage updates accept implicitly convertible rational literal sources" {
         update,
     );
 
-    const code = try collector.requestedFunctionsAlloc();
+    const code = try collector.testFunctionsAlloc();
     defer std.testing.allocator.free(code);
     try std.testing.expect(std.mem.find(
         u8,
@@ -6994,7 +6470,7 @@ test "storage updates accept implicitly convertible rational literal sources" {
     ) != null);
 }
 
-test "reference, packed ABI, and storage helper surface is instantiated" {
+test "Yul AST reference, packed ABI, and storage helper surface is instantiated" {
     const allocator = std.testing.allocator;
     var type_provider = try TypeProviderModule.TypeProvider.init(allocator);
     defer type_provider.deinit();
@@ -7178,17 +6654,18 @@ test "reference, packed ABI, and storage helper surface is instantiated" {
     try consumeGenerated(allocator, try utils.extractReturndataFunction());
     try consumeGenerated(allocator, try utils.externalCodeFunction());
     try consumeGenerated(allocator, try utils.externalFunctionPointersEqualFunction());
-    try consumeGenerated(allocator, try utils.revertWithError(
+    const revert_block = try utils.revertWithError(
         "Error(string)",
         &.{type_provider.stringMemory()},
-        "message",
+        &.{"message"},
         "test_encode_error",
         null,
         null,
-    ));
+    );
+    try std.testing.expect(revert_block.statements.items.len != 0);
     try consumeGenerated(allocator, try utils.requireOrAssertWithMessageFunction(
         type_provider.stringMemory(),
-        "message",
+        &.{"message"},
         "test_encode_error",
     ));
     try consumeGenerated(allocator, try utils.requireWithErrorFunction(
@@ -7197,7 +6674,7 @@ test "reference, packed ABI, and storage helper surface is instantiated" {
         "Failure(uint256)",
         &.{type_provider.uint256()},
         &.{type_provider.uint256()},
-        "value",
+        &.{"value"},
         "test_encode_failure",
     ));
     try consumeGenerated(allocator, try utils.copyConstructorArgumentsToMemoryFunction(
@@ -7205,12 +6682,14 @@ test "reference, packed ABI, and storage helper surface is instantiated" {
         "Fixture",
         12,
         "Fixture_12",
-        "ret_param_0",
+        &.{"ret_param_0"},
         "test_decode_constructor",
     ));
-    try consumeGenerated(allocator, try utils.revertReasonIfDebugBody("debug"));
+    const debug_revert = try utils.revertReasonIfDebugBody("debug");
+    try std.testing.expect(debug_revert.statements.items.len != 0);
 
-    const generated = try collector.requestedFunctionsAlloc();
+    try std.testing.expectEqual(collector.requested_functions.count(), collector.generated.items.len);
+    const generated = try collector.testFunctionsAlloc();
     defer allocator.free(generated);
     try std.testing.expect(std.mem.find(u8, generated, "function bytes_concat_") != null);
     try std.testing.expect(std.mem.find(u8, generated, "function packed_hashed_") != null);
@@ -7260,4 +6739,63 @@ test "reference, packed ABI, and storage helper surface is instantiated" {
     defer analyzer.deinit();
     try std.testing.expect(try analyzer.analyze(parsed.root()));
     try std.testing.expectEqual(@as(usize, 0), reporter.diagnostics().len);
+    var printer = @import("../../libyul/asm_printer.zig").AsmPrinter.init(allocator, dialect.dialect(), &.{}, .noneValue(), null);
+    const canonical = try printer.renderBlock(parsed.root());
+    defer allocator.free(canonical);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(canonical, &digest, .{});
+    // Updated from the 5b1255faa baseline for solc's nested copy blocks and
+    // typed cleanup dependencies, covered by solidity-array-copy-scopes.json.
+    // This checks statement/dependency order, values and literal kinds.
+    try std.testing.expectEqualStrings("10b6ca3444702b840465013a9934c9dde1f8665e09b1a350f3b2a10be34a07a7", &std.fmt.bytesToHex(digest, .lower));
+}
+
+test "Yul AST scalar helper generation retains structure and published code" {
+    const Equality = @import("../../libyul/optimiser/syntactical_equality.zig").SyntacticallyEqual;
+    const allocator = std.testing.allocator;
+    var types = try TypeProviderModule.TypeProvider.init(allocator);
+    defer types.deinit();
+    for ([_]EVMVersion{ .init(.Homestead), .init(.Byzantium), .init(.Cancun), .current() }) |version| {
+        var collector = CollectorModule.MultiUseYulFunctionCollector.init(allocator);
+        defer collector.deinit();
+        var utils = YulUtilFunctions.init(allocator, &types, CompatibilityIdResolver.legacyNodeIds(), version, .Default, &collector);
+        try consumeGenerated(allocator, try utils.identityFunction());
+        try consumeGenerated(allocator, try utils.allocationFunction());
+        try consumeGenerated(allocator, try utils.erc7201());
+        try consumeGenerated(allocator, try utils.divide32CeilFunction());
+        try consumeGenerated(allocator, try utils.extractByteArrayLengthFunction());
+        try consumeGenerated(allocator, try utils.maskBytesFunctionDynamic());
+        try consumeGenerated(allocator, try utils.maskLowerOrderBytesFunctionDynamic());
+        try consumeGenerated(allocator, try utils.typedShiftLeftFunction(types.uint256(), types.uint256()));
+        try consumeGenerated(allocator, try utils.typedShiftRightFunction(types.uint256(), types.uint256()));
+        try consumeGenerated(allocator, try utils.typedShiftRightFunction(try types.integer(256, .Signed), types.uint256()));
+        try consumeGenerated(allocator, try utils.combineExternalFunctionIdFunction());
+        try consumeGenerated(allocator, try utils.splitExternalFunctionIdFunction());
+        inline for (.{ false, true }) |from_calldata| inline for (.{ false, true }) |cleanup| {
+            try consumeGenerated(allocator, try utils.copyToMemoryFunction(from_calldata, cleanup));
+        };
+        for (collector.generated.items) |entry| {
+            var printer = @import("../../libyul/asm_printer.zig").AsmPrinter.init(allocator, collector.dialect.?.dialect(), &.{}, .noneValue(), null);
+            const code = try printer.renderFunctionDefinition(&entry);
+            defer allocator.free(code);
+            const wrapped = try std.fmt.allocPrint(allocator, "{{{s}}}", .{code});
+            defer allocator.free(wrapped);
+            var errors = Diagnostics.ErrorReporter.init(allocator);
+            defer errors.deinit();
+            var parsed = (try AsmParser.Parser.parseSource(allocator, wrapped, "helper.yul", &errors, collector.dialect.?.dialect(), .{})).?;
+            defer parsed.deinit();
+            var equal = Equality.init(allocator);
+            defer equal.deinit();
+            const statement: Yul.Statement = .{ .function_definition = entry };
+            try std.testing.expect(try equal.statement(&statement, &parsed.root().statements.items[0]));
+        }
+        const code = try collector.testFunctionsAlloc();
+        defer allocator.free(code);
+        try std.testing.expect(std.mem.startsWith(u8, code, "\nfunction identity(value) -> ret"));
+    }
+}
+
+fn renderArithmeticTestBody(collector: *CollectorModule.MultiUseYulFunctionCollector, block: *const Yul.Block) ![]u8 {
+    var printer = @import("../../libyul/asm_printer.zig").AsmPrinter.init(std.testing.allocator, collector.dialect.?.dialect(), &.{}, .noneValue(), null);
+    return printer.renderBlock(block);
 }

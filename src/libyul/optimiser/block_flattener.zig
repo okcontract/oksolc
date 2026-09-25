@@ -24,16 +24,25 @@ pub const BlockFlattener = struct {
     }
 
     pub fn flattenBlock(allocator: std.mem.Allocator, block: *AST.Block) anyerror!void {
-        for (block.statements.items) |*statement| try flattenChildren(allocator, statement);
-
         var expanded_len: usize = 0;
-        for (block.statements.items) |*statement| switch (statement.*) {
-            .block => |*child| expanded_len += child.statements.items.len,
-            else => expanded_len += 1,
-        };
-        var replacement: std.ArrayList(AST.Statement) = .empty; // zlinter-disable-current-line require_errdefer_dealloc - adjacent project cleanup handles nested element ownership
-        errdefer deinitStatements(allocator, &replacement);
-        try replacement.ensureTotalCapacity(allocator, expanded_len);
+        var needs_flattening = false;
+        for (block.statements.items) |*statement| {
+            try flattenChildren(allocator, statement);
+            const count: usize = switch (statement.*) {
+                .block => |*child| count: {
+                    needs_flattening = true;
+                    break :count child.statements.items.len;
+                },
+                else => 1,
+            };
+            expanded_len = std.math.add(usize, expanded_len, count) catch return error.OutOfMemory;
+        }
+        // Most visits already have the canonical shape. Keep their buffers and
+        // nodes untouched; children above still receive the recursive transform.
+        if (!needs_flattening) return;
+
+        // All fallible work precedes the first ownership transfer.
+        var replacement = try std.ArrayList(AST.Statement).initCapacity(allocator, expanded_len);
         for (block.statements.items) |*statement| switch (statement.*) {
             .block => |*child| {
                 for (child.statements.items) |*nested| {
@@ -73,11 +82,6 @@ pub const BlockFlattener = struct {
 
 fn emptyStatement() AST.Statement {
     return .{ .block = .{} };
-}
-
-fn deinitStatements(allocator: std.mem.Allocator, statements: *std.ArrayList(AST.Statement)) void {
-    for (statements.items) |*statement| statement.deinit(allocator);
-    statements.deinit(allocator);
 }
 
 test "block flattener recursively splices nested statements" {
