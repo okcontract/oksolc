@@ -121,7 +121,6 @@ pub const DiagnosticSink = struct {
 };
 
 const schema_sql =
-    \\BEGIN IMMEDIATE;
     \\CREATE TABLE IF NOT EXISTS artifact(
     \\    kind INTEGER NOT NULL,
     \\    key BLOB NOT NULL CHECK(length(key)=32),
@@ -174,7 +173,6 @@ const schema_sql =
     \\ON artifact(used_epoch,created_epoch,kind,key);
     \\PRAGMA application_id=0x5a534f4c;
     \\PRAGMA user_version=2;
-    \\COMMIT;
 ;
 
 const StoredArtifact = struct {
@@ -635,9 +633,14 @@ pub const SqliteStore = struct {
                 "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%';",
             ) catch |err| return mapInitError(err);
             if (table_count != 0) return error.IncompatibleSchema;
-            self.execInitQuery(.step, .create_schema, schema_sql) catch |err|
+            // Publish the schema and authentication together so an interrupted
+            // startup cannot leave a permanently unauthenticated cache.
+            var transaction = Transaction.begin(self.lockedDatabase(), .immediate) catch |err|
                 return mapInitError(err);
+            defer transaction.rollbackUnlessCommitted();
+            try self.execInitQuery(.step, .create_schema, schema_sql);
             self.storeAuthenticationVerifier() catch |err| return mapInitError(err);
+            transaction.commit() catch |err| return mapInitError(err);
             return;
         }
         if (actual_application_id != application_id) return error.IncompatibleSchema;
@@ -663,7 +666,10 @@ pub const SqliteStore = struct {
             "SELECT verifier FROM cache_authentication WHERE singleton=1;",
         );
         defer statement.deinit();
-        if (try statement.step() != .row) return error.AuthenticationFailed;
+        // Older versions could commit the schema before inserting this row.
+        // An absent verifier is incomplete storage and can be quarantined;
+        // a present verifier from another key remains an authentication error.
+        if (try statement.step() != .row) return error.Corrupt;
         const stored = try statement.columnAuthenticationTag(0);
         if (try statement.step() != .done) return error.AuthenticationFailed;
         const expected = databaseAuthentication(self.authentication_key);
@@ -1810,6 +1816,46 @@ fn testReference(kind: ArtifactKind, label: []const u8) ArtifactRef {
     );
     builder.addInputBytes(label);
     return .{ .kind = kind, .key = builder.finish() };
+}
+
+fn testUninitializedStore(path: [:0]const u8) !SqliteStore {
+    var database: ?*sqlite.sqlite3 = null;
+    const status = sqlite.sqlite3_open_v2(path.ptr, &database, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, null);
+    if (status != sqlite.SQLITE_OK) {
+        if (database) |handle| _ = sqlite.sqlite3_close_v2(handle);
+        return mapInitStatus(status);
+    }
+    const options: Options = .{};
+    return .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .database = database.?,
+        .authentication_key = test_authentication_key,
+        .limits = options.limits,
+        .access_flush_interval = options.access_flush_interval,
+        .max_pending_accesses = options.max_pending_accesses,
+        .diagnostic_sink = null,
+    };
+}
+
+test "SQLite initialization rolls back the schema if authentication cannot be written" {
+    const Injection = struct {
+        fn authorize(_: ?*anyopaque, action: c_int, table: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            if (action == sqlite.SQLITE_INSERT and table != null and std.mem.eql(u8, std.mem.span(table), "cache_authentication"))
+                return sqlite.SQLITE_DENY;
+            return sqlite.SQLITE_OK;
+        }
+    };
+    var store = try testUninitializedStore(":memory:");
+    defer store.deinit();
+    try std.testing.expectEqual(sqlite.SQLITE_OK, sqlite.sqlite3_set_authorizer(store.database, Injection.authorize, null));
+    try std.testing.expectError(error.Unavailable, store.initializeSchema());
+    try std.testing.expectEqual(sqlite.SQLITE_OK, sqlite.sqlite3_set_authorizer(store.database, null, null));
+    try std.testing.expectEqual(@as(i64, 0), try store.scalarIntInit(.ad_hoc, "PRAGMA application_id;"));
+    try std.testing.expectEqual(@as(i64, 0), try store.scalarIntInit(.ad_hoc, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try store.scalarIntInit(.ad_hoc, "SELECT count(*) FROM sqlite_schema WHERE type='table';"));
+    try store.initializeSchema();
+    try store.verifyAuthentication();
 }
 
 test "SQLite artifact store identifies authenticated cache format v2" {

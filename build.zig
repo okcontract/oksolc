@@ -379,6 +379,12 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "solidity", .module = solidity_module }},
     });
     const cli_smoke_step = b.step("cli-smoke", "Exercise the oksolc CLI");
+    const cache_lifecycle_smoke = b.addSystemCommand(&.{"python3"});
+    cache_lifecycle_smoke.addFileArg(b.path("test/zig/cli/cache_lifecycle_smoke.py"));
+    cache_lifecycle_smoke.addArtifactArg(cli);
+    dependOnValidation(&cache_lifecycle_smoke.step, cli_identity_validation);
+    b.step("cache-lifecycle-smoke", "Test persistent cache deletion, restart and recovery").dependOn(&cache_lifecycle_smoke.step);
+    cli_smoke_step.dependOn(&cache_lifecycle_smoke.step);
     const cli_version_command = b.addRunArtifact(cli);
     isolateCliSmokeEnvironment(b, cli_version_command);
     dependOnValidation(&cli_version_command.step, cli_identity_validation);
