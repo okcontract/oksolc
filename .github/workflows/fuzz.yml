@@ -45,15 +45,22 @@ jobs:
       FUZZ_ITERATIONS: ${{ github.event_name == 'schedule' && '100K' || '10K' }}
       ADAPTER_FUZZ_RUNS: ${{ github.event_name == 'schedule' && '100000' || '10000' }}
       ADAPTER_FUZZ_SEED: ${{ github.run_id }}
-      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz/local
-      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz/global
-      XDG_CACHE_HOME: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz/xdg-cache
-      XDG_CONFIG_HOME: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz/xdg-config
     steps:
       - name: Check out trusted revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # runner.temp is available in steps, but not in job-level env.
+      - name: Configure trusted fuzz cache directories
+        env:
+          CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz
+        run: |
+          printf '%s\n' \
+            "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
+            "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
+            "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
+            "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
 
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -100,15 +107,21 @@ jobs:
       FUZZ_ITERATIONS: 1K
       ADAPTER_FUZZ_RUNS: 1000
       ADAPTER_FUZZ_SEED: ${{ github.run_id }}
-      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz/local
-      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz/global
-      XDG_CACHE_HOME: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz/xdg-cache
-      XDG_CONFIG_HOME: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz/xdg-config
     steps:
       - name: Check out pull request merge revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Configure pull request fuzz cache directories
+        env:
+          CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz
+        run: |
+          printf '%s\n' \
+            "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
+            "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
+            "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
+            "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
 
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1

@@ -16,6 +16,19 @@ env:
   ZIG_VERSION: 0.16.0
 
 jobs:
+  workflow-lint:
+    name: Workflow syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out workflow definitions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+
   trusted:
     if: github.event_name != 'pull_request'
     name: Trusted / ${{ matrix.name }}
@@ -33,17 +46,23 @@ jobs:
             cache_scope: release-safe
             optimize: ReleaseSafe
             quality: false
-    env:
-      # Trusted jobs never restore from or write to the untrusted namespace.
-      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/trusted/${{ matrix.cache_scope }}/local
-      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/trusted/${{ matrix.cache_scope }}/global
-      XDG_CACHE_HOME: ${{ runner.temp }}/solidity-zig-cache/trusted/${{ matrix.cache_scope }}/xdg-cache
-      XDG_CONFIG_HOME: ${{ runner.temp }}/solidity-zig-cache/trusted/${{ matrix.cache_scope }}/xdg-config
     steps:
       - name: Check out trusted revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # runner.temp is available in steps, but not in job-level env.
+      # Trusted jobs never restore from or write to the untrusted namespace.
+      - name: Configure trusted cache directories
+        env:
+          CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/trusted/${{ matrix.cache_scope }}
+        run: |
+          printf '%s\n' \
+            "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
+            "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
+            "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
+            "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
 
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -95,18 +114,23 @@ jobs:
             cache_scope: release-safe
             optimize: ReleaseSafe
             quality: false
-    env:
-      # Pull requests execute contributor-controlled build code. They use
-      # disjoint roots and no cache action, so no PR state is restored or saved.
-      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/untrusted/${{ matrix.cache_scope }}/local
-      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/solidity-zig-cache/untrusted/${{ matrix.cache_scope }}/global
-      XDG_CACHE_HOME: ${{ runner.temp }}/solidity-zig-cache/untrusted/${{ matrix.cache_scope }}/xdg-cache
-      XDG_CONFIG_HOME: ${{ runner.temp }}/solidity-zig-cache/untrusted/${{ matrix.cache_scope }}/xdg-config
     steps:
       - name: Check out pull request merge revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Pull requests execute contributor-controlled build code. They use
+      # disjoint roots and no cache action, so no PR state is restored or saved.
+      - name: Configure pull request cache directories
+        env:
+          CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/untrusted/${{ matrix.cache_scope }}
+        run: |
+          printf '%s\n' \
+            "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
+            "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
+            "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
+            "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
 
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
