@@ -51,7 +51,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # runner.temp is available in steps, but not in job-level env.
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+          use-tool-cache: false
+
+      # setup-zig exports its own cache paths; override them after installation.
       - name: Configure trusted fuzz cache directories
         env:
           CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz
@@ -61,13 +68,6 @@ jobs:
             "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
             "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
             "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-          use-tool-cache: false
 
       - name: Restore trusted fuzz cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -113,6 +113,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+          use-tool-cache: false
+
+      # Override the cache paths exported by setup-zig.
       - name: Configure pull request fuzz cache directories
         env:
           CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz
@@ -122,13 +130,6 @@ jobs:
             "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
             "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
             "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-          use-tool-cache: false
 
       - name: Run bounded native and sanitizer fuzzing
         run: zig build fuzz -Doptimize=ReleaseSafe -Dadapter-fuzz-runs="${ADAPTER_FUZZ_RUNS}" -Dadapter-fuzz-seed="${ADAPTER_FUZZ_SEED}" --fuzz="${FUZZ_ITERATIONS}" -j2 --summary all

@@ -52,7 +52,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # runner.temp is available in steps, but not in job-level env.
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+          use-tool-cache: false
+
+      # setup-zig exports its own cache paths; override them after installation.
       # Trusted jobs never restore from or write to the untrusted namespace.
       - name: Configure trusted cache directories
         env:
@@ -63,13 +70,6 @@ jobs:
             "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
             "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
             "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-          use-tool-cache: false
 
       - name: Restore trusted Zig cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -120,8 +120,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+          use-tool-cache: false
+
       # Pull requests execute contributor-controlled build code. They use
       # disjoint roots and no cache action, so no PR state is restored or saved.
+      # Override the cache paths exported by setup-zig.
       - name: Configure pull request cache directories
         env:
           CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/untrusted/${{ matrix.cache_scope }}
@@ -131,13 +139,6 @@ jobs:
             "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
             "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
             "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-          use-tool-cache: false
 
       - name: Install pinned browser toolchain
         run: npm install --global "typescript@$(cat src/cli/browser/typescript-version)" "bun@$(cat src/cli/browser/bun-version)"
