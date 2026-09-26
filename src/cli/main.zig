@@ -1905,7 +1905,8 @@ fn loadOrCreateCacheAuthenticationKey(
         directory_path,
         .{
             .open_options = .{
-                .iterate = false,
+                // Linux O_PATH descriptors cannot be used by fchmod.
+                .iterate = true,
                 .follow_symlinks = false,
             },
             .permissions = secure_directory_permissions,
