@@ -7,8 +7,12 @@ manifest commits those digests to a deterministic Keccak-256 Merkle root, also
 recorded in `merkle-root.txt` as a hexadecimal digest.
 
 `zig build compatibility-check` compiles the inputs with the clean Zig
-dispatcher and compares the resulting bytes with this frozen corpus. It is
-part of `zig build test` and does not execute or download `solc`.
+dispatcher and compares the resulting bytes with this frozen corpus, except
+that contract `ir` strings are compared as Yul token streams. Direct tree
+generation changes unoptimized IR whitespace and comments; token kinds and
+literals must still match. All bytes outside those strings, including
+`irOptimized`, ABI, bytecode, diagnostics, and JSON field order, remain exact.
+This check is part of `zig build test` and does not execute or download `solc`.
 
 Maintainers can audit the provenance of the five frozen outputs locally with:
 
@@ -19,8 +23,9 @@ zig build reference-check -Dbenchmark-reference-solc=/path/to/solc-0.8.36
 ## Intentional trust policy
 
 Required CI intentionally does not download or execute an upstream `solc`
-binary. It checks byte compatibility with the frozen outputs and verifies their
-individual SHA-256 digests and aggregate Merkle root. This is an integrity gate,
+binary. It checks compatibility with the frozen outputs under the IR comparison
+rule above and verifies their individual SHA-256 digests and aggregate Merkle
+root. This is an integrity gate,
 not independent authentication: changing an input, output, digest, or root is a
 compatibility-baseline change that requires maintainer review and a local audit
 against the original compiler.

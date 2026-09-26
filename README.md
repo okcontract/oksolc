@@ -277,9 +277,10 @@ zig build typecheck-browser test-browser-types
 zig build browser-smoke test-cli test-browser-store -Doptimize=ReleaseSafe
 ```
 
-The test suite includes byte-exact comparisons against checked-in `solc 0.8.36`
-outputs. Run that check alone, or audit the fixtures against your installed
-`solc`:
+The test suite compares against checked-in `solc 0.8.36` outputs. Unoptimized
+contract IR is compared as Yul tokens, allowing whitespace and comment changes
+from direct tree generation. All other output bytes must match exactly. Run that
+check alone, or audit the fixtures against your installed `solc`:
 
 ```sh
 zig build compatibility-check
