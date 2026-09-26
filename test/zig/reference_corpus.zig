@@ -152,7 +152,7 @@ test "reference corpus is valid JSON pinned to Solidity 0.8.36" {
     try std.testing.expectEqualStrings(corpus.value.merkle.root, root_file[2..]);
 }
 
-test "clean compiler matches frozen solc 0.8.36 outputs byte-exact" {
+test "clean compiler matches frozen solc 0.8.36 outputs with structural unoptimized IR" {
     var all_match = true;
     for (input_cases, reference_outputs) |input, reference_output| {
         var dispatcher: solidity.StandardJsonDispatcher = .{};
@@ -161,10 +161,10 @@ test "clean compiler matches frozen solc 0.8.36 outputs byte-exact" {
             .{ .input = input.contents },
         );
         defer actual.deinit();
-        if (!std.mem.eql(u8, reference_output.contents, actual.bytes)) {
-            std.debug.print("frozen compatibility mismatch: {s}\n", .{input.path});
+        @import("ir_comparison.zig").compare(std.testing.allocator, reference_output.contents, actual.bytes) catch |err| {
+            std.debug.print("frozen compatibility mismatch: {s}: {s}\n", .{ input.path, @errorName(err) });
             all_match = false;
-        }
+        };
     }
     try std.testing.expect(all_match);
 }

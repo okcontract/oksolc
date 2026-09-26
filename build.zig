@@ -901,6 +901,16 @@ pub fn build(b: *std.Build) void {
     });
     cli_smoke_step.dependOn(&cli_progress_check.step);
 
+    const compare_ir_output = b.addExecutable(.{
+        .name = "compare-ir-output",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/zig/compare_ir_output.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{.{ .name = "solidity", .module = solidity_module }},
+        }),
+    });
+
     for ([_][]const u8{ "1", "4" }) |jobs| {
         const cli_parallel_command = b.addRunArtifact(cli);
         isolateCliSmokeEnvironment(b, cli_parallel_command);
@@ -915,11 +925,9 @@ pub fn build(b: *std.Build) void {
         const cli_parallel_output = cli_parallel_command.captureStdOut(.{
             .basename = b.fmt("oksolc-parallel-{s}-standard-json.json", .{jobs}),
         });
-        const cli_parallel_check = b.addCheckFile(cli_parallel_output, .{
-            .expected_exact = @embedFile(
-                "test/zig/standard-json/expected/via-ir-smoke.json",
-            ),
-        });
+        const cli_parallel_check = b.addRunArtifact(compare_ir_output);
+        cli_parallel_check.addFileArg(b.path("test/zig/standard-json/expected/via-ir-smoke.json"));
+        cli_parallel_check.addFileArg(cli_parallel_output);
         cli_smoke_step.dependOn(&cli_parallel_check.step);
     }
 
@@ -1378,20 +1386,20 @@ fn isolateCliSmokeEnvironment(b: *std.Build, run: *std.Build.Step.Run) void {
     );
     run.setEnvironmentVariable(
         "XDG_CACHE_HOME",
-        b.graph.global_cache_root.join(
+        b.pathFromRoot(b.graph.global_cache_root.join(
             b.allocator,
             &.{"oksolc-cli-smoke-cache-v2"},
-        ) catch @panic("out of memory"),
+        ) catch @panic("out of memory")),
     );
 }
 
 fn enableCliSmokeCache(b: *std.Build, run: *std.Build.Step.Run) void {
     run.setEnvironmentVariable(
         "XDG_CONFIG_HOME",
-        b.graph.global_cache_root.join(
+        b.pathFromRoot(b.graph.global_cache_root.join(
             b.allocator,
             &.{"oksolc-cli-smoke-config-v2"},
-        ) catch @panic("out of memory"),
+        ) catch @panic("out of memory")),
     );
 }
 

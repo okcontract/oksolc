@@ -55,6 +55,10 @@ def run(binary):
         assert json.loads(expected)['contracts']['A.yul']['A']['evm']['bytecode']['object'] == '00'
         assert not stats()['exists']
         assert compile() == expected
+        if os.name == 'posix':
+            assert config.stat().st_mode & 0o777 == 0o700
+            key = config / 'cache-authentication-key-v1'
+            assert key.stat().st_mode & 0o777 == 0o600
         summary = stats()
         assert summary['exists'] and summary['entries'] > 0, summary
         database = Path(summary['path'])

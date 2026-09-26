@@ -1095,14 +1095,15 @@ test "Solidity chained and repeated modifier placeholders match via-IR bytecode 
     try std.testing.expectEqual(solidity.execution.Backend.zig, output.execution.backend);
 }
 
-test "Solidity inherited virtual modifier annotations and resolved bodies match via-IR exactly" {
+test "Solidity inherited virtual modifier annotations and resolved bodies match via-IR structurally" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
         .input = @embedFile("standard-json/solidity-inherited-virtual-modifier-ir.json"),
     });
     defer output.deinit();
 
-    try standard_json.compareExact(
+    try @import("ir_comparison.zig").compare(
+        std.testing.allocator,
         @embedFile("standard-json/expected/solidity-inherited-virtual-modifier-ir.json"),
         output.bytes,
     );
@@ -1774,7 +1775,8 @@ test "valid via-IR Solidity clears implemented frontend semantic phases" {
     });
     defer output.deinit();
 
-    try standard_json.compareExact(
+    try @import("ir_comparison.zig").compare(
+        std.testing.allocator,
         @embedFile("standard-json/expected/via-ir-smoke.json"),
         output.bytes,
     );

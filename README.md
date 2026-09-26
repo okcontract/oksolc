@@ -255,6 +255,20 @@ zig build fmt-check
 zig build lint
 ```
 
+[GitHub CI](.github/workflows/ci.yml) runs these checks in Debug and ReleaseSafe
+on pushes and pull requests, including the frozen compatibility corpus, CLI
+cache lifecycle regressions, and browser type checks. The
+[fuzz workflow](.github/workflows/fuzz.yml) runs bounded fuzzing on relevant
+changes and a longer campaign every week. Both workflows can also be started
+manually from GitHub Actions.
+
+CI validates workflow definitions with actionlint. Run the same check locally
+before changing the workflows:
+
+```sh
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+```
+
 `zig build check` compiles the compiler, CLI, and tests without running the
 unit-test executables. For browser changes, use:
 
@@ -263,9 +277,10 @@ zig build typecheck-browser test-browser-types
 zig build browser-smoke test-cli test-browser-store -Doptimize=ReleaseSafe
 ```
 
-The test suite includes byte-exact comparisons against checked-in `solc 0.8.36`
-outputs. Run that check alone, or audit the fixtures against your installed
-`solc`:
+The test suite compares against checked-in `solc 0.8.36` outputs. Unoptimized
+contract IR is compared as Yul tokens, allowing whitespace and comment changes
+from direct tree generation. All other output bytes must match exactly. Run that
+check alone, or audit the fixtures against your installed `solc`:
 
 ```sh
 zig build compatibility-check
