@@ -1378,20 +1378,20 @@ fn isolateCliSmokeEnvironment(b: *std.Build, run: *std.Build.Step.Run) void {
     );
     run.setEnvironmentVariable(
         "XDG_CACHE_HOME",
-        b.graph.global_cache_root.join(
+        b.pathFromRoot(b.graph.global_cache_root.join(
             b.allocator,
             &.{"oksolc-cli-smoke-cache-v2"},
-        ) catch @panic("out of memory"),
+        ) catch @panic("out of memory")),
     );
 }
 
 fn enableCliSmokeCache(b: *std.Build, run: *std.Build.Step.Run) void {
     run.setEnvironmentVariable(
         "XDG_CONFIG_HOME",
-        b.graph.global_cache_root.join(
+        b.pathFromRoot(b.graph.global_cache_root.join(
             b.allocator,
             &.{"oksolc-cli-smoke-config-v2"},
-        ) catch @panic("out of memory"),
+        ) catch @panic("out of memory")),
     );
 }
 
