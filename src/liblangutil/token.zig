@@ -392,19 +392,7 @@ fn isKeywordToken(token: Token) bool {
         inRange(token, .Class, .ForAll);
 }
 
-fn Lowercase(comptime input: []const u8) type {
-    return struct {
-        const value = blk: {
-            var output: [input.len]u8 = undefined;
-            for (input, 0..) |c, index| {
-                output[index] = if (c >= 'A' and c <= 'Z') c + ('a' - 'A') else c;
-            }
-            break :blk output;
-        };
-    };
-}
-
-fn keywordSpelling(token: Token) []const u8 {
+fn keywordSpelling(comptime token: Token) []const u8 {
     return switch (token) {
         .UInt => "uint",
         .UFixed => "ufixed",
@@ -428,20 +416,21 @@ fn keywordSpelling(token: Token) []const u8 {
         .ForAll => "forall",
         .Integer => "Integer",
         else => blk: {
-            inline for (std.meta.fields(Token)) |field| {
-                const candidate: Token = @enumFromInt(field.value);
-                if (token == candidate) {
-                    break :blk &Lowercase(field.name).value;
-                }
-            }
-            unreachable;
+            const spelling = @tagName(token);
+            const lowercase = comptime lower: {
+                var result: [spelling.len]u8 = undefined;
+                _ = std.ascii.lowerString(&result, spelling);
+                break :lower result;
+            };
+            break :blk &lowercase;
         },
     };
 }
 
 /// Returns the syntactic spelling or `null` for tokens without a unique one.
 pub fn toString(token: Token) ?[]const u8 {
-    const fixed: ?[]const u8 = switch (token) {
+    @setEvalBranchQuota(10_000);
+    return switch (token) {
         .EOS => "EOS",
         .LParen => "(",
         .RParen => ")",
@@ -500,11 +489,8 @@ pub fn toString(token: Token) ?[]const u8 {
         .UFixedMxN => "ufixedMxN",
         .Leave => "leave",
         .Illegal => "ILLEGAL",
-        else => null,
+        inline else => |keyword| comptime if (isKeywordToken(keyword)) keywordSpelling(keyword) else null,
     };
-    if (fixed) |spelling| return spelling;
-    if (isKeywordToken(token)) return keywordSpelling(token);
-    return null;
 }
 
 pub fn name(token: Token) []const u8 {
@@ -520,19 +506,15 @@ pub fn friendlyName(token: Token) []const u8 {
 // only equal-length keys; they do not classify every enum member again.
 const keywords = blk: {
     @setEvalBranchQuota(100_000);
-    var entries: [std.meta.fields(Token).len]struct { []const u8, Token } = undefined;
-    var length: usize = 0;
-    for (std.meta.fields(Token)) |field| {
-        const token: Token = @enumFromInt(field.value);
-        if (token != .NUM_TOKENS and isKeywordToken(token)) {
-            const spelling = toString(token).?;
-            for (entries[0..length]) |entry|
-                if (std.mem.eql(u8, entry[0], spelling)) @compileError("duplicate token keyword spelling");
-            entries[length] = .{ spelling, token };
-            length += 1;
-        }
+    var entries: []const struct { []const u8, Token } = &.{};
+    for (std.enums.values(Token)) |token| {
+        if (isKeywordToken(token)) entries = entries ++ .{.{ toString(token).?, token }};
     }
-    break :blk std.StaticStringMap(Token).initComptime(entries[0..length]);
+    const map = std.StaticStringMap(Token).initComptime(entries);
+    // Duplicate spellings cannot round-trip to both of their tokens.
+    for (entries) |entry|
+        if (map.get(entry[0]).? != entry[1]) @compileError("duplicate token keyword spelling");
+    break :blk map;
 };
 
 fn keywordByName(literal: []const u8) Token {
