@@ -516,14 +516,27 @@ pub fn friendlyName(token: Token) []const u8 {
     return toString(token) orelse name(token);
 }
 
-fn keywordByName(literal: []const u8) Token {
-    inline for (std.meta.fields(Token)) |field| {
+// Build once from the authoritative token spellings. Runtime queries compare
+// only equal-length keys; they do not classify every enum member again.
+const keywords = blk: {
+    @setEvalBranchQuota(100_000);
+    var entries: [std.meta.fields(Token).len]struct { []const u8, Token } = undefined;
+    var length: usize = 0;
+    for (std.meta.fields(Token)) |field| {
         const token: Token = @enumFromInt(field.value);
         if (token != .NUM_TOKENS and isKeywordToken(token)) {
-            if (std.mem.eql(u8, literal, toString(token).?)) return token;
+            const spelling = toString(token).?;
+            for (entries[0..length]) |entry|
+                if (std.mem.eql(u8, entry[0], spelling)) @compileError("duplicate token keyword spelling");
+            entries[length] = .{ spelling, token };
+            length += 1;
         }
     }
-    return .Identifier;
+    break :blk std.StaticStringMap(Token).initComptime(entries[0..length]);
+};
+
+fn keywordByName(literal: []const u8) Token {
+    return keywords.get(literal) orelse .Identifier;
 }
 
 pub fn isYulKeyword(literal: []const u8) bool {
@@ -699,4 +712,37 @@ test "keyword and sized elementary type recognition" {
     const rendered = try sized.renderAlloc(std.testing.allocator, false);
     defer std.testing.allocator.free(rendered);
     try std.testing.expectEqualStrings("uint256", rendered);
+}
+
+test "keyword lookup matches the former scan on spellings and near misses" {
+    const Reference = struct {
+        fn lookup(literal: []const u8) Token {
+            inline for (std.meta.fields(Token)) |field| {
+                const token: Token = @enumFromInt(field.value);
+                if (token != .NUM_TOKENS and isKeywordToken(token)) {
+                    if (std.mem.eql(u8, literal, toString(token).?)) return token;
+                }
+            }
+            return .Identifier;
+        }
+
+        fn check(literal: []const u8) !void {
+            try std.testing.expectEqual(lookup(literal), keywordByName(literal));
+        }
+    };
+    inline for (std.meta.fields(Token)) |field| {
+        const token: Token = @enumFromInt(field.value);
+        try Reference.check(field.name);
+        if (toString(token)) |spelling| {
+            for (0..spelling.len + 1) |length| try Reference.check(spelling[0..length]);
+            const suffixed = try std.fmt.allocPrint(std.testing.allocator, "{s}_1", .{spelling});
+            defer std.testing.allocator.free(suffixed);
+            try Reference.check(suffixed);
+            const upper = try std.ascii.allocUpperString(std.testing.allocator, spelling);
+            defer std.testing.allocator.free(upper);
+            try Reference.check(upper);
+        }
+    }
+    for ([_][]const u8{ "", "\x00", "\xff", "function\x00", "uint256", "ufixed128x18", "static_assert", "__builtin", "Integer", "integer" }) |literal|
+        try Reference.check(literal);
 }
