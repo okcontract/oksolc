@@ -612,6 +612,15 @@ pub const IRGeneratorForStatements = struct {
         depth: usize,
     ) GeneratorError!void {
         const statement = node.payload.variable_declaration_statement;
+        for (statement.declarations) |declaration| {
+            const present = declaration orelse continue;
+            if (present.nodeKind() != .variable_declaration) return error.InvalidAst;
+            const variable = present.payload.variable_declaration;
+            if (variable.type_name) |type_name|
+                try self.emitEmbeddedTypeExpressions(type_name, depth + 1);
+            if (variable.experimental_type_expression) |type_expression|
+                try self.emitEmbeddedTypeExpressions(type_expression, depth + 1);
+        }
         if (statement.initial_value) |initial_value| {
             var value = try self.emitExpression(initial_value, depth + 1);
             defer value.deinit();
@@ -642,6 +651,25 @@ pub const IRGeneratorForStatements = struct {
             try self.declare(local);
             try self.initializeLocalVar(present);
         }
+    }
+
+    fn emitEmbeddedTypeExpressions(
+        self: *IRGeneratorForStatements,
+        node: *const AST.Node,
+        depth: usize,
+    ) GeneratorError!void {
+        if (depth >= max_ast_depth) return error.AstTooDeep;
+        if (node.isExpression()) {
+            var value = try self.emitExpression(node, depth + 1);
+            value.deinit();
+            return;
+        }
+
+        var children: std.ArrayList(*const AST.Node) = .empty;
+        defer children.deinit(self.allocator);
+        try ASTImplementation.appendChildren(self.allocator, &children, node);
+        for (children.items) |child|
+            try self.emitEmbeddedTypeExpressions(child, depth + 1);
     }
 
     fn emitIfStatement(
