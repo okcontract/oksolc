@@ -27,6 +27,7 @@ pub const FunctionCalls = ordered.OrderedMap(
     lessFunctionHandle,
 );
 pub const FunctionHandleSet = ordered.OrderedSet(AST.FunctionHandle, lessFunctionHandle);
+const HandleIndex = std.HashMapUnmanaged(AST.FunctionHandle, usize, NameCollectorModule.FunctionHandleContext, 80);
 
 pub const CallGraph = struct {
     allocator: std.mem.Allocator,
@@ -44,9 +45,13 @@ pub const CallGraph = struct {
     pub fn recursiveFunctions(self: *const CallGraph) anyerror!FunctionHandleSet {
         var handles: std.ArrayList(AST.FunctionHandle) = .empty;
         defer handles.deinit(self.allocator);
+        // Lookup only: IDs retain their first-seen order, independently of hash
+        // iteration. The bridge and its index share this query's lifetime.
+        var indices: HandleIndex = .empty;
+        defer indices.deinit(self.allocator);
         for (self.function_calls.items()) |entry| {
-            try appendUniqueHandle(self.allocator, &handles, entry.key);
-            for (entry.value.items) |callee| try appendUniqueHandle(self.allocator, &handles, callee);
+            try appendUniqueHandle(self.allocator, &handles, &indices, entry.key);
+            for (entry.value.items) |callee| try appendUniqueHandle(self.allocator, &handles, &indices, callee);
         }
 
         const adjacency_lists = try self.allocator.alloc(std.ArrayList(usize), handles.items.len);
@@ -54,9 +59,9 @@ pub const CallGraph = struct {
         for (adjacency_lists) |*list| list.* = .empty;
         defer for (adjacency_lists) |*list| list.deinit(self.allocator);
         for (self.function_calls.items()) |entry| {
-            const caller = indexOfHandle(handles.items, entry.key) orelse return error.MissingCallGraphNode;
+            const caller = indices.get(entry.key) orelse return error.MissingCallGraphNode;
             for (entry.value.items) |callee| {
-                const callee_index = indexOfHandle(handles.items, callee) orelse return error.MissingCallGraphNode;
+                const callee_index = indices.get(callee) orelse return error.MissingCallGraphNode;
                 if (!containsIndex(adjacency_lists[caller].items, callee_index))
                     try adjacency_lists[caller].append(self.allocator, callee_index);
             }
@@ -169,9 +174,14 @@ pub const CallGraphGenerator = struct {
 fn appendUniqueHandle(
     allocator: std.mem.Allocator,
     handles: *std.ArrayList(AST.FunctionHandle),
+    indices: *HandleIndex,
     handle: AST.FunctionHandle,
 ) !void {
-    if (!containsHandle(handles.items, handle)) try handles.append(allocator, handle);
+    const slot = try indices.getOrPut(allocator, handle);
+    if (!slot.found_existing) {
+        slot.value_ptr.* = handles.items.len;
+        try handles.append(allocator, handle);
+    }
 }
 
 fn indexOfHandle(handles: []const AST.FunctionHandle, needle: AST.FunctionHandle) ?usize {
@@ -204,4 +214,89 @@ test "call graph identifies mutual and direct recursion" {
     defer recursive.deinit(allocator);
     try std.testing.expect(recursive.contains(.{ .user = f }));
     try std.testing.expect(recursive.contains(.{ .user = g }));
+}
+
+test "call graph recursion matches transitive closure for every three-node graph" {
+    const allocator = std.testing.allocator;
+    const names = [_]YulName{ try YulName.init("graph_a"), try YulName.init("graph_b"), try YulName.init("graph_c") };
+    for (0..512) |mask| {
+        var graph: CallGraph = .{ .allocator = allocator };
+        defer graph.deinit();
+        for (names) |name| _ = try graph.function_calls.insert(allocator, .{ .user = name }, .empty);
+        var reachable: [3][3]bool = @splat(@splat(false));
+        for (names, 0..) |caller, i| {
+            for (names, 0..) |callee, j| {
+                if (mask & (@as(usize, 1) << @intCast(i * 3 + j)) == 0) continue;
+                reachable[i][j] = true;
+                // Duplicate edges are legal in manually constructed graphs.
+                const calls = graph.function_calls.getPtr(.{ .user = caller }).?;
+                try calls.appendSlice(allocator, &.{ .{ .user = callee }, .{ .user = callee } });
+            }
+        }
+        for (0..3) |k| for (0..3) |i| {
+            for (0..3) |j| reachable[i][j] = reachable[i][j] or (reachable[i][k] and reachable[k][j]);
+        };
+        var recursive = try graph.recursiveFunctions();
+        defer recursive.deinit(allocator);
+        var expected_count: usize = 0;
+        for (names, 0..) |name, i| {
+            try std.testing.expectEqual(reachable[i][i], recursive.contains(.{ .user = name }));
+            expected_count += @intFromBool(reachable[i][i]);
+        }
+        try std.testing.expectEqual(expected_count, recursive.len());
+    }
+}
+
+test "call graph recursion retains callee-only nodes and rejects invalid cycles" {
+    const allocator = std.testing.allocator;
+    const unknown: AST.FunctionHandle = .{ .user = try YulName.init("callee_only") };
+    const top: AST.FunctionHandle = .{ .user = .{} };
+    const builtin: AST.FunctionHandle = .{ .builtin = .{ .id = 1 } };
+    var graph: CallGraph = .{ .allocator = allocator };
+    defer graph.deinit();
+    var empty = try graph.recursiveFunctions();
+    defer empty.deinit(allocator);
+    try std.testing.expect(empty.isEmpty());
+    _ = try graph.function_calls.insert(allocator, top, .empty);
+    try graph.function_calls.getPtr(top).?.appendSlice(allocator, &.{ unknown, builtin, unknown });
+    var recursive = try graph.recursiveFunctions();
+    defer recursive.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), recursive.len());
+    try graph.function_calls.getPtr(top).?.append(allocator, top);
+    try std.testing.expectError(error.TopLevelCannotBeRecursive, graph.recursiveFunctions());
+    _ = graph.function_calls.getPtr(top).?.pop();
+    _ = try graph.function_calls.insert(allocator, builtin, .empty);
+    try graph.function_calls.getPtr(builtin).?.append(allocator, builtin);
+    try std.testing.expectError(error.BuiltinCannotBeRecursive, graph.recursiveFunctions());
+}
+
+test "call graph recursion handles hash collisions and growth across allocation failures" {
+    var names: [40]YulName = undefined;
+    for (&names, 0..) |*name, index| {
+        name.* = try YulName.initGenerated(try YulName.init("graph_collision"), index);
+        // Distinct interned entries with the same hash must remain distinct.
+        // Every occurrence of a key below uses this same modified handle.
+        name.handle.hash = 7;
+    }
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, inputs: []const YulName) !void {
+            var graph: CallGraph = .{ .allocator = allocator };
+            defer graph.deinit();
+            for (inputs) |name|
+                _ = try graph.function_calls.insert(allocator, .{ .user = name }, .empty);
+            for (inputs, 0..) |name, index| {
+                const callee: AST.FunctionHandle = .{ .user = inputs[(index + 1) % inputs.len] };
+                try graph.function_calls.getPtr(.{ .user = name }).?.appendSlice(
+                    allocator,
+                    &.{ callee, .{ .builtin = .{ .id = 1 } }, callee },
+                );
+            }
+            var recursive = try graph.recursiveFunctions();
+            defer recursive.deinit(allocator);
+            try std.testing.expectEqual(inputs.len, recursive.len());
+            for (graph.function_calls.items(), 0..) |entry, index|
+                try std.testing.expectEqualDeep(entry.key, recursive.at(index));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{&names});
 }

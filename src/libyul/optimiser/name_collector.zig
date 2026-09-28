@@ -25,7 +25,8 @@ fn lessFunctionHandle(left: AST.FunctionHandle, right: AST.FunctionHandle) bool 
     };
 }
 
-const FunctionHandleContext = struct {
+/// Hash/equality for lookup-only indexes over interned function handles.
+pub const FunctionHandleContext = struct {
     pub fn hash(_: @This(), handle: AST.FunctionHandle) u64 {
         return switch (handle) {
             .user => |name| name.hashValue() ^ 0xa076_1d64_78bd_642f,
