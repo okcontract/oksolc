@@ -392,23 +392,8 @@ fn isKeywordToken(token: Token) bool {
         inRange(token, .Class, .ForAll);
 }
 
-fn Lowercase(comptime input: []const u8) type {
-    return struct {
-        const value = blk: {
-            var output: [input.len]u8 = undefined;
-            for (input, 0..) |c, index| {
-                output[index] = if (c >= 'A' and c <= 'Z') c + ('a' - 'A') else c;
-            }
-            break :blk output;
-        };
-    };
-}
-
-fn keywordSpelling(token: Token) []const u8 {
+fn keywordSpelling(comptime token: Token) []const u8 {
     return switch (token) {
-        .UInt => "uint",
-        .UFixed => "ufixed",
-        .CallData => "calldata",
         .SubWei => "wei",
         .SubGwei => "gwei",
         .SubEther => "ether",
@@ -420,28 +405,24 @@ fn keywordSpelling(token: Token) []const u8 {
         .SubYear => "years",
         .TrueLiteral => "true",
         .FalseLiteral => "false",
-        .CopyOf => "copyof",
         .NullLiteral => "null",
-        .TypeOf => "typeof",
         .StaticAssert => "static_assert",
         .Builtin => "__builtin",
-        .ForAll => "forall",
         .Integer => "Integer",
-        else => blk: {
-            inline for (std.meta.fields(Token)) |field| {
-                const candidate: Token = @enumFromInt(field.value);
-                if (token == candidate) {
-                    break :blk &Lowercase(field.name).value;
-                }
-            }
-            unreachable;
+        else => comptime blk: {
+            const spelling = @tagName(token);
+            var buffer: [spelling.len:0]u8 = @splat(0);
+            _ = std.ascii.lowerString(&buffer, spelling);
+            const lowercase = buffer;
+            break :blk &lowercase;
         },
     };
 }
 
 /// Returns the syntactic spelling or `null` for tokens without a unique one.
 pub fn toString(token: Token) ?[]const u8 {
-    const fixed: ?[]const u8 = switch (token) {
+    @setEvalBranchQuota(10_000);
+    return switch (token) {
         .EOS => "EOS",
         .LParen => "(",
         .RParen => ")",
@@ -500,11 +481,8 @@ pub fn toString(token: Token) ?[]const u8 {
         .UFixedMxN => "ufixedMxN",
         .Leave => "leave",
         .Illegal => "ILLEGAL",
-        else => null,
+        inline else => |keyword| comptime if (isKeywordToken(keyword)) keywordSpelling(keyword) else null,
     };
-    if (fixed) |spelling| return spelling;
-    if (isKeywordToken(token)) return keywordSpelling(token);
-    return null;
 }
 
 pub fn name(token: Token) []const u8 {
@@ -516,14 +494,23 @@ pub fn friendlyName(token: Token) []const u8 {
     return toString(token) orelse name(token);
 }
 
-fn keywordByName(literal: []const u8) Token {
-    inline for (std.meta.fields(Token)) |field| {
-        const token: Token = @enumFromInt(field.value);
-        if (token != .NUM_TOKENS and isKeywordToken(token)) {
-            if (std.mem.eql(u8, literal, toString(token).?)) return token;
-        }
+// Build once from the authoritative token spellings. Runtime queries compare
+// only equal-length keys; they do not classify every enum member again.
+const keywords = blk: {
+    @setEvalBranchQuota(100_000);
+    var entries: []const struct { []const u8, Token } = &.{};
+    for (std.enums.values(Token)) |token| {
+        if (isKeywordToken(token)) entries = entries ++ .{.{ toString(token).?, token }};
     }
-    return .Identifier;
+    const map = std.StaticStringMap(Token).initComptime(entries);
+    // Duplicate spellings cannot round-trip to both of their tokens.
+    for (entries) |entry|
+        if (map.get(entry[0]).? != entry[1]) @compileError("duplicate token keyword spelling");
+    break :blk map;
+};
+
+fn keywordByName(literal: []const u8) Token {
+    return keywords.get(literal) orelse .Identifier;
 }
 
 pub fn isYulKeyword(literal: []const u8) bool {
@@ -561,15 +548,35 @@ pub const IdentifierToken = struct {
     second_number: u32 = 0,
 };
 
+const SizedTypePrefix = struct { token: Token, digits_start: usize };
+
+fn sizedTypePrefix(comptime token: Token, literal: []const u8) ?SizedTypePrefix {
+    const prefix = comptime toString(token).?;
+    if (literal.len > prefix.len and std.ascii.isDigit(literal[prefix.len]) and
+        std.mem.startsWith(u8, literal, prefix))
+    {
+        return .{ .token = token, .digits_start = prefix.len };
+    }
+    return null;
+}
+
 pub fn fromIdentifierOrKeyword(literal: []const u8) IdentifierToken {
-    const position_m = firstDigit(literal) orelse
+    // Only these five prefixes can introduce sized types. Ordinary identifiers
+    // and keywords do not need another full scan looking for a digit.
+    const sized_type = (if (literal.len == 0) null else switch (literal[0]) {
+        'b' => sizedTypePrefix(.Bytes, literal),
+        'i' => sizedTypePrefix(.Int, literal),
+        'u' => sizedTypePrefix(.UInt, literal) orelse sizedTypePrefix(.UFixed, literal),
+        'f' => sizedTypePrefix(.Fixed, literal),
+        else => null,
+    }) orelse
         return .{ .token = keywordByName(literal) };
-    const base_type = literal[0..position_m];
+    const position_m = sized_type.digits_start;
     var position_x = position_m;
-    while (position_x < literal.len and isDigit(literal[position_x])) : (position_x += 1) {}
+    while (position_x < literal.len and std.ascii.isDigit(literal[position_x])) : (position_x += 1) {}
     const m = parseSize(literal[position_m..position_x]) orelse
         return .{ .token = .Identifier };
-    const keyword = keywordByName(base_type);
+    const keyword = sized_type.token;
 
     if (keyword == .Bytes) {
         if (m > 0 and m <= 32 and position_x == literal.len) {
@@ -598,20 +605,11 @@ pub fn fromIdentifierOrKeyword(literal: []const u8) IdentifierToken {
     return .{ .token = .Identifier };
 }
 
-fn firstDigit(literal: []const u8) ?usize {
-    for (literal, 0..) |c, index| if (isDigit(c)) return index;
-    return null;
-}
-
-fn isDigit(c: u8) bool {
-    return c >= '0' and c <= '9';
-}
-
 fn parseSize(bytes: []const u8) ?u32 {
     if (bytes.len == 0 or (bytes.len > 1 and bytes[0] == '0')) return null;
     var result: u32 = 0;
     for (bytes) |c| {
-        if (!isDigit(c) or result >= 256) return null;
+        if (!std.ascii.isDigit(c) or result >= 256) return null;
         result = result * 10 + (c - '0');
     }
     return result;
@@ -699,4 +697,58 @@ test "keyword and sized elementary type recognition" {
     const rendered = try sized.renderAlloc(std.testing.allocator, false);
     defer std.testing.allocator.free(rendered);
     try std.testing.expectEqualStrings("uint256", rendered);
+}
+
+test "sized type prefixes preserve keywords and reject malformed suffixes" {
+    const cases = [_]struct { literal: []const u8, expected: IdentifierToken }{
+        .{ .literal = "", .expected = .{ .token = .Identifier } },
+        .{ .literal = "interface", .expected = .{ .token = .Interface } },
+        .{ .literal = "internal", .expected = .{ .token = .Internal } },
+        .{ .literal = "Integer", .expected = .{ .token = .Integer } },
+        .{ .literal = "int", .expected = .{ .token = .Int } },
+        .{ .literal = "ufixed", .expected = .{ .token = .UFixed } },
+        .{ .literal = "bytes", .expected = .{ .token = .Bytes } },
+        .{ .literal = "int8", .expected = .{ .token = .IntM, .first_number = 8 } },
+        .{ .literal = "uint256", .expected = .{ .token = .UIntM, .first_number = 256 } },
+        .{ .literal = "bytes1", .expected = .{ .token = .BytesM, .first_number = 1 } },
+        .{ .literal = "bytes32", .expected = .{ .token = .BytesM, .first_number = 32 } },
+        .{ .literal = "fixed8x0", .expected = .{ .token = .FixedMxN, .first_number = 8 } },
+        .{ .literal = "ufixed256x80", .expected = .{ .token = .UFixedMxN, .first_number = 256, .second_number = 80 } },
+    };
+    for (cases) |case| try std.testing.expectEqualDeep(case.expected, fromIdentifierOrKeyword(case.literal));
+    for ([_][]const u8{
+        "int0",        "uint9",        "uint264",  "uint0256", "bytes0",                  "bytes33",    "bytes01", "uint8_",
+        "fixed256x81", "fixed128x018", "ufixed8x", "int8x2",   "uint9999999999999999999", "account123",
+    }) |literal| try std.testing.expectEqualDeep(IdentifierToken{ .token = .Identifier }, fromIdentifierOrKeyword(literal));
+}
+
+test "keyword lookup matches the former scan on spellings and near misses" {
+    const Reference = struct {
+        fn lookup(literal: []const u8) Token {
+            for (std.enums.values(Token)) |token| {
+                if (token != .NUM_TOKENS and isKeywordToken(token)) {
+                    if (std.mem.eql(u8, literal, toString(token).?)) return token;
+                }
+            }
+            return .Identifier;
+        }
+
+        fn check(literal: []const u8) !void {
+            try std.testing.expectEqual(lookup(literal), keywordByName(literal));
+        }
+    };
+    for (std.enums.values(Token)) |token| {
+        try Reference.check(@tagName(token));
+        if (toString(token)) |spelling| {
+            for (0..spelling.len + 1) |length| try Reference.check(spelling[0..length]);
+            const suffixed = try std.fmt.allocPrint(std.testing.allocator, "{s}_1", .{spelling});
+            defer std.testing.allocator.free(suffixed);
+            try Reference.check(suffixed);
+            const upper = try std.ascii.allocUpperString(std.testing.allocator, spelling);
+            defer std.testing.allocator.free(upper);
+            try Reference.check(upper);
+        }
+    }
+    for ([_][]const u8{ "", "\x00", "\xff", "function\x00", "uint256", "ufixed128x18", "static_assert", "__builtin", "Integer", "integer" }) |literal|
+        try Reference.check(literal);
 }

@@ -223,7 +223,7 @@ pub const EVMBuiltins = struct {
                 EVMVersion.init(.London)
             else
                 EVMVersion.current();
-            try result.entries.append(allocator, .{
+            var entry: Entry = .{
                 .scopes = Scopes.instructionScope(),
                 .builtin = try instructionBuiltin(
                     allocator,
@@ -231,7 +231,9 @@ pub const EVMBuiltins = struct {
                     candidate.instruction,
                     version,
                 ),
-            });
+            };
+            errdefer entry.builtin.deinit(allocator);
+            try result.entries.append(allocator, entry);
         }
 
         try result.appendCustom("linkersymbol", 1, 1, .{}, .{}, &.{.String}, .linker_symbol);
@@ -327,7 +329,7 @@ pub const EVMBuiltins = struct {
         literal_arguments: []const ?AST.LiteralKind,
         codegen: CodegenKind,
     ) !void {
-        try self.entries.append(self.allocator, .{
+        var entry: Entry = .{
             .scopes = Scopes.objectAccessScope(),
             .builtin = try createFunction(
                 self.allocator,
@@ -339,7 +341,9 @@ pub const EVMBuiltins = struct {
                 literal_arguments,
                 codegen,
             ),
-        });
+        };
+        errdefer entry.builtin.deinit(self.allocator);
+        try self.entries.append(self.allocator, entry);
     }
 };
 

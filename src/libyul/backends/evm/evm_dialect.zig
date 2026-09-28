@@ -41,8 +41,7 @@ pub const EVMDialect = struct {
     functions: std.ArrayList(?*const BuiltinFunctionForEVM) = .empty,
     verbatim_functions: std.ArrayList(?*BuiltinFunctionForEVM) = .empty,
     verbatim_mutex: std.Io.Mutex = .init,
-    reserved: std.StringHashMap(void),
-    reserved_names: std.ArrayList([]u8) = .empty,
+    reserved: std.StringHashMap(void), // Keys borrow compile-time spellings.
 
     discard_function: ?BuiltinHandle = null,
     equality_function: ?BuiltinHandle = null,
@@ -122,8 +121,6 @@ pub const EVMDialect = struct {
         self.functions.deinit(self.allocator);
         self.builtin_functions_by_name.deinit();
         self.reserved.deinit();
-        for (self.reserved_names.items) |name| self.allocator.free(name);
-        self.reserved_names.deinit(self.allocator);
         self.all_builtins.deinit();
         self.* = undefined;
     }
@@ -361,12 +358,19 @@ pub const EVMDialect = struct {
     }
 
     fn createReservedIdentifiers(self: *EVMDialect) !void {
+        @setEvalBranchQuota(10_000);
         inline for (std.meta.fields(Instruction)) |field| {
             const instruction: Instruction = @enumFromInt(field.value);
+            const name = comptime blk: {
+                var buffer: [field.name.len]u8 = undefined;
+                _ = std.ascii.lowerString(&buffer, field.name);
+                const lowercase = buffer;
+                break :blk &lowercase;
+            };
             if (!reservedInstructionException(instruction, field.name, self.evm_version))
-                try self.putReservedLower(field.name);
+                try self.reserved.put(name, {});
         }
-        try self.putReservedLower("DIFFICULTY");
+        try self.reserved.put("difficulty", {});
         const object_reserved = [_][]const u8{
             "linkersymbol",
             "datasize",
@@ -375,19 +379,7 @@ pub const EVMDialect = struct {
             "setimmutable",
             "loadimmutable",
         };
-        for (object_reserved) |name| try self.putReservedLower(name);
-    }
-
-    fn putReservedLower(self: *EVMDialect, name: []const u8) !void {
-        const owned_name = try lowercaseAlloc(self.allocator, name);
-        errdefer self.allocator.free(owned_name);
-        if (self.reserved.contains(owned_name)) {
-            self.allocator.free(owned_name);
-            return;
-        }
-        try self.reserved_names.append(self.allocator, owned_name);
-        errdefer _ = self.reserved_names.pop();
-        try self.reserved.put(owned_name, {});
+        for (object_reserved) |name| try self.reserved.put(name, {});
     }
 
     fn currentDialectInstruction(self: *const EVMDialect, name: []const u8) ?Instruction {
@@ -630,6 +622,41 @@ test "EVM dialect filters versions without changing compatible handles" {
     );
     try std.testing.expect(osaka_objects.findBuiltin("datasize") != null);
     try std.testing.expect(homestead.findBuiltin("datasize") == null);
+}
+
+test "EVM dialect reserved names retain revision gates and case sensitivity" {
+    const gated = [_]struct { name: []const u8, since: Version }{
+        .{ .name = "basefee", .since = .London },
+        .{ .name = "prevrandao", .since = .Paris },
+        .{ .name = "blobbasefee", .since = .Cancun },
+        .{ .name = "blobhash", .since = .Cancun },
+        .{ .name = "mcopy", .since = .Cancun },
+        .{ .name = "tload", .since = .Cancun },
+        .{ .name = "tstore", .since = .Cancun },
+        .{ .name = "clz", .since = .Osaka },
+    };
+    for (EVMVersion.allVersions()) |version| {
+        for ([_]bool{ false, true }) |object_access| {
+            var dialect = try EVMDialect.init(std.testing.allocator, version, object_access);
+            defer dialect.deinit();
+            for (gated) |entry|
+                try std.testing.expectEqual(version.atLeast(entry.since), dialect.reservedIdentifier(entry.name));
+            for ([_][]const u8{ "add", "difficulty", "push32", "datasize", "linkersymbol", "loadimmutable" }) |name|
+                try std.testing.expect(dialect.reservedIdentifier(name));
+            for ([_][]const u8{ "ADD", "PREVRANDAO", "add_", "customFunction", "" }) |name|
+                try std.testing.expect(!dialect.reservedIdentifier(name));
+            try std.testing.expectEqual(object_access, dialect.reservedIdentifier("verbatim_bad"));
+        }
+    }
+}
+
+test "EVM dialect initialization releases allocations on every failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn init(allocator: std.mem.Allocator) !void {
+            var dialect = try EVMDialect.init(allocator, EVMVersion.current(), true);
+            defer dialect.deinit();
+        }
+    }.init, .{});
 }
 
 test "verbatim builtins use the protected handle range and exact grammar" {
