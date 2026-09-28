@@ -665,6 +665,41 @@ pub const IRGeneratorForStatements = struct {
             return;
         }
 
+        // Standard type names have a small fixed shape. Traverse them directly
+        // so declarations without embedded expressions do not allocate.
+        switch (node.payload) {
+            .elementary_type_name, .user_defined_type_name => return,
+            .array_type_name => |array| {
+                try self.emitEmbeddedTypeExpressions(array.base_type, depth + 1);
+                if (array.length) |length|
+                    try self.emitEmbeddedTypeExpressions(length, depth + 1);
+                return;
+            },
+            .mapping => |mapping| {
+                try self.emitEmbeddedTypeExpressions(mapping.key_type, depth + 1);
+                try self.emitEmbeddedTypeExpressions(mapping.value_type, depth + 1);
+                return;
+            },
+            .function_type_name => |function_type| {
+                try self.emitEmbeddedTypeExpressions(function_type.parameter_types, depth + 1);
+                try self.emitEmbeddedTypeExpressions(function_type.return_types, depth + 1);
+                return;
+            },
+            .parameter_list => |parameters| {
+                for (parameters.parameters) |parameter|
+                    try self.emitEmbeddedTypeExpressions(parameter, depth + 1);
+                return;
+            },
+            .variable_declaration => |variable| {
+                if (variable.type_name) |type_name|
+                    try self.emitEmbeddedTypeExpressions(type_name, depth + 1);
+                if (variable.experimental_type_expression) |type_expression|
+                    try self.emitEmbeddedTypeExpressions(type_expression, depth + 1);
+                return;
+            },
+            else => {},
+        }
+
         var children: std.ArrayList(*const AST.Node) = .empty;
         defer children.deinit(self.allocator);
         try ASTImplementation.appendChildren(self.allocator, &children, node);
