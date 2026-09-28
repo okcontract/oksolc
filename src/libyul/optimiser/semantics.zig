@@ -215,12 +215,12 @@ pub const SideEffectsPropagator = struct {
         for (0..recursive.len()) |index|
             try markPossiblyLooping(allocator, &result, recursive.at(index));
 
-        for (graph.function_calls.items()) |entry| {
+        for (graph.function_calls.items(), 0..) |entry, complete_before| {
             var effects: SideEffects = .{};
             var visited: CallGraphModule.FunctionHandleSet = .{};
             defer visited.deinit(allocator);
             for (entry.value.items) |callee|
-                try collectTransitiveEffects(allocator, dialect, graph, &result, &visited, callee, &effects);
+                try collectTransitiveEffects(allocator, dialect, graph, &result, complete_before, &visited, callee, &effects);
             if (result.getPtr(entry.key)) |known|
                 known.combineAssign(effects)
             else
@@ -249,6 +249,7 @@ pub const SideEffectsPropagator = struct {
         dialect: AST.Dialect,
         graph: *const CallGraphModule.CallGraph,
         known: *const FunctionSideEffects,
+        complete_before: usize,
         visited: *CallGraphModule.FunctionHandleSet,
         handle: AST.FunctionHandle,
         effects: *SideEffects,
@@ -258,14 +259,21 @@ pub const SideEffectsPropagator = struct {
         switch (handle) {
             .builtin => |builtin| effects.combineAssign((try dialect.builtin(builtin)).side_effects),
             .user => {
-                if (known.get(handle)) |function_effects| effects.combineAssign(function_effects.*);
-                if (graph.function_calls.get(handle)) |callees|
-                    for (callees.items) |callee|
+                const position = graph.function_calls.search(handle);
+                if (known.get(handle)) |function_effects| {
+                    effects.combineAssign(function_effects.*);
+                    // Earlier entries contain complete reachable effects;
+                    // loop/recursion seeds alone are not complete summaries.
+                    if (position.found and position.index < complete_before) return;
+                }
+                if (position.found)
+                    for (graph.function_calls.items()[position.index].value.items) |callee|
                         try collectTransitiveEffects(
                             allocator,
                             dialect,
                             graph,
                             known,
+                            complete_before,
                             visited,
                             callee,
                             effects,
@@ -520,4 +528,100 @@ test "semantic collectors recognize builtin side effects and irregular flow" {
     try std.testing.expect(try finder.containsNonContinuingFunctionCall(&expression));
     const effects = try SideEffectsCollector.collectExpression(dialect.dialect(), &expression, null);
     try std.testing.expect(!effects.canBeRemoved(false));
+}
+
+test "call graph effects match transitive closure for every three-node graph and loop seed" {
+    const EVMDialect = @import("../backends/evm/evm_dialect.zig").EVMDialect;
+    const allocator = std.testing.allocator;
+    var evm = try EVMDialect.init(allocator, .current(), false);
+    defer evm.deinit();
+    const dialect = evm.dialect();
+    const names = [_]YulName{ try YulName.init("effects_a"), try YulName.init("effects_b"), try YulName.init("effects_c") };
+    const looping: SideEffects = .{
+        .movable = false,
+        .can_be_removed = false,
+        .can_be_removed_if_no_msize = false,
+        .cannot_loop = false,
+    };
+    // Include distinct effect coordinates, pure calls, and a saturated result.
+    for ([_][3][]const u8{ .{ "mload", "sstore", "tload" }, .{ "call", "add", "mstore" } }) |builtins| {
+        for (0..512) |edges| {
+            var reachable: [3][3]bool = @splat(@splat(false));
+            for (0..3) |i| for (0..3) |j| {
+                reachable[i][j] = edges & (@as(usize, 1) << @intCast(i * 3 + j)) != 0;
+            };
+            // This oracle uses transitive closure, not DFS or cached summaries.
+            for (0..3) |k| for (0..3) |i| {
+                for (0..3) |j| reachable[i][j] = reachable[i][j] or (reachable[i][k] and reachable[k][j]);
+            };
+            for (0..8) |loops| {
+                var graph: CallGraphModule.CallGraph = .{ .allocator = allocator };
+                defer graph.deinit();
+                var local: [3]SideEffects = undefined;
+                for (names, builtins, 0..) |name, builtin_name, i| {
+                    const builtin = dialect.findBuiltin(builtin_name).?;
+                    local[i] = (try dialect.builtin(builtin)).side_effects;
+                    const has_loop = loops & (@as(usize, 1) << @intCast(i)) != 0;
+                    if (has_loop) _ = try graph.functions_with_loops.insert(allocator, name);
+                    if (has_loop or reachable[i][i]) local[i].combineAssign(looping);
+                    _ = try graph.function_calls.insert(allocator, .{ .user = name }, .empty);
+                    const callees = graph.function_calls.getPtr(.{ .user = name }).?;
+                    try callees.append(allocator, .{ .builtin = builtin });
+                    if (i == 0) {
+                        const balance = dialect.findBuiltin("balance").?;
+                        try callees.append(allocator, .{ .builtin = balance });
+                        local[i].combineAssign((try dialect.builtin(balance)).side_effects);
+                    }
+                    for (names, 0..) |callee, j| {
+                        if (edges & (@as(usize, 1) << @intCast(i * 3 + j)) != 0)
+                            try callees.appendSlice(allocator, &.{ .{ .user = callee }, .{ .user = callee } });
+                    }
+                }
+                var expected: FunctionSideEffects = .{};
+                defer expected.deinit(allocator);
+                for (names, 0..) |name, i| {
+                    var effects = local[i];
+                    for (local, 0..) |callee_effects, j| {
+                        if (reachable[i][j]) effects.combineAssign(callee_effects);
+                    }
+                    _ = try expected.insert(allocator, .{ .user = name }, effects);
+                }
+                var actual = try SideEffectsPropagator.sideEffects(allocator, dialect, &graph);
+                defer actual.deinit(allocator);
+                try std.testing.expectEqualDeep(expected.items(), actual.items());
+            }
+        }
+    }
+}
+
+test "call graph effects preserve seed-only nodes, builtin leaves and invalid handles" {
+    const EVMDialect = @import("../backends/evm/evm_dialect.zig").EVMDialect;
+    const allocator = std.testing.allocator;
+    var evm = try EVMDialect.init(allocator, .current(), false);
+    defer evm.deinit();
+    const dialect = evm.dialect();
+    const caller: AST.FunctionHandle = .{ .user = try YulName.init("effects_caller") };
+    const seeded: AST.FunctionHandle = .{ .user = try YulName.init("effects_seed_only") };
+    const missing: AST.FunctionHandle = .{ .user = try YulName.init("effects_missing") };
+    const builtin: AST.FunctionHandle = .{ .builtin = dialect.findBuiltin("add").? };
+    var graph: CallGraphModule.CallGraph = .{ .allocator = allocator };
+    defer graph.deinit();
+    _ = try graph.functions_with_loops.insert(allocator, seeded.user);
+    _ = try graph.function_calls.insert(allocator, caller, .empty);
+    try graph.function_calls.getPtr(caller).?.appendSlice(allocator, &.{ seeded, missing, builtin });
+    // A builtin remains a leaf when called, even if a manually built graph
+    // gives it an adjacency entry. Its own published entry retains old behavior.
+    _ = try graph.function_calls.insert(allocator, builtin, .empty);
+    const store = dialect.findBuiltin("sstore").?;
+    try graph.function_calls.getPtr(builtin).?.append(allocator, .{ .builtin = store });
+    var actual = try SideEffectsPropagator.sideEffects(allocator, dialect, &graph);
+    defer actual.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), actual.items().len);
+    try std.testing.expect(!actual.contains(missing));
+    try std.testing.expect(!actual.get(caller).?.cannot_loop);
+    try std.testing.expectEqualDeep(actual.get(seeded).?.*, actual.get(caller).?.*);
+    try std.testing.expectEqualDeep((try dialect.builtin(store)).side_effects, actual.get(builtin).?.*);
+
+    try graph.function_calls.getPtr(caller).?.append(allocator, .{ .builtin = .{ .id = std.math.maxInt(usize) } });
+    try std.testing.expectError(error.UnknownBuiltin, SideEffectsPropagator.sideEffects(allocator, dialect, &graph));
 }
