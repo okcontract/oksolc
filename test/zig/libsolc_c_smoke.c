@@ -53,11 +53,11 @@ static void reentrant_read(
     memcpy(*contents, source, sizeof(source));
 }
 
-int main(void)
+int main(int argc, char** argv)
 {
     solidity_reset();
 
-    if (strcmp(solidity_version(), "0.8.36+zig") != 0)
+    if (argc != 2 || strcmp(solidity_version(), argv[1]) != 0)
         return 1;
     if (strstr(solidity_license(), "GNU GENERAL PUBLIC LICENSE") == NULL)
         return 2;

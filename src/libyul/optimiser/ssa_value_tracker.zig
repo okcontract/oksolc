@@ -51,8 +51,17 @@ pub const SSAValueTracker = struct {
         try tracker.run(block);
         var result: NameCollector.NameSet = .{};
         errdefer result.deinit(allocator);
-        var iterator = tracker.values_map.iterator();
-        while (iterator.next()) |entry| _ = try result.insert(allocator, entry.key_ptr.*);
+        // The tracker already has unique interned names, so reserve once
+        // and sort with the ordered set's comparator.
+        try result.map.entries.ensureTotalCapacity(allocator, tracker.values_map.count());
+        var iterator = tracker.values_map.keyIterator();
+        while (iterator.next()) |name|
+            result.map.entries.appendAssumeCapacity(.{ .key = name.*, .value = {} });
+        std.sort.block(@TypeOf(result.map).Entry, result.map.entries.items, {}, struct {
+            fn lessThan(_: void, left: @TypeOf(result.map).Entry, right: @TypeOf(result.map).Entry) bool {
+                return left.key.lessThan(right.key);
+            }
+        }.lessThan);
         return result;
     }
 
@@ -120,4 +129,39 @@ test "SSA value tracker drops reassigned variables and keeps zero defaults" {
     try tracker.run(ast.root());
     try std.testing.expect(!tracker.values().contains(try YulName.init("x")));
     try std.testing.expect(tracker.values().contains(try YulName.init("y")));
+}
+
+test "SSA value tracker bulk set matches ordered insertion across allocation failures" {
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const Parser = @import("../asm_parser.zig").Parser;
+    const allocator = std.testing.allocator;
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(allocator, "{ let z := 1 let a let b, c let d, e := pair() z := 2 " ++
+        "function f(p) -> r, s { s := p let local := 1 } " ++
+        "if a { b := 3 let nested := a } " ++
+        "for { let i := 0 } 1 { i := 1 } { let body := i } }", "ssa-set.yul", &reporter, .{}, .{})).?;
+    defer ast.deinit();
+    var tracker = SSAValueTracker.init(allocator);
+    defer tracker.deinit();
+    try tracker.run(ast.root());
+    var expected: NameCollector.NameSet = .{};
+    defer expected.deinit(allocator);
+    var iterator = tracker.values_map.iterator();
+    while (iterator.next()) |entry| _ = try expected.insert(allocator, entry.key_ptr.*);
+    for ([_][]const u8{ "a", "c", "r", "local", "nested", "body" }) |name|
+        try std.testing.expect(expected.contains(try YulName.init(name)));
+    for ([_][]const u8{ "z", "b", "d", "e", "p", "s", "i" }) |name|
+        try std.testing.expect(!expected.contains(try YulName.init(name)));
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, block: *const AST.Block, reference: *const NameCollector.NameSet) !void {
+            var actual = try SSAValueTracker.ssaVariables(failing, block);
+            defer actual.deinit(failing);
+            try std.testing.expectEqualDeep(reference.map.items(), actual.map.items());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ ast.root(), &expected });
+    var empty = try SSAValueTracker.ssaVariables(allocator, &.{});
+    defer empty.deinit(allocator);
+    try std.testing.expect(empty.isEmpty());
 }

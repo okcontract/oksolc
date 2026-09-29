@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zlinter = @import("zlinter");
+const package = @import("build.zig.zon");
 
 const required_zig_version: std.SemanticVersion = .{
     .major = 0,
@@ -74,6 +75,7 @@ pub fn build(b: *std.Build) void {
         if (identity.len == 0) @panic("-Dcompiler-build-identity must not be empty");
 
     const build_options = b.addOptions();
+    build_options.addOption([]const u8, "oksolc_version", package.version);
     build_options.addOption([]const u8, "license_text", @embedFile("LICENSE.txt"));
     build_options.addOption(
         []const u8,
@@ -298,6 +300,7 @@ pub fn build(b: *std.Build) void {
         // fast enough for sustained fuzzing.
         .optimize = .ReleaseSafe,
         .imports = &.{
+            .{ .name = "build_options", .module = build_options_module },
             .{ .name = "big_int", .module = big_int_module },
             .{ .name = "cxx_compat", .module = cxx_compat_module },
         },
@@ -385,17 +388,16 @@ pub fn build(b: *std.Build) void {
     dependOnValidation(&cache_lifecycle_smoke.step, cli_identity_validation);
     b.step("cache-lifecycle-smoke", "Test persistent cache deletion, restart and recovery").dependOn(&cache_lifecycle_smoke.step);
     cli_smoke_step.dependOn(&cache_lifecycle_smoke.step);
-    const cli_version_command = b.addRunArtifact(cli);
-    isolateCliSmokeEnvironment(b, cli_version_command);
-    dependOnValidation(&cli_version_command.step, cli_identity_validation);
-    cli_version_command.addArg("version");
-    const cli_version_output = cli_version_command.captureStdOut(.{
-        .basename = "oksolc-version.txt",
+    const cli_version_smoke = b.addSystemCommand(&.{"python3"});
+    cli_version_smoke.addFileArg(b.path("test/zig/cli/version_smoke.py"));
+    cli_version_smoke.addArtifactArg(cli);
+    cli_version_smoke.addArgs(&.{
+        package.version,
+        if (compiler_build_identity_available) compiler_build_identity else "",
     });
-    const cli_version_check = b.addCheckFile(cli_version_output, .{
-        .expected_exact = "oksolc 0.8.36+zig\n",
-    });
-    cli_smoke_step.dependOn(&cli_version_check.step);
+    dependOnValidation(&cli_version_smoke.step, cli_identity_validation);
+    b.step("version-smoke", "Check product and solc-compatible version reporting").dependOn(&cli_version_smoke.step);
+    cli_smoke_step.dependOn(&cli_version_smoke.step);
 
     const cli_help_command = b.addRunArtifact(cli);
     isolateCliSmokeEnvironment(b, cli_help_command);
@@ -980,6 +982,7 @@ pub fn build(b: *std.Build) void {
     });
     libsolc_c_smoke_module.linkLibrary(libsolc_library);
     const run_libsolc_c_smoke = b.addRunArtifact(libsolc_c_smoke);
+    run_libsolc_c_smoke.addArg(b.fmt("0.8.36+oksolc.{s}", .{package.version}));
     dependOnValidation(&run_libsolc_c_smoke.step, libsolc_identity_validation);
     const libsolc_c_smoke_step = b.step(
         "libsolc-c-smoke",
@@ -997,6 +1000,10 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all Zig tests and smoke tests");
     test_step.dependOn(check_step);
+    // CI runs these in Debug and the compiler interfaces in ReleaseFast, so
+    // the broad suite does not optimize another copy of every test binary.
+    const unit_test_step = b.step("test-unit", "Run unit, ownership, and terminal tests without compiler smoke tests or fuzzers");
+    test_step.dependOn(unit_test_step);
     const terminal_probe = b.addExecutable(.{
         .name = "common-io-terminal-probe",
         .root_module = b.createModule(.{
@@ -1015,7 +1022,7 @@ pub fn build(b: *std.Build) void {
     terminal_smoke.addFileArg(b.path("test/zig/common_io_terminal_smoke.py"));
     terminal_smoke.addArtifactArg(terminal_probe);
     b.step("common-io-terminal-smoke", "Test terminal input and mode restoration").dependOn(&terminal_smoke.step);
-    test_step.dependOn(&terminal_smoke.step);
+    unit_test_step.dependOn(&terminal_smoke.step);
     const compatibility_step = b.step(
         "compatibility-check",
         "Compare clean compiler bytes with the frozen solc 0.8.36 corpus",
@@ -1062,7 +1069,7 @@ pub fn build(b: *std.Build) void {
         dependOnValidation(check_step, identity_validation);
         const run_tests = b.addRunArtifact(tests);
         dependOnValidation(&run_tests.step, identity_validation);
-        test_step.dependOn(&run_tests.step);
+        unit_test_step.dependOn(&run_tests.step);
         if (module == cli_module)
             b.step("test-cli", "Run CLI unit tests").dependOn(&run_tests.step);
     }
@@ -1087,12 +1094,12 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "cxx_compat", .module = cxx_compat_module },
             },
         }),
-        .filters = &.{ "ownership test inventory", "assembly inliner", "label ID dispenser", "peephole", "assembly CSE", "assembly immutable", "assembly append", "backend scratch", "stack diagnostic", "function grouper", "source locations", "source snippets", "escaped string content", "function specializer", "function analysis cache", "optimizer scratch retention", "optimizer debug snapshots", "name simplifier", "IR variable", "IR source", "SSA transform", "SSA reverser", "Yul stack owned printing", "Yul AST generated object", "assembly printing", "contract artifact", "statement remover", "profiler ", "for-loop init rewriter", "structural simplifier", "expression joiner", "expression splitter", "loop-invariant", "block flattener", "full inliner", "inline declarations", "linker ", "append rebases", "expression classes", "nested logical", "printing ", "CFG lowering", "transient optimizer", "unused store", "unused assignment", "unused parameter", "variable name cleaner", "conditional simplifier" },
+        .filters = &.{ "ownership test inventory", "assembly inliner", "label ID dispenser", "peephole", "assembly CSE", "assembly immutable", "assembly append", "backend scratch", "stack diagnostic", "function grouper", "source locations", "source snippets", "escaped string content", "function specializer", "function analysis cache", "call graph", "optimizer scratch retention", "optimizer debug snapshots", "name simplifier", "IR variable", "IR source", "SSA transform", "SSA value tracker", "SSA reverser", "Yul stack owned printing", "Yul AST generated object", "assembly printing", "contract artifact", "statement remover", "profiler ", "for-loop init rewriter", "structural simplifier", "expression joiner", "expression splitter", "loop-invariant", "block flattener", "full inliner", "inline declarations", "linker ", "append rebases", "expression classes", "nested logical", "printing ", "CFG lowering", "transient optimizer", "unused store", "unused assignment", "unused parameter", "variable name cleaner", "conditional simplifier" },
     });
     ownership_tests.stack_size = 32 * 1024 * 1024;
     check_step.dependOn(&ownership_tests.step);
     const run_ownership_tests = b.addRunArtifact(ownership_tests);
-    test_step.dependOn(&run_ownership_tests.step);
+    unit_test_step.dependOn(&run_ownership_tests.step);
     b.step("test-ownership", "Test compiler allocation failures and ownership transfers").dependOn(&run_ownership_tests.step);
 
     const structured_yul_step = b.step("test-structured-yul", "Test structured Yul ownership and solc artifact compatibility");
@@ -1118,7 +1125,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-yul-construction", "Test typed Yul construction independently of compiler integration").dependOn(&run_yul_construction.step);
     structured_yul_step.dependOn(&run_yul_construction.step);
     check_step.dependOn(&yul_construction_tests.step);
-    test_step.dependOn(&run_yul_construction.step);
+    unit_test_step.dependOn(&run_yul_construction.step);
     const structured_yul_tests = b.addTest(.{
         .root_module = compiler_module,
         .filters = &.{ "compiler module inventory", "source locations", "source snippets", "escaped string content", "Yul AST builder", "Yul AST template", "printer renders", "Yul stack", "AST copier", "object code transfer", "stack compression", "stack limit eva", "disambiguator", "function specializer", "object optimizer", "compiler session propagates cache OOM", "backend cache", "code size warnings", "structured Yul", "compiler session reloads optimized Yul", "compiler session reuses backend layers", "Yul simplification", "expression simplifier", "constant EVM arithmetic", "expression classes" },

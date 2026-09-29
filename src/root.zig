@@ -18,6 +18,8 @@ pub const libyul = compiler.libyul;
 pub const libsolidity = compiler.libsolidity;
 pub const libsolc = compiler.libsolc;
 pub const incremental = compiler.incremental;
+/// Independent oksolc product version. See baseline.version for the Solidity target.
+pub const version = libsolidity.@"interface/version".OksolcVersion;
 pub const StandardJsonDispatcher = libsolc.libsolc.Dispatcher;
 /// Supported long-lived in-memory Standard JSON compiler session.
 pub const CompilerSession = incremental.CompilerSession;
@@ -28,7 +30,7 @@ pub const SqliteCompilerSessionOptions = incremental.SqliteCompilerSessionOption
 pub const CompilerSessionStatistics = incremental.SessionStatistics;
 
 pub const baseline = struct {
-    pub const version = "0.8.36";
+    pub const version = libsolidity.@"interface/version".VersionNumber;
     pub const zig_version = "0.16.0";
 };
 

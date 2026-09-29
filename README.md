@@ -34,6 +34,33 @@ JSON, creation bytecode, diagnostics, and deterministic output.
 The `compile` command enables the optimizer with 200 runs. Use `standard-json`
 when exact control of compiler settings or output selection is required.
 
+## Versions and releases
+
+oksolc has an independent product version; the Solidity version identifies its
+compatibility target. See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+```console
+$ oksolc version
+oksolc 0.1.4-dev (Solidity 0.8.36)
+$ oksolc --version
+oksolc, a solidity compiler commandline interface
+Version: 0.8.36+oksolc.0.1.4-dev
+```
+
+`oksolc version --json` returns `version` (the product version),
+`solidity_version` (the compatibility target), `compatibility_version` (the
+Solidity SemVer with oksolc build metadata), and `build_identity` (the compiler
+content identity, or `null` if unavailable). Include this output in bug reports.
+The public Zig module exposes the product version as `solidity.version` and the
+Solidity target as `solidity.baseline.version`.
+
+`--version` and the C ABI's `solidity_version()` retain a Solidity-compatible
+SemVer for tools such as Foundry. Even development releases put the oksolc
+version after `+`, so the Solidity target is still treated as a release.
+Contract metadata and CBOR keep the pinned reference compiler identity to
+preserve output and bytecode compatibility. Use the product version for upgrade
+comparisons; SemVer precedence ignores the build metadata after `+`.
+
 ## Requirements
 
 - Zig `0.16.0`
@@ -246,21 +273,20 @@ cache-busy-timeout-ms = 250
 
 ## Development
 
-Run tests in Debug and ReleaseSafe, then check formatting and lint:
+CI runs unit and ownership tests in Debug and compiler interface and output
+checks in ReleaseFast, in parallel. Debug retains runtime safety checks and
+avoids optimizing every unit-test binary. Run the same checks locally:
 
 ```sh
-zig build test
-zig build test -Doptimize=ReleaseSafe
+zig build test-unit -Doptimize=Debug
+zig build cli-smoke libsolc-c-smoke compatibility-check -Doptimize=ReleaseFast
 zig build fmt-check
 zig build lint
 ```
 
-[GitHub CI](.github/workflows/ci.yml) runs these checks in Debug and ReleaseSafe
-on pushes and pull requests, including the frozen compatibility corpus, CLI
-cache lifecycle regressions, and browser type checks. The
-[fuzz workflow](.github/workflows/fuzz.yml) runs bounded fuzzing on relevant
-changes and a longer campaign every week. Both workflows can also be started
-manually from GitHub Actions.
+The separate fuzz workflow runs in ReleaseSafe. `zig build test` still runs
+the combined suite, including compiler smoke tests, compatibility checks, and
+fuzz seeds; use `-Doptimize=ReleaseSafe` for a full optimized safety-check run.
 
 CI validates workflow definitions with actionlint. Run the same check locally
 before changing the workflows:

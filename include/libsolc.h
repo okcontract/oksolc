@@ -62,7 +62,7 @@ typedef struct solidity_session solidity_session;
 /// The pointer returned must NOT be freed by the caller.
 char const* solidity_license() SOLC_NOEXCEPT;
 
-/// Returns the compiler version.
+/// Returns the Solidity-compatible version with the oksolc product version in build metadata.
 ///
 /// The pointer returned must NOT be freed by the caller.
 char const* solidity_version() SOLC_NOEXCEPT;
