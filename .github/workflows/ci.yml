@@ -27,9 +27,21 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
 
   test:
-    name: Tests
+    name: Tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Debug keeps safety checks without optimizing every unit-test binary.
+          - suite: unit
+            optimize: Debug
+            targets: test-unit
+          # Exercise the production compiler separately, in parallel.
+          - suite: compiler
+            optimize: ReleaseFast
+            targets: cli-smoke libsolc-c-smoke compatibility-check
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,7 +57,7 @@ jobs:
       # Set these after setup-zig, which exports its own Zig cache paths.
       - name: Configure test directories
         env:
-          CI_CACHE_ROOT: ${{ runner.temp }}/oksolc-ci/test
+          CI_CACHE_ROOT: ${{ runner.temp }}/oksolc-ci/${{ matrix.suite }}
         run: |
           printf '%s\n' \
             "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
@@ -60,21 +72,19 @@ jobs:
           path: |
             ${{ env.ZIG_LOCAL_CACHE_DIR }}
             ${{ env.ZIG_GLOBAL_CACHE_DIR }}
-          key: zig-ci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-${{ github.sha }}
+          key: zig-ci-${{ matrix.suite }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-ci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-
+            zig-ci-${{ matrix.suite }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-
 
       - name: Install pinned browser toolchain
         run: npm install --global "typescript@$(cat src/cli/browser/typescript-version)" "bun@$(cat src/cli/browser/bun-version)"
 
       - name: Check formatting, lint, and browser validation
+        if: matrix.suite == 'unit'
         run: |
-          zig build fmt-check lint test-browser-types -Doptimize=ReleaseSafe -j2 --summary all
+          zig build fmt-check lint test-browser-types -j2 --summary all
           bun test ./test/zig/cli/browser_build.test.js
 
-      # The test step includes CLI smoke tests and the frozen compatibility corpus.
-      - name: Run full ReleaseSafe suite
-        run: zig build test -Doptimize=ReleaseSafe -j2 --summary all
-
-      - name: Check ReleaseFast CLI, C ABI, and compiler output
-        run: zig build cli-smoke libsolc-c-smoke compatibility-check -Doptimize=ReleaseFast -j2 --summary all
+      # Fuzz seed tests and mutations already run in the separate Fuzz workflow.
+      - name: Run ${{ matrix.suite }} tests
+        run: zig build ${{ matrix.targets }} -Doptimize=${{ matrix.optimize }} -j2 --summary all

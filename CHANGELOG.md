@@ -22,9 +22,10 @@ Development version: `0.1.4-dev`. Solidity compatibility target: `0.8.36`.
 
 ### Changed
 
-- Consolidate CI into a full ReleaseSafe suite, focused ReleaseFast interface
-  and compatibility checks, and one fuzz job. Pushes and pull requests share
-  the same steps.
+- Run Debug unit and ownership tests alongside ReleaseFast compiler interface
+  and compatibility checks in parallel CI jobs, avoiding repeated optimized
+  test builds. Keep ReleaseSafe fuzzing in its own job. Pushes and pull requests
+  share the same steps.
 
 ### Performance
 

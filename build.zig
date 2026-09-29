@@ -1000,6 +1000,10 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all Zig tests and smoke tests");
     test_step.dependOn(check_step);
+    // CI runs these in Debug and the compiler interfaces in ReleaseFast, so
+    // the broad suite does not optimize another copy of every test binary.
+    const unit_test_step = b.step("test-unit", "Run unit, ownership, and terminal tests without compiler smoke tests or fuzzers");
+    test_step.dependOn(unit_test_step);
     const terminal_probe = b.addExecutable(.{
         .name = "common-io-terminal-probe",
         .root_module = b.createModule(.{
@@ -1018,7 +1022,7 @@ pub fn build(b: *std.Build) void {
     terminal_smoke.addFileArg(b.path("test/zig/common_io_terminal_smoke.py"));
     terminal_smoke.addArtifactArg(terminal_probe);
     b.step("common-io-terminal-smoke", "Test terminal input and mode restoration").dependOn(&terminal_smoke.step);
-    test_step.dependOn(&terminal_smoke.step);
+    unit_test_step.dependOn(&terminal_smoke.step);
     const compatibility_step = b.step(
         "compatibility-check",
         "Compare clean compiler bytes with the frozen solc 0.8.36 corpus",
@@ -1065,7 +1069,7 @@ pub fn build(b: *std.Build) void {
         dependOnValidation(check_step, identity_validation);
         const run_tests = b.addRunArtifact(tests);
         dependOnValidation(&run_tests.step, identity_validation);
-        test_step.dependOn(&run_tests.step);
+        unit_test_step.dependOn(&run_tests.step);
         if (module == cli_module)
             b.step("test-cli", "Run CLI unit tests").dependOn(&run_tests.step);
     }
@@ -1095,7 +1099,7 @@ pub fn build(b: *std.Build) void {
     ownership_tests.stack_size = 32 * 1024 * 1024;
     check_step.dependOn(&ownership_tests.step);
     const run_ownership_tests = b.addRunArtifact(ownership_tests);
-    test_step.dependOn(&run_ownership_tests.step);
+    unit_test_step.dependOn(&run_ownership_tests.step);
     b.step("test-ownership", "Test compiler allocation failures and ownership transfers").dependOn(&run_ownership_tests.step);
 
     const structured_yul_step = b.step("test-structured-yul", "Test structured Yul ownership and solc artifact compatibility");
@@ -1121,7 +1125,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-yul-construction", "Test typed Yul construction independently of compiler integration").dependOn(&run_yul_construction.step);
     structured_yul_step.dependOn(&run_yul_construction.step);
     check_step.dependOn(&yul_construction_tests.step);
-    test_step.dependOn(&run_yul_construction.step);
+    unit_test_step.dependOn(&run_yul_construction.step);
     const structured_yul_tests = b.addTest(.{
         .root_module = compiler_module,
         .filters = &.{ "compiler module inventory", "source locations", "source snippets", "escaped string content", "Yul AST builder", "Yul AST template", "printer renders", "Yul stack", "AST copier", "object code transfer", "stack compression", "stack limit eva", "disambiguator", "function specializer", "object optimizer", "compiler session propagates cache OOM", "backend cache", "code size warnings", "structured Yul", "compiler session reloads optimized Yul", "compiler session reuses backend layers", "Yul simplification", "expression simplifier", "constant EVM arithmetic", "expression classes" },

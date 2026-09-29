@@ -273,17 +273,20 @@ cache-busy-timeout-ms = 250
 
 ## Development
 
-Run the full suite in ReleaseSafe, check the ReleaseFast compiler interfaces
-and output, then check formatting and lint:
+CI runs unit and ownership tests in Debug and compiler interface and output
+checks in ReleaseFast, in parallel. Debug retains runtime safety checks and
+avoids optimizing every unit-test binary. Run the same checks locally:
 
 ```sh
-zig build test -Doptimize=ReleaseSafe
+zig build test-unit -Doptimize=Debug
 zig build cli-smoke libsolc-c-smoke compatibility-check -Doptimize=ReleaseFast
 zig build fmt-check
 zig build lint
 ```
 
-Use `zig build test` for an unoptimized Debug run when investigating failures.
+The separate fuzz workflow runs in ReleaseSafe. `zig build test` still runs
+the combined suite, including compiler smoke tests, compatibility checks, and
+fuzz seeds; use `-Doptimize=ReleaseSafe` for a full optimized safety-check run.
 
 CI validates workflow definitions with actionlint. Run the same check locally
 before changing the workflows:
