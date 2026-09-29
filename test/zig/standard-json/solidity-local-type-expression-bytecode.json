@@ -1,0 +1,15 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "C.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\ncontract C { int constant a = 7; int constant b = 3; int constant c = a / b; int constant d = (-a) / b; function f() external pure returns (uint, uint, uint) { uint[c] memory x; uint[-d] memory y; uint[-d] memory z = [uint(1), uint(2)]; return (x.length, y.length, z[0]); } }"
+    }
+  },
+  "settings": {
+    "optimizer": {"enabled": true, "runs": 200},
+    "viaIR": true,
+    "outputSelection": {
+      "*": {"*": ["evm.bytecode.object", "evm.deployedBytecode.object"]}
+    }
+  }
+}

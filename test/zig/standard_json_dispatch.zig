@@ -27,6 +27,18 @@ test "calldata reads and checked division preserve solc helper order and bytecod
     }
 }
 
+test "local type expressions preserve solc evaluation order and bytecode" {
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .input = @embedFile("standard-json/solidity-local-type-expression-bytecode.json"),
+    });
+    defer output.deinit();
+    try standard_json.compareExact(
+        @embedFile("standard-json/expected/solidity-local-type-expression-bytecode.json"),
+        output.bytes,
+    );
+}
+
 test "using-for reference receivers preserve calldata memory and storage locations" {
     inline for (.{
         "solidity-using-for-reference-locations",
