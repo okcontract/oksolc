@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 - 2026-09-30
 
-Development version: `0.1.4-dev`. Solidity compatibility target: `0.8.36`.
+Solidity compatibility target: `0.8.36`.
 
 ### Added
 
@@ -22,6 +22,8 @@ Development version: `0.1.4-dev`. Solidity compatibility target: `0.8.36`.
 
 ### Changed
 
+- Disable the optional web browser by default. Enable it with `-Dbrowser=true`;
+  ordinary builds no longer require Bun or TypeScript.
 - Run Debug unit and ownership tests alongside ReleaseFast compiler interface
   and compatibility checks in parallel CI jobs, avoiding repeated optimized
   test builds. Keep ReleaseSafe fuzzing in its own job. Pushes and pull requests

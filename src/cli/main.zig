@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const clap = @import("clap");
 const solidity = @import("solidity");
 const toml = @import("toml");
+const browser_enabled = @import("cli_options").browser_enabled;
 const ProjectSources = @import("project_sources.zig");
 const BrowserLive = @import("browser/live.zig").Status;
 
@@ -453,7 +454,15 @@ fn standardJsonCommand(
     );
 }
 
+const browser_disabled_message = "The web browser is disabled in this build. Rebuild with zig build -Dbrowser=true.\n";
+
+fn browserDisabled(io: std.Io) !void {
+    try std.Io.File.stderr().writeStreamingAll(io, browser_disabled_message);
+    return error.BrowserDisabled;
+}
+
 fn browseCommand(init: std.process.Init, iterator: *std.process.Args.Iterator, global_no_cache: bool) !void {
+    if (!browser_enabled) return browserDisabled(init.io);
     const BrowserStore = @import("browser/store.zig").Store;
     const BrowserServer = @import("browser/server.zig");
     const Capture = @import("browser/capture.zig").Capture;
@@ -574,6 +583,7 @@ fn serveCommand(
     defer result.deinit();
 
     if (result.args.help != 0) return writeServeHelp(init.io);
+    if (!browser_enabled and result.args.browse != 0) return browserDisabled(init.io);
     if (result.args.stdio != 0 and (result.args.@"source-path" != null or
         result.args.@"poll-ms" != null or result.args.browse != 0))
         return error.ConflictingServeModes;
@@ -627,7 +637,7 @@ fn serveCommand(
             .allow_paths = result.args.@"allow-paths",
         });
         defer loader.deinit();
-        var store: ?@import("browser/store.zig").Store = if (result.args.browse != 0) store: {
+        var store: ?@import("browser/store.zig").Store = if (browser_enabled and result.args.browse != 0) store: {
             const database_path = try browserDatabasePathAlloc(init, result.args.database, options.project_root);
             defer init.gpa.free(database_path);
             break :store try @import("browser/store.zig").Store.open(init.gpa, init.io, database_path);
@@ -664,7 +674,7 @@ fn serveCommand(
             .jobs = jobs,
         };
         defer service.deinit();
-        if (store) |*value| {
+        if (browser_enabled) if (store) |*value| {
             var future = try init.io.concurrent(SourceService.run, .{&service});
             const browser_result = @import("browser/server.zig").run(init.gpa, init.io, value, port, &live);
             // Join the watcher before propagating either task's result.
@@ -674,7 +684,7 @@ fn serveCommand(
                 error.Canceled => {},
                 else => return err,
             };
-        }
+        };
         try service.update();
         return service.run();
     }
@@ -2717,6 +2727,7 @@ fn writeMainHelp(io: std.Io) !void {
         \\Source commands resolve project-relative names and remappings.txt.
         \\
     );
+    if (!browser_enabled) try std.Io.File.stdout().writeStreamingAll(io, browser_disabled_message);
 }
 
 fn writeCompileHelp(io: std.Io) !void {
@@ -2747,6 +2758,7 @@ fn writeServeHelp(io: std.Io) !void {
             "--stdio selects Content-Length framed requests instead.\n\n",
     );
     try clap.helpToFile(io, .stdout(), clap.Help, &serve_params, .{});
+    if (!browser_enabled) try std.Io.File.stdout().writeStreamingAll(io, browser_disabled_message);
 }
 
 fn writeWatchHelp(io: std.Io) !void {
@@ -3741,7 +3753,7 @@ test {
     _ = @import("install.zig");
     _ = ProjectSources;
     _ = @import("browser/capture.zig");
-    _ = @import("browser/server.zig");
+    if (browser_enabled) _ = @import("browser/server.zig");
     _ = @import("browser/live.zig");
     _ = @import("browser/resume.zig");
 }

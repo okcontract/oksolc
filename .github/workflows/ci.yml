@@ -38,10 +38,12 @@ jobs:
           - suite: unit
             optimize: Debug
             targets: test-unit
+            browser: true
           # Exercise the production compiler separately, in parallel.
           - suite: compiler
             optimize: ReleaseFast
             targets: cli-smoke libsolc-c-smoke compatibility-check
+            browser: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -77,6 +79,7 @@ jobs:
             zig-ci-${{ matrix.suite }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-
 
       - name: Install pinned browser toolchain
+        if: matrix.browser
         run: npm install --global "typescript@$(cat src/cli/browser/typescript-version)" "bun@$(cat src/cli/browser/bun-version)"
 
       - name: Check formatting, lint, and browser validation
@@ -87,4 +90,4 @@ jobs:
 
       # Fuzz seed tests and mutations already run in the separate Fuzz workflow.
       - name: Run ${{ matrix.suite }} tests
-        run: zig build ${{ matrix.targets }} -Doptimize=${{ matrix.optimize }} -j2 --summary all
+        run: zig build ${{ matrix.targets }} -Dbrowser=${{ matrix.browser }} -Doptimize=${{ matrix.optimize }} -j2 --summary all

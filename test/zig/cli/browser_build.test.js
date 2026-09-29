@@ -33,25 +33,37 @@ test('browser build enforces strict types, cache invalidation, deterministic emb
     await writeFile(join(directory, 'build.zig'), `// Copyright (C) 2026 OKcontract Pte. Ltd.
 const std = @import("std");
 pub fn build(b: *std.Build) void {
+    const browser = b.option(bool, "browser", "Include the web browser") orelse false;
     const module = b.createModule(.{ .root_source_file = b.path("main.zig"), .target = b.standardTargetOptions(.{}), .optimize = .ReleaseSafe });
-    @import("build_support/browser.zig").build(b, module);
+    const options = b.addOptions();
+    options.addOption(bool, "browser", browser);
+    module.addOptions("options", options);
+    @import("build_support/browser.zig").build(b, if (browser) module else null);
     b.installArtifact(b.addExecutable(.{ .name = "embed-check", .root_module = module }));
 }
 `);
     await writeFile(join(directory, 'main.zig'), `// Copyright (C) 2026 OKcontract Pte. Ltd.
-pub fn main() u8 { return if (@embedFile("browser_app").len > 0) 0 else 1; }
+pub fn main() u8 {
+    if (!@import("options").browser) return 0;
+    return if (@embedFile("browser_app").len > 0) 0 else 1;
+}
 `);
+    const missingTools = ['-Dtsc=' + join(directory, 'missing-tsc'), '-Dbun=' + join(directory, 'missing-bun')];
+    await build(missingTools);
+    await build(['-Dbrowser=false', ...missingTools]);
+    await build(['-Dbrowser=true', ...missingTools], false);
     await build(['build-browser']);
     const bundlePath = join(directory, 'zig-out/browser/app.js');
     const originalBundle = await readFile(bundlePath, 'utf8');
     assert.ok(originalBundle.includes('Compiler diagnostics'));
     assert.ok(!/from ["']\.\//.test(originalBundle), 'The app must be a self-contained bundle');
-    await build();
+    await build(['-Dbrowser=true']);
 
     const notesPath = join(sources, 'summary.ts');
     const notes = await readFile(notesPath, 'utf8');
     await writeFile(notesPath, notes + '\nconst invalid: string = 1;\n');
-    assert.match(await build([], false), /not assignable/);
+    await build(missingTools);
+    assert.match(await build(['-Dbrowser=true'], false), /not assignable/);
     assert.equal(await readFile(bundlePath, 'utf8'), originalBundle);
     await writeFile(notesPath, notes.replace('Compiler diagnostics across this compilation', 'Frontend cache invalidation marker.'));
     await build(['build-browser']);
@@ -67,7 +79,7 @@ const items: string[] = [];
 export const indexed: string = items[0];
 export const optional: { value?: string } = { value: undefined };
 `);
-    const strictErrors = await build([], false);
+    const strictErrors = await build(['-Dbrowser=true'], false);
     assert.match(strictErrors, /new-module/);
     assert.match(strictErrors, /TS7006/);
     assert.match(strictErrors, /TS2375/);
