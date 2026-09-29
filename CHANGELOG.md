@@ -17,6 +17,8 @@ Development version: `0.1.4-dev`. Solidity compatibility target: `0.8.36`.
 
 - Pass compiler build options to the standalone parser fuzz target so it can
   report the new oksolc version and compile in CI.
+- Avoid duplicate CI and fuzz runs for pull requests by limiting push triggers
+  to `main`.
 
 ### Changed
 
