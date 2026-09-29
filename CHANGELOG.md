@@ -13,6 +13,17 @@ Development version: `0.1.4-dev`. Solidity compatibility target: `0.8.36`.
   build identities, plus version-command help.
 - This retrospective changelog and the release procedure in the README.
 
+### Fixed
+
+- Pass compiler build options to the standalone parser fuzz target so it can
+  report the new oksolc version and compile in CI.
+
+### Changed
+
+- Consolidate CI into a full ReleaseSafe suite, focused ReleaseFast interface
+  and compatibility checks, and one fuzz job. Pushes and pull requests share
+  the same steps.
+
 ### Performance
 
 - Generate the lexer keyword lookup at compile time and streamline parser

@@ -12,58 +12,39 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  ZIG_VERSION: 0.16.0
-
 jobs:
   workflow-lint:
     name: Workflow syntax
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check out workflow definitions
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
 
-  trusted:
-    if: github.event_name != 'pull_request'
-    name: Trusted / ${{ matrix.name }}
+  test:
+    name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Debug, format, lint
-            cache_scope: debug
-            optimize: Debug
-            quality: true
-          - name: ReleaseSafe
-            cache_scope: release-safe
-            optimize: ReleaseSafe
-            quality: false
     steps:
-      - name: Check out trusted revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # The Zig version comes from build.zig.zon.
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: ${{ env.ZIG_VERSION }}
           use-cache: false
-          use-tool-cache: false
 
-      # setup-zig exports its own cache paths; override them after installation.
-      # Trusted jobs never restore from or write to the untrusted namespace.
-      - name: Configure trusted cache directories
+      # Cache-enabled CLI tests need their configuration outside the checkout.
+      # Set these after setup-zig, which exports its own Zig cache paths.
+      - name: Configure test directories
         env:
-          CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/trusted/${{ matrix.cache_scope }}
+          CI_CACHE_ROOT: ${{ runner.temp }}/oksolc-ci/test
         run: |
           printf '%s\n' \
             "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
@@ -71,87 +52,28 @@ jobs:
             "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
             "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
 
-      - name: Restore trusted Zig cache
+      - name: Cache Zig builds
+        if: github.event_name != 'pull_request'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ env.ZIG_LOCAL_CACHE_DIR }}
             ${{ env.ZIG_GLOBAL_CACHE_DIR }}
-          key: zig-v1-trusted-${{ runner.os }}-${{ runner.arch }}-${{ matrix.cache_scope }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-${{ github.sha }}
+          key: zig-ci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-v1-trusted-${{ runner.os }}-${{ runner.arch }}-${{ matrix.cache_scope }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-
+            zig-ci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-
 
       - name: Install pinned browser toolchain
         run: npm install --global "typescript@$(cat src/cli/browser/typescript-version)" "bun@$(cat src/cli/browser/bun-version)"
 
-      - name: Check browser types and API validation
+      - name: Check formatting, lint, and browser validation
         run: |
-          zig build typecheck-browser test-browser-types -j4 --summary all
+          zig build fmt-check lint test-browser-types -Doptimize=ReleaseSafe -j2 --summary all
           bun test ./test/zig/cli/browser_build.test.js
 
-      - name: Run Debug tests, frozen compatibility, formatting, and lint
-        if: matrix.quality
-        run: zig build fmt-check lint test compatibility-check -Doptimize=${{ matrix.optimize }} -j2 --summary all
+      # The test step includes CLI smoke tests and the frozen compatibility corpus.
+      - name: Run full ReleaseSafe suite
+        run: zig build test -Doptimize=ReleaseSafe -j2 --summary all
 
-      - name: Run ReleaseSafe tests and frozen compatibility
-        if: ${{ !matrix.quality }}
-        run: zig build test compatibility-check -Doptimize=${{ matrix.optimize }} -j2 --summary all
-
-  untrusted:
-    if: github.event_name == 'pull_request'
-    name: Untrusted / ${{ matrix.name }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Debug, format, lint
-            cache_scope: debug
-            optimize: Debug
-            quality: true
-          - name: ReleaseSafe
-            cache_scope: release-safe
-            optimize: ReleaseSafe
-            quality: false
-    steps:
-      - name: Check out pull request merge revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-          use-tool-cache: false
-
-      # Pull requests execute contributor-controlled build code. They use
-      # disjoint roots and no cache action, so no PR state is restored or saved.
-      # Override the cache paths exported by setup-zig.
-      - name: Configure pull request cache directories
-        env:
-          CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/untrusted/${{ matrix.cache_scope }}
-        run: |
-          printf '%s\n' \
-            "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
-            "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
-            "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
-            "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
-
-      - name: Install pinned browser toolchain
-        run: npm install --global "typescript@$(cat src/cli/browser/typescript-version)" "bun@$(cat src/cli/browser/bun-version)"
-
-      - name: Check browser types and API validation
-        run: |
-          zig build typecheck-browser test-browser-types -j4 --summary all
-          bun test ./test/zig/cli/browser_build.test.js
-
-      - name: Run Debug tests, frozen compatibility, formatting, and lint
-        if: matrix.quality
-        run: zig build fmt-check lint test compatibility-check -Doptimize=${{ matrix.optimize }} -j2 --summary all
-
-      - name: Run ReleaseSafe tests and frozen compatibility
-        if: ${{ !matrix.quality }}
-        run: zig build test compatibility-check -Doptimize=${{ matrix.optimize }} -j2 --summary all
+      - name: Check ReleaseFast CLI, C ABI, and compiler output
+        run: zig build cli-smoke libsolc-c-smoke compatibility-check -Doptimize=ReleaseFast -j2 --summary all

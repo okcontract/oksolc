@@ -300,6 +300,7 @@ pub fn build(b: *std.Build) void {
         // fast enough for sustained fuzzing.
         .optimize = .ReleaseSafe,
         .imports = &.{
+            .{ .name = "build_options", .module = build_options_module },
             .{ .name = "big_int", .module = big_int_module },
             .{ .name = "cxx_compat", .module = cxx_compat_module },
         },

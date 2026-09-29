@@ -7,6 +7,7 @@ on:
       - .zigversion
       - build.zig
       - build.zig.zon
+      - build_support/**
       - include/**
       - src/**
       - test/fuzz/**
@@ -17,6 +18,7 @@ on:
       - .zigversion
       - build.zig
       - build.zig.zon
+      - build_support/**
       - include/**
       - src/**
       - test/fuzz/**
@@ -32,36 +34,29 @@ concurrency:
   group: fuzz-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  ZIG_VERSION: 0.16.0
-
 jobs:
-  trusted:
-    if: github.event_name != 'pull_request'
-    name: Trusted fuzz
+  fuzz:
+    name: Fuzz
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      FUZZ_ITERATIONS: ${{ github.event_name == 'schedule' && '100K' || '10K' }}
-      ADAPTER_FUZZ_RUNS: ${{ github.event_name == 'schedule' && '100000' || '10000' }}
+      FUZZ_ITERATIONS: ${{ github.event_name == 'schedule' && '100K' || github.event_name == 'pull_request' && '1K' || '10K' }}
+      ADAPTER_FUZZ_RUNS: ${{ github.event_name == 'schedule' && '100000' || github.event_name == 'pull_request' && '1000' || '10000' }}
       ADAPTER_FUZZ_SEED: ${{ github.run_id }}
     steps:
-      - name: Check out trusted revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # The Zig version comes from build.zig.zon.
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: ${{ env.ZIG_VERSION }}
           use-cache: false
-          use-tool-cache: false
 
-      # setup-zig exports its own cache paths; override them after installation.
-      - name: Configure trusted fuzz cache directories
+      - name: Configure fuzz directories
         env:
-          CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/trusted/fuzz
+          CI_CACHE_ROOT: ${{ runner.temp }}/oksolc-ci/fuzz
         run: |
           printf '%s\n' \
             "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
@@ -69,21 +64,21 @@ jobs:
             "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
             "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
 
-      - name: Restore trusted fuzz cache
+      - name: Cache Zig builds
+        if: github.event_name != 'pull_request'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ env.ZIG_LOCAL_CACHE_DIR }}
             ${{ env.ZIG_GLOBAL_CACHE_DIR }}
-          key: zig-v1-trusted-${{ runner.os }}-${{ runner.arch }}-fuzz-${{ hashFiles('.zigversion', 'build.zig.zon') }}-${{ github.run_id }}
+          key: zig-fuzz-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-${{ github.run_id }}
           restore-keys: |
-            zig-v1-trusted-${{ runner.os }}-${{ runner.arch }}-fuzz-${{ hashFiles('.zigversion', 'build.zig.zon') }}-
+            zig-fuzz-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zigversion', 'build.zig.zon') }}-
 
       - name: Run bounded native and sanitizer fuzzing
         run: zig build fuzz -Doptimize=ReleaseSafe -Dadapter-fuzz-runs="${ADAPTER_FUZZ_RUNS}" -Dadapter-fuzz-seed="${ADAPTER_FUZZ_SEED}" --fuzz="${FUZZ_ITERATIONS}" -j2 --summary all
 
-      # Keep the checkpoint through ASan/UBSan/LSan process teardown. This
-      # parent step runs only after the complete fuzz command exits cleanly.
+      # Delete only after the fuzz command and sanitizer teardown both succeed.
       - name: Remove successful C fuzz checkpoint
         run: rm -f -- "${ZIG_LOCAL_CACHE_DIR}/f/json-adapter-current-input"
 
@@ -91,59 +86,7 @@ jobs:
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: trusted-fuzz-crashes-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ env.ZIG_LOCAL_CACHE_DIR }}/f/crash
-            ${{ env.ZIG_LOCAL_CACHE_DIR }}/f/json-adapter-current-input
-          if-no-files-found: ignore
-          retention-days: 30
-
-  untrusted:
-    if: github.event_name == 'pull_request'
-    name: Untrusted fuzz
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      FUZZ_ITERATIONS: 1K
-      ADAPTER_FUZZ_RUNS: 1000
-      ADAPTER_FUZZ_SEED: ${{ github.run_id }}
-    steps:
-      - name: Check out pull request merge revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-          use-tool-cache: false
-
-      # Override the cache paths exported by setup-zig.
-      - name: Configure pull request fuzz cache directories
-        env:
-          CI_CACHE_ROOT: ${{ runner.temp }}/solidity-zig-cache/untrusted/fuzz
-        run: |
-          printf '%s\n' \
-            "ZIG_LOCAL_CACHE_DIR=$CI_CACHE_ROOT/local" \
-            "ZIG_GLOBAL_CACHE_DIR=$CI_CACHE_ROOT/global" \
-            "XDG_CACHE_HOME=$CI_CACHE_ROOT/xdg-cache" \
-            "XDG_CONFIG_HOME=$CI_CACHE_ROOT/xdg-config" >> "$GITHUB_ENV"
-
-      - name: Run bounded native and sanitizer fuzzing
-        run: zig build fuzz -Doptimize=ReleaseSafe -Dadapter-fuzz-runs="${ADAPTER_FUZZ_RUNS}" -Dadapter-fuzz-seed="${ADAPTER_FUZZ_SEED}" --fuzz="${FUZZ_ITERATIONS}" -j2 --summary all
-
-      # Keep the checkpoint through ASan/UBSan/LSan process teardown. This
-      # parent step runs only after the complete fuzz command exits cleanly.
-      - name: Remove successful C fuzz checkpoint
-        run: rm -f -- "${ZIG_LOCAL_CACHE_DIR}/f/json-adapter-current-input"
-
-      - name: Upload fuzz crash reproducers
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: untrusted-fuzz-crashes-${{ github.run_id }}-${{ github.run_attempt }}
+          name: fuzz-crashes-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.ZIG_LOCAL_CACHE_DIR }}/f/crash
             ${{ env.ZIG_LOCAL_CACHE_DIR }}/f/json-adapter-current-input

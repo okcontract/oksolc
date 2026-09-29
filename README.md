@@ -273,21 +273,17 @@ cache-busy-timeout-ms = 250
 
 ## Development
 
-Run tests in Debug and ReleaseSafe, then check formatting and lint:
+Run the full suite in ReleaseSafe, check the ReleaseFast compiler interfaces
+and output, then check formatting and lint:
 
 ```sh
-zig build test
 zig build test -Doptimize=ReleaseSafe
+zig build cli-smoke libsolc-c-smoke compatibility-check -Doptimize=ReleaseFast
 zig build fmt-check
 zig build lint
 ```
 
-[GitHub CI](.github/workflows/ci.yml) runs these checks in Debug and ReleaseSafe
-on pushes and pull requests, including the frozen compatibility corpus, CLI
-cache lifecycle regressions, and browser type checks. The
-[fuzz workflow](.github/workflows/fuzz.yml) runs bounded fuzzing on relevant
-changes and a longer campaign every week. Both workflows can also be started
-manually from GitHub Actions.
+Use `zig build test` for an unoptimized Debug run when investigating failures.
 
 CI validates workflow definitions with actionlint. Run the same check locally
 before changing the workflows:
