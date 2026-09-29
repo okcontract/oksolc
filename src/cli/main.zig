@@ -1336,6 +1336,7 @@ fn versionCommand(
 ) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help  Display version-command help.
+        \\--json      Display product, Solidity compatibility, and build identities as JSON.
         \\
     );
     var diagnostic: clap.Diagnostic = .{};
@@ -1351,20 +1352,33 @@ fn versionCommand(
     };
     defer result.deinit();
 
+    if (result.args.help != 0) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, "usage: oksolc version [--json]\n\n");
+        return clap.helpToFile(init.io, .stdout(), clap.Help, &params, .{});
+    }
+    if (result.args.json != 0) {
+        const version = solidity.libsolidity.@"interface/version";
+        return writeJsonLine(init, .{
+            .version = version.OksolcVersion,
+            .solidity_version = version.VersionNumber,
+            .compatibility_version = version.VersionString,
+            .build_identity = version.BuildIdentity,
+        });
+    }
     try writeVersion(init, false);
 }
 
 fn writeVersion(init: std.process.Init, solc_compatible: bool) !void {
-    const version = solidity.libsolidity.@"interface/version".VersionString;
+    const version = solidity.libsolidity.@"interface/version";
     var buffer: [256]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);
     if (solc_compatible)
         try writer.interface.print(
             "oksolc, a solidity compiler commandline interface\nVersion: {s}\n",
-            .{version},
+            .{version.VersionString},
         )
     else
-        try writer.interface.print("oksolc {s}\n", .{version});
+        try writer.interface.print("oksolc {s} (Solidity {s})\n", .{ version.OksolcVersion, version.VersionNumber });
     try writer.interface.flush();
 }
 
@@ -2696,7 +2710,7 @@ fn writeMainHelp(io: std.Io) !void {
         \\  oksolc cache prune [--max-bytes SIZE] [--max-entries ENTRIES]
         \\  oksolc install [--base-path PATH] [--jobs JOBS]
         \\  oksolc clean
-        \\  oksolc version
+        \\  oksolc version [--json]
         \\
         \\`compile` always uses via-IR with optimization enabled. Use
         \\`standard-json` for explicit artifact and frontend-only requests.

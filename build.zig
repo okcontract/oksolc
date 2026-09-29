@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zlinter = @import("zlinter");
+const package = @import("build.zig.zon");
 
 const required_zig_version: std.SemanticVersion = .{
     .major = 0,
@@ -74,6 +75,7 @@ pub fn build(b: *std.Build) void {
         if (identity.len == 0) @panic("-Dcompiler-build-identity must not be empty");
 
     const build_options = b.addOptions();
+    build_options.addOption([]const u8, "oksolc_version", package.version);
     build_options.addOption([]const u8, "license_text", @embedFile("LICENSE.txt"));
     build_options.addOption(
         []const u8,
@@ -385,17 +387,16 @@ pub fn build(b: *std.Build) void {
     dependOnValidation(&cache_lifecycle_smoke.step, cli_identity_validation);
     b.step("cache-lifecycle-smoke", "Test persistent cache deletion, restart and recovery").dependOn(&cache_lifecycle_smoke.step);
     cli_smoke_step.dependOn(&cache_lifecycle_smoke.step);
-    const cli_version_command = b.addRunArtifact(cli);
-    isolateCliSmokeEnvironment(b, cli_version_command);
-    dependOnValidation(&cli_version_command.step, cli_identity_validation);
-    cli_version_command.addArg("version");
-    const cli_version_output = cli_version_command.captureStdOut(.{
-        .basename = "oksolc-version.txt",
+    const cli_version_smoke = b.addSystemCommand(&.{"python3"});
+    cli_version_smoke.addFileArg(b.path("test/zig/cli/version_smoke.py"));
+    cli_version_smoke.addArtifactArg(cli);
+    cli_version_smoke.addArgs(&.{
+        package.version,
+        if (compiler_build_identity_available) compiler_build_identity else "",
     });
-    const cli_version_check = b.addCheckFile(cli_version_output, .{
-        .expected_exact = "oksolc 0.8.36+zig\n",
-    });
-    cli_smoke_step.dependOn(&cli_version_check.step);
+    dependOnValidation(&cli_version_smoke.step, cli_identity_validation);
+    b.step("version-smoke", "Check product and solc-compatible version reporting").dependOn(&cli_version_smoke.step);
+    cli_smoke_step.dependOn(&cli_version_smoke.step);
 
     const cli_help_command = b.addRunArtifact(cli);
     isolateCliSmokeEnvironment(b, cli_help_command);
@@ -980,6 +981,7 @@ pub fn build(b: *std.Build) void {
     });
     libsolc_c_smoke_module.linkLibrary(libsolc_library);
     const run_libsolc_c_smoke = b.addRunArtifact(libsolc_c_smoke);
+    run_libsolc_c_smoke.addArg(b.fmt("0.8.36+oksolc.{s}", .{package.version}));
     dependOnValidation(&run_libsolc_c_smoke.step, libsolc_identity_validation);
     const libsolc_c_smoke_step = b.step(
         "libsolc-c-smoke",
