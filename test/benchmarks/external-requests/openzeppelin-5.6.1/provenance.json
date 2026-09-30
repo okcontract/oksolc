@@ -1,0 +1,24 @@
+{
+  "capture": "Forge 1.7.1, system solc 0.8.36; external-setup.sh install_openzeppelin_contracts and external-compare.sh capture flags",
+  "commit": "5fd1781b1454fd1ef8e722282f86f9293cacf256",
+  "dependencies": {},
+  "dependency_sources": 0,
+  "license_files": [
+    "LICENSE.compound",
+    "LICENSE.openzeppelin"
+  ],
+  "mock_sources": 112,
+  "production_sources": 226,
+  "project": "openzeppelin-5.6.1",
+  "repository": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+  "request_bytes": 1704843,
+  "request_sha256": "9529800e8ba5dbacacb94fe07f501aa86e0fc2fe916d709428e3ccdf46748010",
+  "settings": "Optimized via-IR, 200 runs, Osaka, literal-content IPFS metadata with CBOR. Uses solc 0.8.36 instead of upstream 0.8.31.",
+  "source_count": 338,
+  "tag": "v5.6.1",
+  "transforms": [
+    "All Solidity version pragmas normalized to pragma solidity *; (same policy as existing external corpus)",
+    "Foundry test root changed to benchmark-empty-tests and libraries set to []; compiles every contracts/ source, including mocks, without upstream Foundry tests or test dependencies"
+  ],
+  "upstream_foundry_toml_sha256": "11c539d3479af2d98f2ed8e7b5734bd5b367fec1df89196faf349448388c618a"
+}

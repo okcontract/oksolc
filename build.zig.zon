@@ -4,7 +4,7 @@
 
 .{
     .name = .solidity_zig,
-    .version = "0.1.4",
+    .version = "0.1.5",
     .fingerprint = 0x532998ed66b1991d, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

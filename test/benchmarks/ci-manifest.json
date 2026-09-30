@@ -1,0 +1,25 @@
+{
+  "reference_compiler": "0.8.36+commit.8a079791",
+  "requests": {
+    "openzeppelin-5.6.1": {
+      "request_sha256": "9529800e8ba5dbacacb94fe07f501aa86e0fc2fe916d709428e3ccdf46748010",
+      "contract_output_sha256": "96f79206085d3fdbaf5db61083e5c306a4e8ac9292402813fb466fd99a9c768a"
+    },
+    "openzeppelin-5.0.2": {
+      "request_sha256": "f8aad237c5ef7559007fdfcfefb428984cdce67b47c625ccda7ae8f6c7082ed5",
+      "contract_output_sha256": "863c22bde6590a443295eac50bd785060263db06a31ad311e94ef6dd8b9ce5f0"
+    },
+    "uniswap-v4-2024-06-06": {
+      "request_sha256": "c822ce4051982c5efb6756073b5d046f2c7e7ba22a2206f8a93c61c93e5edeaa",
+      "contract_output_sha256": "d270c964b3c98b17797a2ac9c71a2682f17c8828f473432aea1851d92d2e9f62"
+    },
+    "pendle-v2-2026-09-16": {
+      "request_sha256": "a2307c0116238cf67ffb31e8e903a644f0bb8d6219e6b980192e1612c0cb6972",
+      "contract_output_sha256": "83c213ae8b9deb8470e37a46b06882937e9511b6c191af4739d0d985d2578755"
+    },
+    "solady-0.1.26": {
+      "request_sha256": "260acf5b8efd4cee9c00b34129ace8f6952054eafb871d78148f0cb4dd989fb9",
+      "contract_output_sha256": "f247b3c129ab14b2f887ad9b0ce36d21607d6feef230518581d64edeb2a18a0d"
+    }
+  }
+}

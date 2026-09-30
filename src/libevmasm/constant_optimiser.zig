@@ -294,7 +294,8 @@ pub const ComputeMethod = struct {
                     AssemblyItem.initInstruction(if (lower_negative) .SUB else .ADD, .{}),
                 );
 
-            self.max_steps -= 1;
+            // Recursive calls can exhaust the shared budget before returning.
+            self.max_steps -|= 1;
             const candidate_gas = try self.gasNeededRoutine(candidate.items);
             if (candidate_gas < best_gas) {
                 best_gas = candidate_gas;
@@ -479,4 +480,35 @@ test "computed constants reproduce their input and optimizer replaces profitable
         .{ .context = &sink_state, .add_data = TestSink.add },
     );
     try std.testing.expect(changed != 0);
+}
+
+test "computed constant search keeps an exhausted recursive budget at zero" {
+    const cases = [_]struct { value: u256, budget: usize }{
+        .{
+            .value = (@as(u256, 0x1234) << 192) | (@as(u256, 0x1234) << 64) | 7,
+            .budget = 1,
+        },
+        // OpenZeppelin Bytes.toNibbles exercises the full search budget.
+        .{
+            .value = 0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff,
+            .budget = 10_000,
+        },
+    };
+    for (cases) |case| {
+        var compute: ComputeMethod = .{
+            .allocator = std.testing.allocator,
+            .params = .{
+                .is_creation = false,
+                .runs = 200,
+                .multiplicity = 1,
+                .evm_version = EVMVersion.init(.Osaka),
+            },
+            .value = case.value,
+            .max_steps = case.budget,
+        };
+        defer compute.deinit();
+        compute.routine = try compute.findRepresentation(case.value);
+        try std.testing.expectEqual(@as(usize, 0), compute.max_steps);
+        try std.testing.expect(try compute.checkRepresentation(case.value, compute.routine.items));
+    }
 }

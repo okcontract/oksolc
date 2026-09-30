@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) void {
     const benchmark_warmups = b.option(
         u32,
         "benchmark-warmups",
-        "Number of untimed warmup runs per compiler and local workload",
+        "Number of untimed warmup runs per compiler and benchmark workload",
     ) orelse 1;
     const adapter_fuzz_runs = b.option(
         u32,
@@ -1587,6 +1587,28 @@ fn addBenchmarks(
         dependOnValidation(&run_zbench_only.step, zbench_identity_validation);
         run_zbench_only.addArgs(&.{ "--json", "build/benchmarks/zbench.json", "--counters" });
         benchmark_zbench_only_step.dependOn(&run_zbench_only.step);
+    }
+
+    const benchmark_external_step = b.step(
+        "benchmark-external",
+        "Compare ReleaseFast oksolc output and performance with solc on 13 external projects",
+    );
+    if (benchmarkGuard(b, benchmark_external_step, target, optimize, benchmark_runs)) {
+        const benchmark_external = b.addSystemCommand(&.{
+            "bash",
+            "test/benchmarks/external-compare.sh",
+        });
+        if (b.args) |args| benchmark_external.addArgs(args);
+        benchmark_external.addArg(reference_solc);
+        benchmark_external.addArtifactArg(cli);
+        dependOnValidation(&benchmark_external.step, cli_identity_validation);
+        benchmark_external.addArg(b.fmt("{d}", .{benchmark_runs}));
+        benchmark_external.setEnvironmentVariable(
+            "BENCHMARK_WARMUPS",
+            b.fmt("{d}", .{benchmark_warmups}),
+        );
+        benchmark_external.has_side_effects = true;
+        benchmark_external_step.dependOn(&benchmark_external.step);
     }
 
     const benchmark_incremental_step = b.step(

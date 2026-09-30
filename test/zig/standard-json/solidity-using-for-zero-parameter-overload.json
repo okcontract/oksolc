@@ -1,0 +1,25 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "C.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\npragma solidity ^0.8.36;\nlibrary L {\n    struct Data { uint256 value; }\n    function p() internal pure returns (Data memory) { return Data(7); }\n    function p(Data memory self, uint256 value) internal pure returns (Data memory) {\n        self.value = value;\n        return self;\n    }\n    function p(uint256 self) internal pure returns (uint256) { return self + 1; }\n    function p(uint256 self, uint256 value) internal pure returns (uint256) { return self + value; }\n}\ncontract C {\n    using L for *;\n    function f(uint256 value) external pure returns (uint256, uint256, uint256) {\n        L.Data memory data = L.p();\n        data.p(value);\n        return (data.value, value.p(), value.p(2));\n    }\n}\n"
+    }
+  },
+  "settings": {
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "viaIR": true,
+    "evmVersion": "paris",
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

@@ -28,7 +28,7 @@ jobs:
 
   test:
     name: Tests (${{ matrix.suite }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -36,13 +36,15 @@ jobs:
         include:
           # Debug keeps safety checks without optimizing every unit-test binary.
           - suite: unit
+            runner: ubuntu-latest
             optimize: Debug
             targets: test-unit
             browser: true
           # Exercise the production compiler separately, in parallel.
           - suite: compiler
+            runner: ubuntu-24.04
             optimize: ReleaseFast
-            targets: cli-smoke libsolc-c-smoke compatibility-check
+            targets: build-cli cli-smoke libsolc-c-smoke compatibility-check
             browser: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -88,6 +90,31 @@ jobs:
           zig build fmt-check lint test-browser-types -j2 --summary all
           bun test ./test/zig/cli/browser_build.test.js
 
+      - name: Test benchmark harness
+        if: matrix.suite == 'unit'
+        run: python3 -m unittest discover -s test/benchmarks -p 'test_*.py'
+
       # Fuzz seed tests and mutations already run in the separate Fuzz workflow.
       - name: Run ${{ matrix.suite }} tests
         run: zig build ${{ matrix.targets }} -Dbrowser=${{ matrix.browser }} -Doptimize=${{ matrix.optimize }} -j2 --summary all
+
+      - name: Benchmark external projects
+        if: matrix.suite == 'compiler'
+        timeout-minutes: 10
+        run: python3 test/benchmarks/ci.py --jobs 2 --output-dir "$RUNNER_TEMP/oksolc-benchmarks"
+
+      - name: Summarize benchmarks
+        if: always() && matrix.suite == 'compiler'
+        run: |
+          if test -f "$RUNNER_TEMP/oksolc-benchmarks/summary.md"; then
+            cat "$RUNNER_TEMP/oksolc-benchmarks/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload benchmark results
+        if: always() && matrix.suite == 'compiler'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oksolc-benchmarks/
+          if-no-files-found: ignore
+          retention-days: 14

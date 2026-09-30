@@ -71,6 +71,8 @@ comparisons; SemVer precedence ignores the build metadata after `+`.
 - Python 3 for tests and benchmark orchestration
 - `solc` version `0.8.36` for optional reference audits and benchmark
   comparisons
+- `zstd` to replay the bundled external benchmarks; Forge and Git to capture
+  fresh requests, plus Node.js/npm for old Uniswap and Node.js for Pendle setup
 
 The first Zig build downloads the dependencies declared in `build.zig.zon`.
 
@@ -359,6 +361,50 @@ compatibility and record cache metrics:
 
 ```sh
 zig build benchmark-incremental -Doptimize=ReleaseFast
+```
+
+The external suite compares oksolc with original `solc 0.8.36`. Replay the
+imported Standard JSON requests without project downloads or Forge:
+
+```sh
+zig build benchmark-external -Doptimize=ReleaseFast \
+  -Dbenchmark-reference-solc=solc -Dbenchmark-runs=3 -Dbenchmark-warmups=1 \
+  -- --bundled-requests
+```
+
+Select projects with repeated `--project NAME` flags. For example, to compare
+only Pendle, including all its production contracts and imported dependencies:
+
+```sh
+zig build benchmark-external -Doptimize=ReleaseFast \
+  -- --bundled-requests --project pendle-v2-2026-09-16
+```
+
+To download the pinned projects and capture fresh requests through Forge:
+
+```sh
+test/benchmarks/external-setup.sh
+zig build benchmark-external -Doptimize=ReleaseFast
+```
+
+Setup also accepts `--project NAME`. Project checkouts go in the ignored
+`benchmarks/` directory; override it with `BENCHMARK_DIR`. Captured requests
+are retained under `build/benchmarks/external/<project>/requests/`. To repeat
+the comparison using exactly those requests:
+
+```sh
+zig build benchmark-external -Doptimize=ReleaseFast \
+  -- --reuse-captured-requests build/benchmarks/external
+```
+
+Use a new `BENCHMARK_REPORT_DIR` for another fresh capture. It also controls
+where per-project JSON reports and numeric summaries are written. The direct
+launcher accepts compiler paths and the measured run count:
+
+```sh
+zig build build-cli -Doptimize=ReleaseFast
+test/benchmarks/external-compare.sh --bundled-requests \
+  solc zig-out/bin/oksolc 3
 ```
 
 ## Repository layout

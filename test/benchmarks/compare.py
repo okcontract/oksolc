@@ -31,7 +31,7 @@ DEFAULT_FIXTURES = (
     REPO_ROOT / "test/benchmarks/chains.sol",
 )
 EXPECTED_REFERENCE_VERSION = "0.8.36"
-EXPECTED_ZIG_VERSION = "0.8.36+zig"
+EXPECTED_ZIG_VERSION = "0.8.36+oksolc."
 
 
 @dataclass(frozen=True)
@@ -426,6 +426,16 @@ def preflight_case(
             )
         reference_bytecode = contract_output(reference_output)
         zig_bytecode = contract_output(zig_output)
+        reference_errors = compiler_errors(reference_output)
+        zig_errors = compiler_errors(zig_output)
+        if reference_errors != zig_errors:
+            raise RuntimeError(
+                f"{request.name} produced different compiler errors; refusing "
+                f"to compare unequal workloads:\n  solc: {reference_errors}\n"
+                f"  oksolc: {zig_errors}"
+            )
+        if not reference_errors and not reference_bytecode:
+            raise RuntimeError(f"{request.name} produced no contract bytecode")
         zig_contract_hash = contract_output_sha256(zig_bytecode)
         zig_contract_hashes.append(f"{request.name}={zig_contract_hash}")
         expected_contract_hash = expected_contract_hashes.get(request.name)
@@ -470,8 +480,8 @@ def preflight_case(
         bytecode_size += contract_output_size(reference_bytecode, "creation")
         deployed_bytecode_size += contract_output_size(reference_bytecode, "deployed")
         total_contract_output_size += contract_output_size(reference_bytecode)
-        reference_diagnostics.extend(compiler_errors(reference_output))
-        zig_diagnostics.extend(compiler_errors(zig_output))
+        reference_diagnostics.extend(reference_errors)
+        zig_diagnostics.extend(zig_errors)
 
     return Preflight(
         exact_output_match=exact,
@@ -611,13 +621,25 @@ def peak_rss_mib(raw_value: int) -> float:
     return raw_value / 1024.0
 
 
-def measure_invocation(command: Sequence[str], request_path: Path) -> Sample:
+def measure_invocation(
+    command: Sequence[str],
+    request_path: Path,
+    *,
+    stdout_path: Path | None = None,
+    stderr_path: Path | None = None,
+) -> Sample:
     if not hasattr(os, "wait4") or not hasattr(os, "posix_spawn"):
         raise RuntimeError("benchmark measurement requires POSIX posix_spawn() and wait4()")
     file_actions = (
         (os.POSIX_SPAWN_OPEN, 0, str(request_path), os.O_RDONLY, 0o444),
-        (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0o666),
-        (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0o666),
+        (
+            os.POSIX_SPAWN_OPEN, 1, str(stdout_path) if stdout_path else os.devnull,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC if stdout_path else os.O_WRONLY, 0o600,
+        ),
+        (
+            os.POSIX_SPAWN_OPEN, 2, str(stderr_path) if stderr_path else os.devnull,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC if stderr_path else os.O_WRONLY, 0o600,
+        ),
     )
     verify_executable(command[0])
     start = time.perf_counter_ns()
@@ -838,7 +860,7 @@ def main() -> int:
             if options.zig_parallel
             else 1
         )
-        zig_version = compiler_version((str(zig), "version"))
+        zig_version = compiler_version((str(zig), "--version"))
         reference = (
             None if options.zig_only else resolve_executable(options.reference_solc)
         )
@@ -863,7 +885,7 @@ def main() -> int:
         reference_command = (
             None if reference is None else (str(reference), "--standard-json")
         )
-        zig_command_parts = [str(zig), "standard-json"]
+        zig_command_parts = [str(zig), "standard-json", "--no-cache"]
         if options.zig_parallel:
             zig_command_parts.extend(("--parallel", "--jobs", str(zig_jobs)))
         zig_command_parts.append("-")

@@ -6,6 +6,10 @@ dependencies resolved by its build and benchmark steps. Unless stated
 otherwise, the project's own code is licensed under GPL-3.0; see LICENSE.txt
 and COPYRIGHT.txt.
 
+External benchmark requests under test/benchmarks/external-requests/ contain
+upstream Solidity outputs and dependencies with their embedded SPDX notices.
+They are benchmark inputs, not linked into the compiler.
+
 MIT-licensed components
 -----------------------
 

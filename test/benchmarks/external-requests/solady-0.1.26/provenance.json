@@ -1,0 +1,28 @@
+{
+  "capture": "Forge 1.7.1, system solc 0.8.36; external-setup.sh and external-compare.sh capture flags; upstream default profile",
+  "commit": "acd959aa4bd04720d640bf4e6a5c71037510cc4b",
+  "dependencies": {},
+  "license_files": [
+    "LICENSE.solady"
+  ],
+  "production_sources": 90,
+  "project": "solady-0.1.26",
+  "repository": "https://github.com/Vectorized/solady",
+  "request_bytes": 3736240,
+  "request_sha256": "260acf5b8efd4cee9c00b34129ace8f6952054eafb871d78148f0cb4dd989fb9",
+  "settings": "Optimized via-IR, 1000 runs, Paris, literal-content IPFS metadata with CBOR. Retains upstream default-profile exclusions; uses solc 0.8.36 instead of upstream 0.8.30.",
+  "source_count": 208,
+  "tag": "v0.1.26",
+  "test_and_utility_sources": 118,
+  "transforms": [
+    "All Solidity version pragmas normalized to pragma solidity *; (same policy as existing external corpus)"
+  ],
+  "upstream_foundry_toml_sha256": "fa53d102d0259e76d3aaa454b27763b372c53d1f8035cc1b33d595431ac32074",
+  "upstream_skip": [
+    "*/*7702*",
+    "*/*BlockHashLib*",
+    "*/*Transient*",
+    "*/ext/ithaca/*",
+    "*/ext/zksync/*"
+  ]
+}
