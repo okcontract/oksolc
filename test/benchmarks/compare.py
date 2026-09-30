@@ -621,13 +621,25 @@ def peak_rss_mib(raw_value: int) -> float:
     return raw_value / 1024.0
 
 
-def measure_invocation(command: Sequence[str], request_path: Path) -> Sample:
+def measure_invocation(
+    command: Sequence[str],
+    request_path: Path,
+    *,
+    stdout_path: Path | None = None,
+    stderr_path: Path | None = None,
+) -> Sample:
     if not hasattr(os, "wait4") or not hasattr(os, "posix_spawn"):
         raise RuntimeError("benchmark measurement requires POSIX posix_spawn() and wait4()")
     file_actions = (
         (os.POSIX_SPAWN_OPEN, 0, str(request_path), os.O_RDONLY, 0o444),
-        (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0o666),
-        (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0o666),
+        (
+            os.POSIX_SPAWN_OPEN, 1, str(stdout_path) if stdout_path else os.devnull,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC if stdout_path else os.O_WRONLY, 0o600,
+        ),
+        (
+            os.POSIX_SPAWN_OPEN, 2, str(stderr_path) if stderr_path else os.devnull,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC if stderr_path else os.O_WRONLY, 0o600,
+        ),
     )
     verify_executable(command[0])
     start = time.perf_counter_ns()
