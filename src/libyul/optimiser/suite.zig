@@ -438,6 +438,7 @@ pub const OptimiserSuite = struct {
                 optimize_stack_allocation,
                 stack_compressor_max_iterations,
             );
+            defer compressed.deinit(allocator);
             ast_root = compressed.ast;
             compressed.ast = .{};
         }
@@ -456,25 +457,25 @@ pub const OptimiserSuite = struct {
             }
 
             if (uses_optimized_code_generator) {
-                {
+                var compressed = compressed: {
                     var probe = ProfilerModule.OptionalProbe.init(profiler, "StackCompressor");
                     defer probe.deinit();
                     object.replaceCode(AST.AST.init(allocator, dialect, ast_root), null);
                     ast_root = .{};
-                    var compressed = try StackCompressor.run(
+                    break :compressed try StackCompressor.run(
                         object,
                         optimize_stack_allocation,
                         stack_compressor_max_iterations,
                     );
-                    ast_root = compressed.ast;
-                    compressed.ast = .{};
-                }
+                };
+                defer compressed.deinit(allocator);
                 if (evm.providesObjectAccess()) {
                     var probe = ProfilerModule.OptionalProbe.init(profiler, "StackLimitEvader");
                     defer probe.deinit();
-                    object.replaceCode(AST.AST.init(allocator, dialect, ast_root), null);
-                    ast_root = .{};
-                    ast_root = try StackLimitEvader.runObject(&context, object);
+                    ast_root = try StackLimitEvader.runAfterCompression(&context, object, &compressed);
+                } else {
+                    ast_root = compressed.ast;
+                    compressed.ast = .{};
                 }
             } else if (evm.providesObjectAccess() and optimize_stack_allocation) {
                 var probe = ProfilerModule.OptionalProbe.init(profiler, "StackLimitEvader");

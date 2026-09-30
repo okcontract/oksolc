@@ -114,9 +114,47 @@ pub const StackLimitEvader = struct {
         const evm_dialect = try requireObjectDialect(context.dialect);
         std.debug.assert(context.dispenser.allocator.ptr == object.allocator.ptr and
             context.dispenser.allocator.vtable == object.allocator.vtable);
-        var ast_root = try object.takeCodeRoot();
+        return runWithRoot(context, object, try object.takeCodeRoot(), evm_dialect, null);
+    }
+
+    /// Consumes the compressor's root and borrows its report until return.
+    /// Call immediately after compression, without AST, dialect or structure
+    /// changes. The caller must still deinitialize the compression result.
+    pub fn runAfterCompression(
+        context: *OptimiserStepContext,
+        object: *Object,
+        compressed: *@import("stack_compressor.zig").RunResult,
+    ) !AST.Block {
+        const evm_dialect = try requireObjectDialect(context.dialect);
+        std.debug.assert(context.dispenser.allocator.ptr == object.allocator.ptr and
+            context.dispenser.allocator.vtable == object.allocator.vtable);
+        const report: ?*const StackLayout.StackTooDeepByFunction = if (compressed.stack_report) |*prepared|
+            if (prepared.object == object and std.meta.eql(prepared.dialect, context.dialect))
+                &prepared.errors
+            else
+                null
+        else
+            null;
+        const root = compressed.ast;
+        compressed.ast = .{};
+        return runWithRoot(context, object, root, evm_dialect, report);
+    }
+
+    fn runWithRoot(
+        context: *OptimiserStepContext,
+        object: *Object,
+        root: AST.Block,
+        evm_dialect: *const EVMDialectModule.EVMDialect,
+        prepared_report: ?*const StackLayout.StackTooDeepByFunction,
+    ) !AST.Block {
+        var ast_root = root;
         errdefer ast_root.deinit(context.dispenser.allocator);
 
+        if (prepared_report) |report| {
+            context.recordCounter("Stack deficit reports reused", 1);
+            try runWithStackTooDeep(context, &ast_root, report);
+            return ast_root;
+        }
         if (evm_dialect.evmVersion().canOverchargeGasForCall()) {
             var structure = try object.summarizeStructure();
             defer structure.deinit();
@@ -433,20 +471,25 @@ test "stack limit evasion and stack compression transfer roots and release alloc
                 const storage = object.code().?.root().statements.items.ptr;
                 const value = object.code().?.root().statements.items[0].block.statements.items[1].variable_declaration.value;
                 var compressed = try Compressor.run(object, true, 16);
-                errdefer compressed.deinit(failing);
+                defer compressed.deinit(failing);
                 try std.testing.expectEqual(storage, compressed.ast.statements.items.ptr);
-                object.replaceCode(AST.AST.init(failing, ast.dialect().*, compressed.ast), null);
-                compressed.ast = .{};
+                try std.testing.expectEqualDeep(try Encoding.hashBlock(ast.root()), try Encoding.hashBlock(&compressed.ast));
+                const evm = EVMDialectModule.fromDialect(ast.dialect().*).?;
+                try std.testing.expectEqual(evm.evmVersion().canOverchargeGasForCall(), compressed.stack_report != null);
+                if (compressed.stack_report) |*report| {
+                    try std.testing.expectEqual(@as(usize, 1), report.errors.count());
+                    try std.testing.expectEqual(@as(usize, 0), report.errors.get(.{}).?.items.len);
+                }
                 var reserved: NameCollector.NameSet = .{};
                 defer reserved.deinit(failing);
-                var dispenser = try NameDispenser.initFromAst(failing, ast.dialect().*, object.code().?.root(), &reserved);
+                var dispenser = try NameDispenser.initFromAst(failing, ast.dialect().*, &compressed.ast, &reserved);
                 defer dispenser.deinit();
                 var context: OptimiserStepContext = .{
                     .dialect = ast.dialect().*,
                     .dispenser = &dispenser,
                     .reserved_identifiers = &reserved,
                 };
-                var transformed = try StackLimitEvader.runObject(&context, object);
+                var transformed = try StackLimitEvader.runAfterCompression(&context, object, &compressed);
                 defer transformed.deinit(failing);
                 // The spill pass can rebuild statement containers. The owned
                 // expression remains at its original address across both passes.
@@ -457,4 +500,80 @@ test "stack limit evasion and stack compression transfer roots and release alloc
         };
         try std.testing.checkAllAllocationFailures(allocator, Check.run, .{&source});
     }
+}
+
+test "stack limit evasion reuses preparation without skipping guard updates or fallbacks" {
+    const Parser = @import("../asm_parser.zig").Parser;
+    const Diagnostics = @import("../../liblangutil/diagnostics.zig");
+    const NameDispenser = @import("name_dispenser.zig").NameDispenser;
+    const Copier = @import("ast_copier.zig").ASTCopier;
+    const Compressor = @import("stack_compressor.zig").StackCompressor;
+    const Encoding = @import("../ast_encoding.zig");
+    const Printer = @import("../asm_printer.zig").AsmPrinter;
+    const Profiler = @import("../../libsolutil/profiler.zig").Profiler;
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialectModule.EVMDialect.init(allocator, .current(), true);
+    defer dialect.deinit();
+    var other_dialect = try EVMDialectModule.EVMDialect.init(allocator, .current(), true);
+    defer other_dialect.deinit();
+    const Mode = enum { reuse, other_object, other_dialect, classic };
+    const sources = [_][]const u8{
+        "{ { mstore(0x40, memoryguard(128)) let x := 1 pop(x) } }",
+        "{ { let x := 1 pop(x) } }",
+        "{ { mstore(0x40, memoryguard(128)) pop(f(1)) } function f(a) -> r { if a { r := f(sub(a, 1)) } } }",
+    };
+    for (sources, 0..) |source, source_index| for (std.enums.values(Mode)) |mode| {
+        var reporter = Diagnostics.ErrorReporter.init(allocator);
+        defer reporter.deinit();
+        const object = try Object.create(allocator, "Root");
+        defer object.destroy();
+        const parsed = (try Parser.parseSource(allocator, source, "stack-reuse.yul", &reporter, dialect.dialect(), .{})).?;
+        object.setCode(parsed, null);
+        var compressed = try Compressor.run(object, mode != .classic, 16);
+        defer compressed.deinit(allocator);
+        try std.testing.expectEqual(mode != .classic, compressed.stack_report != null);
+
+        const reference = try Object.create(allocator, "Root");
+        defer reference.destroy();
+        var copier = Copier.init(allocator);
+        reference.setCode(AST.AST.init(allocator, dialect.dialect(), try copier.translateBlock(&compressed.ast)), null);
+        const other_object = try Object.create(allocator, "Root");
+        defer other_object.destroy();
+        other_object.setCode(AST.AST.init(allocator, dialect.dialect(), .{}), null);
+        const active_dialect = if (mode == .other_dialect) other_dialect.dialect() else dialect.dialect();
+        var reserved: NameCollector.NameSet = .{};
+        defer reserved.deinit(allocator);
+        var fresh_dispenser = try NameDispenser.initFromAst(allocator, active_dialect, reference.code().?.root(), &reserved);
+        defer fresh_dispenser.deinit();
+        var fresh_context: OptimiserStepContext = .{
+            .dialect = active_dialect,
+            .dispenser = &fresh_dispenser,
+            .reserved_identifiers = &reserved,
+        };
+        var expected = try StackLimitEvader.runObject(&fresh_context, reference);
+        defer expected.deinit(allocator);
+        var dispenser = try NameDispenser.initFromAst(allocator, active_dialect, &compressed.ast, &reserved);
+        defer dispenser.deinit();
+        var profiler = Profiler.init(allocator, std.testing.io);
+        defer profiler.deinit();
+        var context: OptimiserStepContext = .{
+            .dialect = active_dialect,
+            .dispenser = &dispenser,
+            .reserved_identifiers = &reserved,
+            .profiler = &profiler,
+        };
+        var actual = try StackLimitEvader.runAfterCompression(&context, if (mode == .other_object) other_object else object, &compressed);
+        defer actual.deinit(allocator);
+        try std.testing.expectEqualDeep(try Encoding.hashBlock(&expected), try Encoding.hashBlock(&actual));
+        try std.testing.expectEqual(@as(usize, 0), compressed.ast.statements.items.len);
+        const reuse_count = profiler.counterFor("Stack deficit reports reused");
+        try std.testing.expectEqual(mode == .reuse, reuse_count != null);
+        if (reuse_count) |count| try std.testing.expectEqual(@as(u64, 1), count.total);
+        if (source_index == 0) {
+            var printer = Printer.init(allocator, active_dialect, &.{}, .defaultValue(), null);
+            const rendered = try printer.renderBlock(&actual);
+            defer allocator.free(rendered);
+            try std.testing.expect(std.mem.find(u8, rendered, "memoryguard(0x80)") != null);
+        }
+    };
 }
