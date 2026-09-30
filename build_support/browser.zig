@@ -5,7 +5,7 @@ const std = @import("std");
 
 /// Both tools consume one immutable copy. A source edit cannot land between
 /// checking TypeScript and bundling JavaScript from that checked source.
-pub fn build(b: *std.Build, cli: *std.Build.Module) void {
+pub fn build(b: *std.Build, cli: ?*std.Build.Module) void {
     const tsc = b.option([]const u8, "tsc", "System TypeScript 7 compiler") orelse "tsc";
     const bun = b.option([]const u8, "bun", "System Bun bundler") orelse "bun";
     const typescript_version = std.mem.trim(u8, @embedFile("../src/cli/browser/typescript-version"), "\r\n");
@@ -36,7 +36,7 @@ pub fn build(b: *std.Build, cli: *std.Build.Module) void {
     bundle.setCwd(source);
     bundle.step.dependOn(&typecheck.step);
     bundle.step.dependOn(&check_bun.step);
-    cli.addAnonymousImport("browser_app", .{ .root_source_file = output.path(b, "app.js") });
+    if (cli) |module| module.addAnonymousImport("browser_app", .{ .root_source_file = output.path(b, "app.js") });
 
     const install = b.addInstallDirectory(.{
         .source_dir = output,

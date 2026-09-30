@@ -41,10 +41,10 @@ compatibility target. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ```console
 $ oksolc version
-oksolc 0.1.4-dev (Solidity 0.8.36)
+oksolc 0.1.4 (Solidity 0.8.36)
 $ oksolc --version
 oksolc, a solidity compiler commandline interface
-Version: 0.8.36+oksolc.0.1.4-dev
+Version: 0.8.36+oksolc.0.1.4
 ```
 
 `oksolc version --json` returns `version` (the product version),
@@ -64,7 +64,7 @@ comparisons; SemVer precedence ignores the build metadata after `+`.
 ## Requirements
 
 - Zig `0.16.0`
-- TypeScript `7.0.2` (`tsc`) and Bun `1.4.2` for CLI builds
+- TypeScript `7.0.2` (`tsc`) and Bun `1.4.2` only for the optional web browser
 - libc and a working C toolchain
 - Clang with ASan/UBSan runtimes for `fuzz-json-adapter` and `fuzz` (limited to
   the yyjson adapter for now)
@@ -93,6 +93,14 @@ zig build -Doptimize=ReleaseFast --prefix "$HOME/.local"
 For development, omit `-Doptimize` for Debug mode, or use
 `-Doptimize=ReleaseSafe` for an optimized build with runtime safety checks. To
 build only the CLI, use `zig build build-cli`.
+
+The web browser is disabled by default, so ordinary builds require neither Bun
+nor TypeScript. To include `oksolc browse` and `oksolc serve --browse`, install
+the pinned browser tools and opt in:
+
+```sh
+zig build -Doptimize=ReleaseFast -Dbrowser=true
+```
 
 Distribution builds can strip debug information and select a target:
 
@@ -181,7 +189,7 @@ credentials and checkout conflicts; resolve any conflict and rerun to continue.
 
 ## Watch and browse
 
-We implemented a minimalistic web browser that updates as you edit:
+Build with `-Dbrowser=true` to include the web browser, which updates as you edit:
 
 ```sh
 oksolc serve --browse
@@ -278,7 +286,7 @@ checks in ReleaseFast, in parallel. Debug retains runtime safety checks and
 avoids optimizing every unit-test binary. Run the same checks locally:
 
 ```sh
-zig build test-unit -Doptimize=Debug
+zig build test-unit -Doptimize=Debug -Dbrowser=true
 zig build cli-smoke libsolc-c-smoke compatibility-check -Doptimize=ReleaseFast
 zig build fmt-check
 zig build lint
@@ -300,8 +308,14 @@ unit-test executables. For browser changes, use:
 
 ```sh
 zig build typecheck-browser test-browser-types
-zig build browser-smoke test-cli test-browser-store -Doptimize=ReleaseSafe
+zig build browser-smoke test-cli test-browser-store -Dbrowser=true -Doptimize=ReleaseSafe
 ```
+
+Compiler and CLI tests also work without the browser tools; omit `-Dbrowser=true`
+to test the default build. Browser HTTP smoke targets (including
+`diagnostic-limit-smoke`) require `-Dbrowser=true`. Explicit asset targets such
+as `build-browser`, `typecheck-browser`, and `test-browser-types` always use the
+browser tools.
 
 The test suite compares against checked-in `solc 0.8.36` outputs. Unoptimized
 contract IR is compared as Yul tokens, allowing whitespace and comment changes

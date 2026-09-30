@@ -25,6 +25,11 @@ comptime {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const browser_enabled = b.option(
+        bool,
+        "browser",
+        "Include the web browser (requires Bun and TypeScript)",
+    ) orelse false;
     const strip_cli = b.option(
         bool,
         "strip",
@@ -217,7 +222,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const httpz_dependency = b.dependency("httpz", .{ .target = target, .optimize = optimize });
+    const cli_options = b.addOptions();
+    cli_options.addOption(bool, "browser_enabled", browser_enabled);
     const cli_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
         .target = target,
@@ -228,10 +234,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "solidity", .module = solidity_module },
             .{ .name = "toml", .module = toml_dependency.module("toml") },
             .{ .name = "zqlite", .module = zqlite_module },
-            .{ .name = "httpz", .module = httpz_dependency.module("httpz") },
         },
     });
-    @import("build_support/browser.zig").build(b, cli_module);
+    cli_module.addOptions("cli_options", cli_options);
+    if (browser_enabled) {
+        const httpz_dependency = b.lazyDependency("httpz", .{ .target = target, .optimize = optimize }) orelse return;
+        cli_module.addImport("httpz", httpz_dependency.module("httpz"));
+    }
+    @import("build_support/browser.zig").build(b, if (browser_enabled) cli_module else null);
     const cli = b.addExecutable(.{
         .name = "oksolc",
         .root_module = cli_module,
@@ -245,41 +255,43 @@ pub fn build(b: *std.Build) void {
     dependOnValidation(&install_cli.step, cli_identity_validation);
     b.getInstallStep().dependOn(&install_cli.step);
     b.step("build-cli", "Install the oksolc CLI").dependOn(&install_cli.step);
-    const browser_smoke = b.addSystemCommand(&.{"python3"});
-    browser_smoke.addFileArg(b.path("test/zig/cli/browser_smoke.py"));
-    browser_smoke.addArtifactArg(cli);
-    dependOnValidation(&browser_smoke.step, cli_identity_validation);
-    b.step("browser-smoke", "Test the localhost compiler browser over HTTP").dependOn(&browser_smoke.step);
+    if (browser_enabled) {
+        const browser_smoke = b.addSystemCommand(&.{"python3"});
+        browser_smoke.addFileArg(b.path("test/zig/cli/browser_smoke.py"));
+        browser_smoke.addArtifactArg(cli);
+        dependOnValidation(&browser_smoke.step, cli_identity_validation);
+        b.step("browser-smoke", "Test the localhost compiler browser over HTTP").dependOn(&browser_smoke.step);
+        const live_browser_smoke = b.addSystemCommand(&.{"python3"});
+        live_browser_smoke.addFileArg(b.path("test/zig/cli/live_browser_smoke.py"));
+        live_browser_smoke.addArtifactArg(cli);
+        dependOnValidation(&live_browser_smoke.step, cli_identity_validation);
+        b.step("live-browser-smoke", "Test the combined source watcher and live SQL browser").dependOn(&live_browser_smoke.step);
+        const diagnostic_limit_smoke = b.addSystemCommand(&.{"python3"});
+        diagnostic_limit_smoke.addFileArg(b.path("test/zig/cli/diagnostic_limit_smoke.py"));
+        diagnostic_limit_smoke.addArtifactArg(cli);
+        dependOnValidation(&diagnostic_limit_smoke.step, cli_identity_validation);
+        b.step("diagnostic-limit-smoke", "Test diagnostic-limit publication and session recovery").dependOn(&diagnostic_limit_smoke.step);
+        const browser_startup_smoke = b.addSystemCommand(&.{"python3"});
+        browser_startup_smoke.addFileArg(b.path("test/zig/cli/browser_startup_smoke.py"));
+        browser_startup_smoke.addArtifactArg(cli);
+        dependOnValidation(&browser_startup_smoke.step, cli_identity_validation);
+        b.step("browser-startup-smoke", "Test immediate live HTTP and workspace availability").dependOn(&browser_startup_smoke.step);
+        const browser_resume_smoke = b.addSystemCommand(&.{"python3"});
+        browser_resume_smoke.addFileArg(b.path("test/zig/cli/browser_resume_smoke.py"));
+        browser_resume_smoke.addArtifactArg(cli);
+        dependOnValidation(&browser_resume_smoke.step, cli_identity_validation);
+        b.step("browser-resume-smoke", "Test persistent live snapshot reuse and invalidation").dependOn(&browser_resume_smoke.step);
+    }
     const source_serve_smoke = b.addSystemCommand(&.{"python3"});
     source_serve_smoke.addFileArg(b.path("test/zig/cli/source_serve_smoke.py"));
     source_serve_smoke.addArtifactArg(cli);
     dependOnValidation(&source_serve_smoke.step, cli_identity_validation);
     b.step("source-serve-smoke", "Test source-root and imported dependency watching").dependOn(&source_serve_smoke.step);
-    const live_browser_smoke = b.addSystemCommand(&.{"python3"});
-    live_browser_smoke.addFileArg(b.path("test/zig/cli/live_browser_smoke.py"));
-    live_browser_smoke.addArtifactArg(cli);
-    dependOnValidation(&live_browser_smoke.step, cli_identity_validation);
-    b.step("live-browser-smoke", "Test the combined source watcher and live SQL browser").dependOn(&live_browser_smoke.step);
-    const diagnostic_limit_smoke = b.addSystemCommand(&.{"python3"});
-    diagnostic_limit_smoke.addFileArg(b.path("test/zig/cli/diagnostic_limit_smoke.py"));
-    diagnostic_limit_smoke.addArtifactArg(cli);
-    dependOnValidation(&diagnostic_limit_smoke.step, cli_identity_validation);
-    b.step("diagnostic-limit-smoke", "Test diagnostic-limit publication and session recovery").dependOn(&diagnostic_limit_smoke.step);
     const install_smoke = b.addSystemCommand(&.{"python3"});
     install_smoke.addFileArg(b.path("test/zig/cli/install_smoke.py"));
     install_smoke.addArtifactArg(cli);
     dependOnValidation(&install_smoke.step, cli_identity_validation);
     b.step("install-smoke", "Test remapped Git submodule installation with local repositories").dependOn(&install_smoke.step);
-    const browser_startup_smoke = b.addSystemCommand(&.{"python3"});
-    browser_startup_smoke.addFileArg(b.path("test/zig/cli/browser_startup_smoke.py"));
-    browser_startup_smoke.addArtifactArg(cli);
-    dependOnValidation(&browser_startup_smoke.step, cli_identity_validation);
-    b.step("browser-startup-smoke", "Test immediate live HTTP and workspace availability").dependOn(&browser_startup_smoke.step);
-    const browser_resume_smoke = b.addSystemCommand(&.{"python3"});
-    browser_resume_smoke.addFileArg(b.path("test/zig/cli/browser_resume_smoke.py"));
-    browser_resume_smoke.addArtifactArg(cli);
-    dependOnValidation(&browser_resume_smoke.step, cli_identity_validation);
-    b.step("browser-resume-smoke", "Test persistent live snapshot reuse and invalidation").dependOn(&browser_resume_smoke.step);
     const reference_corpus_module = b.createModule(.{
         .root_source_file = b.path("test/zig/reference_corpus.zig"),
         .target = target,
@@ -382,6 +394,13 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "solidity", .module = solidity_module }},
     });
     const cli_smoke_step = b.step("cli-smoke", "Exercise the oksolc CLI");
+    if (!browser_enabled) {
+        const browser_disabled_smoke = b.addSystemCommand(&.{"python3"});
+        browser_disabled_smoke.addFileArg(b.path("test/zig/cli/browser_disabled_smoke.py"));
+        browser_disabled_smoke.addArtifactArg(cli);
+        dependOnValidation(&browser_disabled_smoke.step, cli_identity_validation);
+        cli_smoke_step.dependOn(&browser_disabled_smoke.step);
+    }
     const cache_lifecycle_smoke = b.addSystemCommand(&.{"python3"});
     cache_lifecycle_smoke.addFileArg(b.path("test/zig/cli/cache_lifecycle_smoke.py"));
     cache_lifecycle_smoke.addArtifactArg(cli);
