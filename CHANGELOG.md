@@ -10,6 +10,9 @@ Solidity compatibility target: `0.8.36`.
 
 ### Fixed
 
+- libevmasm: Prevent the constant optimizer's recursive search counter from
+  underflowing, avoiding runaway compilation and excessive memory use on
+  inputs such as OpenZeppelin's `Bytes.toNibbles` masks.
 - libsolidity: A library helper without parameters has no receiver to bind, 
   even when it overloads an applicable member.
 
