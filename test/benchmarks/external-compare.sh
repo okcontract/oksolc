@@ -139,6 +139,7 @@ benchmarks=(
     seaport-1.6
     farcaster-3.1.0
     pendle-v2-2026-09-16
+    solady-0.1.26
 )
 if (( ${#selected_projects[@]} != 0 )); then
     for selected in "${selected_projects[@]}"; do

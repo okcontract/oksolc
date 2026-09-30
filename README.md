@@ -363,10 +363,8 @@ compatibility and record cache metrics:
 zig build benchmark-incremental -Doptimize=ReleaseFast
 ```
 
-The external suite compares oksolc with original `solc 0.8.36` on 12 pinned
-projects: OpenZeppelin 4.7/4.8/4.9/5.0, two Uniswap v4 revisions, Liquity,
-EigenLayer, Sablier, Seaport, Farcaster, and Pendle V2. Replay the imported
-Standard JSON requests without project downloads or Forge:
+The external suite compares oksolc with original `solc 0.8.36`. Replay the
+imported Standard JSON requests without project downloads or Forge:
 
 ```sh
 zig build benchmark-external -Doptimize=ReleaseFast \
@@ -381,12 +379,6 @@ only Pendle, including all its production contracts and imported dependencies:
 zig build benchmark-external -Doptimize=ReleaseFast \
   -- --bundled-requests --project pendle-v2-2026-09-16
 ```
-
-The requests use optimized via-IR compilation and normalized Solidity version
-pragmas so both compilers receive identical inputs. Pendle uses 200 optimizer
-runs and Cancun; these are benchmark settings, not its deployment settings.
-The original request bytes and embedded upstream source notices are retained
-in `test/benchmarks/external-requests/`.
 
 To download the pinned projects and capture fresh requests through Forge:
 

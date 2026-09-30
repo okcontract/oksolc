@@ -7,10 +7,8 @@ otherwise, the project's own code is licensed under GPL-3.0; see LICENSE.txt
 and COPYRIGHT.txt.
 
 External benchmark requests under test/benchmarks/external-requests/ contain
-upstream Solidity sources and dependencies with their embedded SPDX notices.
-They are benchmark inputs, not linked into the compiler. The Pendle V2 pinned
-revision, dependency versions, source transformations, and upstream license
-are recorded under test/benchmarks/external-requests/pendle-v2-2026-09-16/.
+upstream Solidity outputs and dependencies with their embedded SPDX notices.
+They are benchmark inputs, not linked into the compiler.
 
 MIT-licensed components
 -----------------------

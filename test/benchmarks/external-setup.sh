@@ -191,6 +191,9 @@ setup_foundry_project sablier-v2-1.2.0/ tag v1.2.0 https://github.com/sablier-la
 
 setup_foundry_project pendle-v2-2026-09-16/ commit f24265966bb53f75d834ad705decde8e479d3a33 https://github.com/pendle-finance/pendle-core-v2-public install_pendle
 
+# Solady v0.1.26, including its vendored test utilities and default profile.
+setup_foundry_project solady-0.1.26/ commit acd959aa4bd04720d640bf4e6a5c71037510cc4b https://github.com/Vectorized/solady
+
 for project in ${selected_projects[@]+"${selected_projects[@]}"}; do
     [[ -d "$project" ]] || { echo "unknown or missing project: $project" >&2; exit 2; }
 done

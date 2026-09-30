@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.5-dev - 2026-09-30
+
+Solidity compatibility target: `0.8.36`.
+
+### Added
+
+- Add official benchmarks for `oksolc`, initially supporting 12 projects.
+
+### Fixed
+
+- libsolidity: A library helper without parameters has no receiver to bind, 
+  even when it overloads an applicable member.
+
 ## 0.1.4 - 2026-09-30
 
 Solidity compatibility target: `0.8.36`.

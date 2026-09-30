@@ -1591,7 +1591,7 @@ fn addBenchmarks(
 
     const benchmark_external_step = b.step(
         "benchmark-external",
-        "Compare ReleaseFast oksolc output and performance with solc on 12 external projects",
+        "Compare ReleaseFast oksolc output and performance with solc on 13 external projects",
     );
     if (benchmarkGuard(b, benchmark_external_step, target, optimize, benchmark_runs)) {
         const benchmark_external = b.addSystemCommand(&.{
