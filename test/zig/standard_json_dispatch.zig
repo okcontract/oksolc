@@ -56,6 +56,24 @@ test "using-for reference receivers preserve calldata memory and storage locatio
     }
 }
 
+test "using-for library lookup ignores zero-parameter helpers and preserves explicit diagnostics" {
+    inline for (.{
+        "solidity-using-for-zero-parameter-overload",
+        "solidity-using-for-zero-parameter-member-error",
+        "solidity-using-for-zero-parameter-explicit-error",
+    }) |name| {
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .input = @embedFile("standard-json/" ++ name ++ ".json"),
+        });
+        defer output.deinit();
+        try standard_json.compareExact(
+            @embedFile("standard-json/expected/" ++ name ++ ".json"),
+            output.bytes,
+        );
+    }
+}
+
 test "parked analysis settings are rejected by stateless and incremental compilation" {
     var dispatcher: libsolc.Dispatcher = .{};
     var session = solidity.CompilerSession.init(std.testing.allocator);

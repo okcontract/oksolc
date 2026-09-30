@@ -5206,6 +5206,10 @@ pub const TypeChecker = struct {
                     const visibility = ASTImplementation.effectiveVisibility(declaration) orelse
                         continue;
                     if (visibility == .Private) continue;
+                    // A library helper without parameters has no receiver to
+                    // bind, even when it overloads an applicable member.
+                    const parameters = declaration.payload.function_definition.callable.parameters;
+                    if (parameters.payload.parameter_list.parameters.len == 0) continue;
                     if (!containsMutableNode(declarations.items, declaration))
                         try declarations.append(self.allocator, declaration);
                 }
