@@ -98,7 +98,7 @@ jobs:
       - name: Run ${{ matrix.suite }} tests
         run: zig build ${{ matrix.targets }} -Dbrowser=${{ matrix.browser }} -Doptimize=${{ matrix.optimize }} -j2 --summary all
 
-      - name: Benchmark four external projects
+      - name: Benchmark external projects
         if: matrix.suite == 'compiler'
         timeout-minutes: 10
         run: python3 test/benchmarks/ci.py --jobs 2 --output-dir "$RUNNER_TEMP/oksolc-benchmarks"

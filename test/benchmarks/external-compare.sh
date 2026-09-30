@@ -128,6 +128,7 @@ fi
 
 benchmarks=(
     uniswap-v4-2022-06-16
+    openzeppelin-5.6.1
     openzeppelin-5.0.2
     openzeppelin-4.9.0
     liquity-2024-10-30

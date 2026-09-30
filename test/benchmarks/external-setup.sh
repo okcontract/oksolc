@@ -118,6 +118,12 @@ function setup_foundry_project {
     echo
 }
 
+function install_openzeppelin_contracts {
+    # Compile every library contract and mock, excluding upstream Foundry test
+    # harnesses. contracts/ is self-contained, so no test dependencies are needed.
+    sed_in_place 's/^test[[:space:]]*=.*$/test = "benchmark-empty-tests"/; s/^libs[[:space:]]*=.*$/libs = []/' foundry.toml
+}
+
 function install_liquity {
     sed_in_place 's|git@github.com:|https://github.com/|g' .gitmodules
     forge install
@@ -170,6 +176,7 @@ EOF
 mkdir -p "$BENCHMARK_DIR"
 cd "$BENCHMARK_DIR"
 
+setup_foundry_project openzeppelin-5.6.1/ tag v5.6.1 https://github.com/OpenZeppelin/openzeppelin-contracts install_openzeppelin_contracts
 setup_foundry_project openzeppelin-5.0.2/ tag v5.0.2 https://github.com/OpenZeppelin/openzeppelin-contracts
 setup_foundry_project openzeppelin-4.9.0/ tag v4.9.0 https://github.com/OpenZeppelin/openzeppelin-contracts
 setup_foundry_project openzeppelin-4.8.0/ tag v4.8.0 https://github.com/OpenZeppelin/openzeppelin-contracts

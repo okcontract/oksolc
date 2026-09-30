@@ -1,12 +1,13 @@
 # Changelog
 
-## 0.1.5-dev - 2026-09-30
+## 0.1.5 - 2026-09-30
 
 Solidity compatibility target: `0.8.36`.
 
 ### Added
 
 - Add official benchmarks for `oksolc`, initially supporting 12 projects.
+- Add OpenZeppelin Contracts 5.6.1 to the external benchmarks and CI.
 
 ### Fixed
 
