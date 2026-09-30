@@ -9,6 +9,7 @@
 
 # Local build and benchmark output
 /build/
+/benchmarks/
 /reports/
 
 # Python

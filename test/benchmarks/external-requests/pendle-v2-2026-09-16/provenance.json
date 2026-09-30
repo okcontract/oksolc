@@ -1,0 +1,70 @@
+{
+  "capture": "Forge 1.7.1, system solc 0.8.36; external-setup.sh install_pendle and external-compare.sh capture flags",
+  "commit": "f24265966bb53f75d834ad705decde8e479d3a33",
+  "dependencies": {
+    "@chainlink/contracts": {
+      "license": "MIT",
+      "license_files": [],
+      "version": "0.8.0"
+    },
+    "@layerzerolabs/lz-evm-messagelib-v2": {
+      "license": "LZBL-1.2",
+      "license_files": [],
+      "version": "3.0.148"
+    },
+    "@layerzerolabs/lz-evm-protocol-v2": {
+      "license": "LZBL-1.2",
+      "license_files": [],
+      "version": "3.0.148"
+    },
+    "@layerzerolabs/oapp-evm": {
+      "license": "MIT",
+      "license_files": [],
+      "version": "0.4.1"
+    },
+    "@layerzerolabs/oapp-evm-upgradeable": {
+      "license": "MIT",
+      "license_files": [],
+      "version": "0.1.3"
+    },
+    "@layerzerolabs/oft-evm": {
+      "license": "MIT",
+      "license_files": [],
+      "version": "4.0.1"
+    },
+    "@layerzerolabs/oft-evm-upgradeable": {
+      "license": "MIT",
+      "license_files": [],
+      "version": "4.0.2"
+    },
+    "@openzeppelin/contracts": {
+      "license": "MIT",
+      "license_files": [],
+      "version": "4.9.3"
+    },
+    "@openzeppelin/contracts-upgradeable": {
+      "license": "MIT",
+      "license_files": [],
+      "version": "4.9.3"
+    },
+    "solidity-bytes-utils": {
+      "license": "MIT",
+      "license_files": [
+        "solidity-bytes-utils-LICENSE"
+      ],
+      "version": "0.8.4"
+    }
+  },
+  "dependency_sources": 98,
+  "production_sources": 273,
+  "project": "pendle-v2-2026-09-16",
+  "repository": "https://github.com/pendle-finance/pendle-core-v2-public",
+  "request_bytes": 1795323,
+  "request_sha256": "a2307c0116238cf67ffb31e8e903a644f0bb8d6219e6b980192e1612c0cb6972",
+  "settings": "Optimized via-IR, 200 runs, Cancun, literal-content IPFS metadata with CBOR. Not upstream per-contract deployment settings.",
+  "transforms": [
+    "All Solidity version pragmas normalized to pragma solidity *; (same policy as existing external corpus)",
+    "Foundry production-only configuration with contracts/ source root and node_modules/ libraries"
+  ],
+  "upstream_yarn_lock_sha256": "bffe1547ed2b79ef9ed0baf5514c95b610e0e9d319b6788ef681ba22413a1980"
+}
