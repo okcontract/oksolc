@@ -2935,6 +2935,22 @@ fn runParallelViaIRJob(job: *ParallelViaIRJob) void {
     }
 }
 
+// Inputs are prepared before dispatch; each consumer owns one slot and releases
+// its scratch before claiming another. The counter only needs atomicity.
+const PreparedBackendJobs = struct {
+    jobs: []ParallelViaIRJob,
+    next: std.atomic.Value(usize) = .init(0),
+
+    fn run(self: *PreparedBackendJobs) void {
+        while (true) {
+            const index = self.next.fetchAdd(1, .monotonic);
+            if (index >= self.jobs.len) return;
+            const job = &self.jobs[index];
+            if (job.ir != null) runParallelViaIRJob(job);
+        }
+    }
+};
+
 fn appendSolidityViaIRArtifactsParallel(
     scratch_allocator: std.mem.Allocator,
     allocator: std.mem.Allocator,
@@ -3203,14 +3219,16 @@ fn appendSolidityViaIRArtifactsParallel(
                 job.ir = ir;
                 jobs.appendAssumeCapacity(job);
                 owns_artifact_arena = false;
-                group.async(
-                    runParallelViaIRJob,
-                    .{&jobs.items[jobs.items.len - 1]},
-                );
             }
         }
     }
 
+    // Keep the executor's concurrency bound, including eager or deferred starts.
+    var prepared: PreparedBackendJobs = .{ .jobs = jobs.items };
+    for (0..backend_job_count) |_| {
+        if (prepared.next.load(.monotonic) >= jobs.items.len) break;
+        group.async(PreparedBackendJobs.run, .{&prepared});
+    }
     try group.await();
 
     for (jobs.items) |*job| {
