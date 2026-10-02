@@ -156,16 +156,19 @@ const RematCandidateSelector = struct {
 
 pub const RunResult = struct {
     success: bool,
+    /// Original allocator and borrowed source-name owner, even without a report.
+    /// Keep it alive until this result and any transferred AST are destroyed.
+    owner: *const Object,
     ast: AST.Block,
     /// Owned report for this unchanged AST, independent of the temporary CFG.
     /// AST, dialect or object structure changes invalidate it.
     stack_report: ?struct {
-        object: *const Object,
         dialect: AST.Dialect,
         errors: StackLayout.StackTooDeepByFunction,
     } = null,
 
-    pub fn deinit(self: *RunResult, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *RunResult) void {
+        const allocator = self.owner.allocator;
         if (self.stack_report) |*report|
             StackLayout.deinitStackTooDeepByFunction(allocator, &report.errors);
         self.ast.deinit(allocator);
@@ -229,21 +232,22 @@ pub const StackCompressor = struct {
                 evm,
             );
             defer StackLayout.deinitStackTooDeepByFunction(allocator, &unreachables);
-            const unchanged = try eliminateVariablesOptimizedCodegen(
+            const proven_unchanged = try eliminateVariablesOptimizedCodegen(
                 allocator,
                 dialect.*,
                 &ast_root,
                 &unreachables,
                 allow_msize_optimization,
             );
-            if (unchanged) {
+            if (proven_unchanged) {
                 // Preserve the report's empty top-level entry for the evader.
                 const report = unreachables;
                 unreachables = StackLayout.StackTooDeepByFunction.init(allocator);
                 return .{
                     .success = false,
+                    .owner = object,
                     .ast = ast_root,
-                    .stack_report = .{ .object = object, .dialect = dialect.*, .errors = report },
+                    .stack_report = .{ .dialect = dialect.*, .errors = report },
                 };
             }
         } else {
@@ -256,7 +260,7 @@ pub const StackCompressor = struct {
                 );
                 defer checker.deinit();
                 if (checker.stackDeficit().isEmpty())
-                    return .{ .success = true, .ast = ast_root };
+                    return .{ .success = true, .owner = object, .ast = ast_root };
                 try eliminateVariables(
                     allocator,
                     dialect.*,
@@ -266,7 +270,7 @@ pub const StackCompressor = struct {
                 );
             }
         }
-        return .{ .success = false, .ast = ast_root };
+        return .{ .success = false, .owner = object, .ast = ast_root };
     }
 };
 
@@ -349,6 +353,7 @@ fn eliminateVariables(
     try prunePreservingFunctions(allocator, dialect, ast, allow_msize_optimization);
 }
 
+/// True proves the tree unchanged; false makes no claim about mutation.
 fn eliminateVariablesOptimizedCodegen(
     allocator: std.mem.Allocator,
     dialect: AST.Dialect,
@@ -471,7 +476,7 @@ test "classic stack compression rematerializes a deeply buried value" {
     ast = undefined;
 
     var result = try StackCompressor.run(object, true, 16);
-    defer result.deinit(allocator);
+    defer result.deinit();
     try std.testing.expect(result.success);
     var printer = AsmPrinter.AsmPrinter.init(
         allocator,

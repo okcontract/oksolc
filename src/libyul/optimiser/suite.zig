@@ -438,7 +438,7 @@ pub const OptimiserSuite = struct {
                 optimize_stack_allocation,
                 stack_compressor_max_iterations,
             );
-            defer compressed.deinit(allocator);
+            defer compressed.deinit();
             ast_root = compressed.ast;
             compressed.ast = .{};
         }
@@ -468,14 +468,11 @@ pub const OptimiserSuite = struct {
                         stack_compressor_max_iterations,
                     );
                 };
-                defer compressed.deinit(allocator);
-                if (evm.providesObjectAccess()) {
+                defer compressed.deinit();
+                {
                     var probe = ProfilerModule.OptionalProbe.init(profiler, "StackLimitEvader");
                     defer probe.deinit();
                     ast_root = try StackLimitEvader.runAfterCompression(&context, object, &compressed);
-                } else {
-                    ast_root = compressed.ast;
-                    compressed.ast = .{};
                 }
             } else if (evm.providesObjectAccess() and optimize_stack_allocation) {
                 var probe = ProfilerModule.OptionalProbe.init(profiler, "StackLimitEvader");

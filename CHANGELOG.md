@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.6-dev
+
+Solidity compatibility target: `0.8.36`.
+
+### Performance
+
+- Reuse unchanged stack preparation between Yul compression and stack-limit
+  evasion.
+
+### Fixed
+
+- Preserve AST ownership during stack-preparation handoff and reject
+  incompatible allocators before transferring the AST.
+
 ## 0.1.5 - 2026-09-30
 
 Solidity compatibility target: `0.8.36`.
