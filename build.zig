@@ -1159,7 +1159,7 @@ pub fn build(b: *std.Build) void {
     structured_yul_step.dependOn(&run_structured_yul_artifact_tests.step);
     const parallel_group_tests = b.addTest(.{
         .root_module = compiler_module,
-        .filters = &.{ "compiler module inventory", "parallel group cancellation" },
+        .filters = &.{ "compiler module inventory", "parallel group cancellation", "parallel prepared jobs" },
     });
     const run_parallel_group_tests = b.addRunArtifact(parallel_group_tests);
     structured_yul_step.dependOn(&run_parallel_group_tests.step);

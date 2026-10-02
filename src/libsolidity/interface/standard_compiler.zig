@@ -2935,21 +2935,60 @@ fn runParallelViaIRJob(job: *ParallelViaIRJob) void {
     }
 }
 
-// Inputs are prepared before dispatch; each consumer owns one slot and releases
-// its scratch before claiming another. The counter only needs atomicity.
+// The producer publishes initialized slots in stable storage. Consumers claim
+// each slot once and release its scratch before taking another.
 const PreparedBackendJobs = struct {
     jobs: []ParallelViaIRJob,
+    producer_thread: std.Thread.Id,
+    ready: std.atomic.Value(usize) = .init(0),
     next: std.atomic.Value(usize) = .init(0),
 
+    fn runWorker(self: *PreparedBackendJobs) void {
+        // An inline fallback must leave the producer free to prepare inputs.
+        // It joins the consumers after publishing the remaining jobs.
+        if (std.Thread.getCurrentId() == self.producer_thread) return;
+        self.run();
+    }
+
+    fn claim(self: *PreparedBackendJobs) ?*ParallelViaIRJob {
+        var index = self.next.load(.monotonic);
+        while (index < self.ready.load(.acquire)) {
+            if (self.next.cmpxchgWeak(index, index + 1, .monotonic, .monotonic)) |observed| {
+                index = observed;
+                continue;
+            }
+            return &self.jobs[index];
+        }
+        return null;
+    }
+
     fn run(self: *PreparedBackendJobs) void {
-        while (true) {
-            const index = self.next.fetchAdd(1, .monotonic);
-            if (index >= self.jobs.len) return;
-            const job = &self.jobs[index];
+        while (self.claim()) |job| {
             if (job.ir != null) runParallelViaIRJob(job);
         }
     }
 };
+
+test "parallel prepared jobs preserve unpublished and inline work" {
+    var jobs: [2]ParallelViaIRJob = undefined;
+    for (&jobs) |*job| job.ir = null;
+    var prepared: PreparedBackendJobs = .{
+        .jobs = &jobs,
+        .producer_thread = std.Thread.getCurrentId(),
+    };
+    try std.testing.expect(prepared.claim() == null);
+
+    prepared.ready.store(1, .release);
+    prepared.runWorker();
+    try std.testing.expectEqual(&jobs[0], prepared.claim().?);
+    try std.testing.expect(prepared.claim() == null);
+
+    // An empty queue must not skip a slot that is published later.
+    prepared.ready.store(2, .release);
+    prepared.runWorker();
+    try std.testing.expectEqual(&jobs[1], prepared.claim().?);
+    try std.testing.expect(prepared.claim() == null);
+}
 
 fn appendSolidityViaIRArtifactsParallel(
     scratch_allocator: std.mem.Allocator,
@@ -3009,6 +3048,10 @@ fn appendSolidityViaIRArtifactsParallel(
     }
     try jobs.ensureTotalCapacity(scratch_allocator, selected_count);
 
+    var prepared: PreparedBackendJobs = .{
+        .jobs = jobs.allocatedSlice()[0..selected_count],
+        .producer_thread = std.Thread.getCurrentId(),
+    };
     var group: ParallelGroup = .init(io);
     defer group.deinit();
     var parallel_progress: ParallelProgress = .{
@@ -3219,16 +3262,15 @@ fn appendSolidityViaIRArtifactsParallel(
                 job.ir = ir;
                 jobs.appendAssumeCapacity(job);
                 owns_artifact_arena = false;
+                prepared.ready.store(jobs.items.len, .release);
+                group.async(PreparedBackendJobs.runWorker, .{&prepared});
             }
         }
     }
 
-    // Keep the executor's concurrency bound, including eager or deferred starts.
-    var prepared: PreparedBackendJobs = .{ .jobs = jobs.items };
-    for (0..backend_job_count) |_| {
-        if (prepared.next.load(.monotonic) >= jobs.items.len) break;
-        group.async(PreparedBackendJobs.run, .{&prepared});
-    }
+    prepared.ready.store(jobs.items.len, .release);
+    group.async(PreparedBackendJobs.run, .{&prepared});
+    prepared.run();
     try group.await();
 
     for (jobs.items) |*job| {
