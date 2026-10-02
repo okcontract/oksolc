@@ -2454,6 +2454,32 @@ test "parallel multi-worker output is deterministic across fresh backends" {
     }
 }
 
+test "parallel mixed backend and metadata-only slots match sequential output" {
+    const input =
+        \\{"language":"Solidity","sources":{"Mixed.sol":{"content":"pragma solidity 0.8.36; contract A { function value(uint256 x) external pure returns (uint256) { return x + 1; } } interface I { function value() external returns (uint256); } contract Metadata {} abstract contract Abstract { function value() external virtual returns (uint256); } contract B { function value(uint256 x) external pure returns (uint256) { return x * 2; } } contract Ignored {}"}},"settings":{"viaIR":true,"optimizer":{"enabled":true,"runs":200},"outputSelection":{"*":{"A":["evm.bytecode.object"],"I":["ir","evm.bytecode.object"],"Metadata":["metadata"],"Abstract":["irOptimized","evm.bytecode.object"],"B":["evm.bytecode.object"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    var expected = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input });
+    defer expected.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, expected.bytes, .{});
+    defer parsed.deinit();
+    const contracts = parsed.value.object.get("contracts").?.object.get("Mixed.sol").?.object;
+    try std.testing.expectEqual(@as(usize, 5), contracts.count());
+    for ([_][]const u8{ "A", "B" }) |name| {
+        const bytecode = contracts.get(name).?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+        try std.testing.expect(bytecode.len > 0);
+    }
+    try std.testing.expect(contracts.get("Metadata").?.object.contains("metadata"));
+    try std.testing.expectEqualStrings("", contracts.get("I").?.object.get("ir").?.string);
+    try std.testing.expectEqualStrings("", contracts.get("Abstract").?.object.get("irOptimized").?.string);
+
+    for ([_]usize{ 1, 4 }) |jobs| {
+        var output = try compileWithParallelJobs(std.testing.allocator, input, jobs, null, null, null);
+        defer output.deinit();
+        try standard_json.compareExact(expected.bytes, output.bytes);
+    }
+}
+
 test "parallel progress and optimizer profiling retain parallel output" {
     var dispatcher: libsolc.Dispatcher = .{};
     var expected = try dispatcher.compiler().compile(std.testing.allocator, .{
@@ -2504,117 +2530,61 @@ test "parallel progress and optimizer profiling retain parallel output" {
     defer std.testing.allocator.free(report);
 }
 
-const WorkerFailAllocator = struct {
-    const Self = @This();
+const BackendFailureIo = struct {
+    allocator: *std.testing.FailingAllocator,
+    successful_allocations: usize,
 
-    child: std.mem.Allocator,
-    main_thread: std.Thread.Id,
-    remaining_worker_allocations: usize,
-    failed: bool = false,
-    mutex: std.Io.Mutex = .init,
+    const vtable: std.Io.VTable = blk: {
+        var table = std.Io.failing.vtable.*;
+        table.groupAsync = groupAsync;
+        break :blk table;
+    };
 
-    fn init(child: std.mem.Allocator, remaining_worker_allocations: usize) Self {
-        return .{
-            .child = child,
-            .main_thread = std.Thread.getCurrentId(),
-            .remaining_worker_allocations = remaining_worker_allocations,
-        };
+    fn io(self: *BackendFailureIo) std.Io {
+        return .{ .userdata = self, .vtable = &vtable };
     }
 
-    fn allocator(self: *Self) std.mem.Allocator {
-        return .{
-            .ptr = self,
-            .vtable = &.{
-                .alloc = alloc,
-                .resize = resize,
-                .remap = remap,
-                .free = free,
-            },
-        };
-    }
-
-    fn alloc(
-        opaque_self: *anyopaque,
-        len: usize,
-        alignment: std.mem.Alignment,
-        return_address: usize,
-    ) ?[*]u8 {
-        const self: *Self = @ptrCast(@alignCast(opaque_self));
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (std.Thread.getCurrentId() != self.main_thread and !self.failed) {
-            if (self.remaining_worker_allocations == 0) {
-                self.failed = true;
-                return null;
-            }
-            self.remaining_worker_allocations -= 1;
-        }
-        return self.child.rawAlloc(len, alignment, return_address);
-    }
-
-    fn resize(
-        opaque_self: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        new_len: usize,
-        return_address: usize,
-    ) bool {
-        const self: *Self = @ptrCast(@alignCast(opaque_self));
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return self.child.rawResize(memory, alignment, new_len, return_address);
-    }
-
-    fn remap(
-        opaque_self: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        new_len: usize,
-        return_address: usize,
-    ) ?[*]u8 {
-        const self: *Self = @ptrCast(@alignCast(opaque_self));
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return self.child.rawRemap(memory, alignment, new_len, return_address);
-    }
-
-    fn free(
-        opaque_self: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        return_address: usize,
+    fn groupAsync(
+        userdata: ?*anyopaque,
+        _: *std.Io.Group,
+        context: []const u8,
+        _: std.mem.Alignment,
+        start: *const fn (*const anyopaque) void,
     ) void {
-        const self: *Self = @ptrCast(@alignCast(opaque_self));
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.child.rawFree(memory, alignment, return_address);
+        const self: *BackendFailureIo = @ptrCast(@alignCast(userdata.?));
+        // Inline execution is permitted by Io.async. Fail inside the backend
+        // callback, regardless of which OS thread would normally consume it.
+        const previous = self.allocator.fail_index;
+        self.allocator.fail_index = self.allocator.alloc_index + self.successful_allocations;
+        defer self.allocator.fail_index = previous;
+        start(context.ptr);
     }
 };
 
-test "parallel worker allocation failures propagate after outstanding jobs join" {
+test "parallel backend allocation failures propagate from inline consumers" {
     for ([_]bool{ false, true }) |profile_enabled|
-        for ([_]usize{ 0, 8 }) |successful_worker_allocations| {
-            var failing = WorkerFailAllocator.init(
-                std.testing.allocator,
-                successful_worker_allocations,
-            );
+        for ([_]usize{ 0, 8 }) |successful_allocations| {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+            var backend: BackendFailureIo = .{
+                .allocator = &failing,
+                .successful_allocations = successful_allocations,
+            };
             var profiler = Profiler.init(std.testing.allocator, std.testing.io);
             defer profiler.deinit();
+            var dispatcher: libsolc.Dispatcher = .{
+                .optimizer_profiler = if (profile_enabled) &profiler else null,
+            };
             try std.testing.expectError(
                 error.OutOfMemory,
-                compileWithParallelJobs(
-                    failing.allocator(),
-                    parallel_solidity_input,
-                    2,
-                    if (profile_enabled) &profiler else null,
-                    null,
-                    null,
-                ),
+                dispatcher.compiler().compile(failing.allocator(), .{
+                    .input = parallel_solidity_input,
+                    .io = backend.io(),
+                }),
             );
-            try std.testing.expect(failing.failed);
+            try std.testing.expect(failing.has_induced_failure);
             if (profile_enabled) {
                 const counter = profiler.counterFor("Backend worker scratch retained bytes") orelse return error.MissingRetentionCounter;
-                try std.testing.expect(counter.sample_count > 0);
+                try std.testing.expectEqual(@as(usize, 3), counter.sample_count);
                 const report = try profiler.reportJsonAlloc(std.testing.allocator);
                 defer std.testing.allocator.free(report);
             }

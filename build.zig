@@ -1157,7 +1157,15 @@ pub fn build(b: *std.Build) void {
     });
     const run_structured_yul_artifact_tests = b.addRunArtifact(structured_yul_artifact_tests);
     structured_yul_step.dependOn(&run_structured_yul_artifact_tests.step);
-    b.step("test-parallel-artifacts", "Test artifact ownership, parallel output and retained-storage profiling").dependOn(&run_structured_yul_artifact_tests.step);
+    const parallel_group_tests = b.addTest(.{
+        .root_module = compiler_module,
+        .filters = &.{ "compiler module inventory", "parallel group cancellation" },
+    });
+    const run_parallel_group_tests = b.addRunArtifact(parallel_group_tests);
+    structured_yul_step.dependOn(&run_parallel_group_tests.step);
+    const parallel_artifacts_step = b.step("test-parallel-artifacts", "Test artifact ownership, parallel output and retained-storage profiling");
+    parallel_artifacts_step.dependOn(&run_structured_yul_artifact_tests.step);
+    parallel_artifacts_step.dependOn(&run_parallel_group_tests.step);
 
     const sqlite_tests = b.addTest(.{
         .name = "sqlite-store",
