@@ -8,6 +8,8 @@ Solidity compatibility target: `0.8.36`.
 
 - Reuse unchanged stack preparation between Yul compression and stack-limit
   evasion.
+- Keep parallel backend workers supplied with prepared jobs while overlapping
+  input preparation and backend compilation.
 
 ### Fixed
 
