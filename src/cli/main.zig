@@ -1458,8 +1458,7 @@ fn resolveParallelOptions(
     defer config.deinit(init.gpa);
     const enabled = cli_parallel or (config.parallel orelse false);
     const jobs = cli_jobs orelse config.jobs;
-    if (!enabled and jobs != null) return error.JobsRequireParallel;
-    if (jobs) |count| if (count == 0) return error.InvalidJobCount;
+    const parallel_jobs = try resolveParallelJobs(enabled, jobs);
     const default_store_options: solidity.incremental.SqliteStoreOptions = .{};
     const cache_requested = persistentCacheEnabled(config, cli_no_cache);
     const authentication_key = if (cache_requested)
@@ -1471,12 +1470,13 @@ fn resolveParallelOptions(
         null;
     const source_path = try init.gpa.dupe(u8, config.source_path orelse "src");
     errdefer init.gpa.free(source_path);
+    try solidity.libyul.yul_string.setSharded(parallel_jobs > 1);
     return .{
         .allocator = init.gpa,
         .project_root = project_root,
         .security_root = security_root,
         .enabled = enabled,
-        .jobs = jobs,
+        .jobs = if (enabled) parallel_jobs else null,
         .source_path = source_path,
         .cache = .{
             .enabled = cache_requested and authentication_key != null,
@@ -1842,12 +1842,7 @@ fn compileAndWrite(
         if (output_path) |output|
             if (std.mem.eql(u8, path, output)) return error.DuplicateOutputPath;
     }
-    if (!parallel and requested_jobs != null) return error.JobsRequireParallel;
-    const parallel_jobs = if (parallel)
-        requested_jobs orelse defaultParallelJobs()
-    else
-        1;
-    if (parallel_jobs == 0) return error.InvalidJobCount;
+    const parallel_jobs = try resolveParallelJobs(parallel, requested_jobs);
 
     var parallel_backend: std.Io.Threaded = undefined;
     const compiler_io: ?std.Io = if (parallel) io: {
@@ -2252,6 +2247,13 @@ fn prepareTrustedArtifactCacheDirectory(
     defer allocator.free(canonical_directory);
     return std.mem.eql(u8, directory_path, canonical_directory) and
         !pathContainedBy(security_root, canonical_directory);
+}
+
+fn resolveParallelJobs(enabled: bool, requested_jobs: ?usize) error{ JobsRequireParallel, InvalidJobCount }!usize {
+    if (!enabled and requested_jobs != null) return error.JobsRequireParallel;
+    const jobs = if (enabled) requested_jobs orelse defaultParallelJobs() else 1;
+    if (jobs == 0) return error.InvalidJobCount;
+    return jobs;
 }
 
 fn defaultParallelJobs() usize {
@@ -3189,6 +3191,17 @@ test "filesystem source loader enforces a per-request total byte limit" {
 test "default parallel job policy is bounded and nonzero" {
     try std.testing.expect(defaultParallelJobs() >= 1);
     try std.testing.expect(defaultParallelJobs() <= max_default_parallel_jobs);
+}
+
+test "parallel worker resolution validates serial, single and multiple jobs" {
+    try std.testing.expectEqual(@as(usize, 1), try resolveParallelJobs(false, null));
+    try std.testing.expectEqual(@as(usize, 1), try resolveParallelJobs(true, 1));
+    try std.testing.expectEqual(@as(usize, 2), try resolveParallelJobs(true, 2));
+    try std.testing.expectEqual(@as(usize, 10), try resolveParallelJobs(true, 10));
+    try std.testing.expectEqual(defaultParallelJobs(), try resolveParallelJobs(true, null));
+    try std.testing.expectError(error.JobsRequireParallel, resolveParallelJobs(false, 1));
+    try std.testing.expectError(error.JobsRequireParallel, resolveParallelJobs(false, 0));
+    try std.testing.expectError(error.InvalidJobCount, resolveParallelJobs(true, 0));
 }
 
 test "project config accepts parallel and cache policy" {

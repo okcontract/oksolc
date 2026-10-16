@@ -672,12 +672,23 @@ test "verbatim builtins use the protected handle range and exact grammar" {
 
 test "cached dialect factories are stable until the Yul string repository resets" {
     try YulString.reset();
-    const first = try strictAssemblyForEVM(EVMVersion.init(.London));
-    const again = try strictAssemblyForEVM(EVMVersion.init(.London));
-    const objects = try strictAssemblyForEVMObjects(EVMVersion.init(.London));
-    try std.testing.expect(first == again);
-    try std.testing.expect(first != objects);
-    try std.testing.expect(!first.providesObjectAccess());
-    try std.testing.expect(objects.providesObjectAccess());
-    try YulString.reset();
+    defer {
+        YulString.reset() catch unreachable;
+        YulString.setSharded(false) catch unreachable;
+    }
+    for ([_]bool{ false, true }) |sharded| {
+        try YulString.setSharded(sharded);
+        for (0..3) |_| {
+            const first = try strictAssemblyForEVM(EVMVersion.init(.London));
+            const again = try strictAssemblyForEVM(EVMVersion.init(.London));
+            const objects = try strictAssemblyForEVMObjects(EVMVersion.init(.London));
+            try std.testing.expect(first == again);
+            try std.testing.expect(first != objects);
+            try std.testing.expect(!first.providesObjectAccess());
+            try std.testing.expect(objects.providesObjectAccess());
+            const add = first.findBuiltin("add").?;
+            try std.testing.expect(first.builtin(add) != null);
+            try YulString.reset();
+        }
+    }
 }

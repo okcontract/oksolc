@@ -15,6 +15,8 @@ Solidity compatibility target: `0.8.36`.
   `revision.markDependencyUsed(graph, importer, referenced)` with
   `marker.mark(importer, referenced)` and call `marker.deinit()` after collection.
   See the [Zig API migration example](README.md#zig-api-migration-for-020-dev).
+- Return `error.InternerAlreadyInitialized` from the lower-level Zig
+  `yul_string.setSharded` API instead of silently ignoring late configuration.
 
 ### Performance
 
@@ -23,6 +25,8 @@ Solidity compatibility target: `0.8.36`.
   Defer setup for cheap shuffles and hash slot identities in large tables.
 - Reuse exact assembly common-subexpression chunks across optimization rounds
   with bounded retained storage.
+- Shard Yul string interning for multiple compilation workers while preserving
+  serial storage and transferring long generated-name buffers without copying.
 
 ### Fixed
 
@@ -36,6 +40,10 @@ Solidity compatibility target: `0.8.36`.
   allocator.
 - Preserve dependency-mask initialization retry state and continue compilation
   when optional optimizer-cache storage runs out of memory.
+- Retain the public Zig `libyul.yul_string.Repository.generatedHandle` method for
+  callers managing their own string repositories.
+- Keep Yul string interning unsharded for `--parallel --jobs 1` and validate
+  worker counts before configuring the interner.
 
 ## 0.1.6 - 2026-10-12
 

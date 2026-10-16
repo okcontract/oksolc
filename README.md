@@ -103,6 +103,15 @@ fn collectDependencies(
 Initialization failure leaves the mask list empty and permits retrying on the
 same revision. Standard JSON and C ABI callers need no migration.
 
+Call `try solidity.libyul.yul_string.setSharded(true)` before interning strings
+or starting compilation workers to enable the process-global sharded interner.
+It returns `error.InternerAlreadyInitialized` after a repository is initialized,
+including when requesting the existing mode. Reset only after all users of
+interned handles and cached dialects have stopped; reset invalidates those
+handles and allows reconfiguration. The CLI selects sharding only when its
+resolved worker count exceeds one. The public `Repository.generatedHandle`
+method remains available for callers managing their own repositories.
+
 ## Requirements
 
 - Zig `0.17.0`
@@ -391,10 +400,19 @@ zig build fuzz --fuzz=10K -Dadapter-fuzz-runs=10000 -j2
 Run benchmarks on an otherwise idle machine with a native ReleaseFast build.
 Reports are written under `build/benchmarks`.
 
+`test/benchmarks/alternating-compare.py` compares immutable binaries with
+`--no-cache` and alternates which binary runs first across workloads and pairs.
+Use `--jobs 2` to exercise the CLI's default parallel limit, or
+`--parallel --jobs 1` to exercise the explicitly parallel single-worker path. Use
+`--runs 1 --warmups 0` for a single sample. This helper records timings and peak
+RSS; validate bytecode with `compare.py`. Bytecode checks compare creation and
+deployed objects, including metadata, rather than every Standard JSON field.
+
 The focused optimizer-cache checks and performance probes are available with:
 
 ```sh
 zig build test-optimizer-caches -Doptimize=Debug
+zig build test-yul-interner -Doptimize=Debug
 zig build benchmark-optimizer-caches -Doptimize=ReleaseFast
 ```
 
@@ -407,6 +425,17 @@ include that instrumentation. Whole-compiler timings should use normal builds.
 The reported allocation bytes include retained container capacity but exclude
 allocator metadata and bucket overhead. The default 8 MiB limit covers retained
 item and verbatim payload, with a separate 2,048-entry limit.
+
+Build the Yul interner probes together with
+`zig build build-interner-benchmarks -Doptimize=ReleaseFast -j8`. Run
+`zig-out/bin/yul-interner-N WORKERS` with `N` set to 1, 8, 16, 32, or 64 and
+`WORKERS` set to 2 or 10 to compare contention at those shard counts. Each
+process samples initial use, reuse without resetting, and use after resetting
+once each, checking ordinary/generated canonicality outside the timing.
+Reports include cumulative process peak RSS after each stage; this includes
+container capacity and allocator retention, not just string payload. Normal
+compiler builds use 64 shards when multiple workers are enabled. This fixed
+choice is not a claim of optimality across machines or compiler workloads.
 
 To compile the CLI and benchmark executables together before timing, use
 `zig build build-benchmarks -Doptimize=ReleaseFast`. Zig schedules independent

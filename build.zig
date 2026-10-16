@@ -1137,6 +1137,16 @@ pub fn build(b: *std.Build) !void {
     dependOnValidation(&run_public_api_tests.step, addCompilerBuildIdentityValidation(b, public_api_tests, compiler_build_validation_identity));
     b.step("test-public-api", "Test public Zig API ownership and compiler sessions").dependOn(&run_public_api_tests.step);
 
+    const yul_interner_tests = b.addTest(.{
+        .name = "yul-interner",
+        .root_module = compiler_module,
+        .filters = &.{ "compiler module inventory", "libyul.yul_string", "cached dialect factories" },
+    });
+    yul_interner_tests.stack_size = 32 * 1024 * 1024;
+    const run_yul_interner_tests = b.addRunArtifact(yul_interner_tests);
+    dependOnValidation(&run_yul_interner_tests.step, addCompilerBuildIdentityValidation(b, yul_interner_tests, compiler_build_validation_identity));
+    b.step("test-yul-interner", "Test sharded Yul canonicality, ownership, startup failures and reset lifetimes").dependOn(&run_yul_interner_tests.step);
+
     const optimizer_cache_tests = b.addTest(.{
         .name = "optimizer-cache-integration",
         .root_module = standard_json_dispatch_module,
@@ -1560,6 +1570,33 @@ fn addBenchmarks(
         run.has_side_effects = true;
         dependOnValidation(&run.step, validation);
         cache_probe_step.dependOn(&run.step);
+    }
+    const interner_probe_step = b.step("build-interner-benchmarks", "Build single-sample Yul interner probes for 1, 8, 16, 32 and 64 shards in parallel");
+    if (benchmarkGuard(b, interner_probe_step, target, optimize, 1)) {
+        const interner_module = b.createModule(.{
+            .root_source_file = b.path("src/libyul/yul_string.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        for ([_]usize{ 1, 8, 16, 32, 64 }) |count| {
+            const options = b.addOptions();
+            options.addOption(usize, "shards", count);
+            const probe = b.addExecutable(.{
+                .name = b.fmt("yul-interner-{d}", .{count}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/benchmarks/yul_interner.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "yul_string", .module = interner_module },
+                        .{ .name = "benchmark_options", .module = options.createModule() },
+                    },
+                }),
+            });
+            interner_probe_step.dependOn(&b.addInstallArtifact(probe, .{}).step);
+            build_benchmarks_step.dependOn(&probe.step);
+        }
     }
     const benchmark_local_step = b.step(
         "benchmark-local",

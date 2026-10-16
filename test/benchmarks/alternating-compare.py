@@ -3,7 +3,9 @@
 # Copyright (C) 2014-2026 The Solidity Authors.
 # Copyright (C) 2026 OKcontract Pte. Ltd.
 
-"""Benchmark two immutable solidity-zig executables in balanced alternating order."""
+"""Time two immutable executables with persistence disabled; validate outputs separately."""
+
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -25,9 +27,9 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def run_compiler(binary: Path, request: Path, jobs: int) -> dict[str, float | int]:
-    arguments = [str(binary), "standard-json"]
-    if jobs != 1:
+def run_compiler(binary: Path, request: Path, jobs: int, parallel: bool = False) -> dict[str, float | int]:
+    arguments = [str(binary), "standard-json", "--no-cache"]
+    if parallel or jobs != 1:
         arguments.extend(("--parallel", "--jobs", str(jobs)))
     arguments.append("-")
 
@@ -81,6 +83,7 @@ def main() -> None:
     parser.add_argument("--candidate-label", default="Candidate")
     parser.add_argument("--request", action="append", nargs=2, metavar=("NAME", "PATH"), required=True)
     parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--parallel", action="store_true", help="Also pass --parallel at --jobs 1; multi-job runs always use it")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--start", choices=("baseline", "candidate"), default="baseline")
@@ -105,7 +108,10 @@ def main() -> None:
         "jobs": args.jobs,
         "runs": args.runs,
         "warmups": args.warmups,
-        "order_strategy": "alternating pair order: AB, BA",
+        "persistent_cache": False,
+        "parallel": args.parallel or args.jobs != 1,
+        "validation": "timing only; use compare.py to check creation and deployed bytecode",
+        "order_strategy": "alternate the first variant across workloads and measured pairs",
         "variant_labels": {
             "baseline": args.baseline_label,
             "candidate": args.candidate_label,
@@ -120,7 +126,7 @@ def main() -> None:
 
     first = args.start
     second = "candidate" if first == "baseline" else "baseline"
-    for workload_name, request_input in args.request:
+    for workload_index, (workload_name, request_input) in enumerate(args.request):
         request = Path(request_input).resolve()
         workload = {
             "request_path": str(request),
@@ -130,18 +136,18 @@ def main() -> None:
         }
 
         for warmup_index in range(args.warmups):
-            warmup_order = (second, first) if warmup_index % 2 == 0 else (first, second)
+            warmup_order = (second, first) if (warmup_index + workload_index) % 2 == 0 else (first, second)
             for variant in warmup_order:
                 if sha256(binaries[variant]) != initial_hashes[variant]:
                     raise RuntimeError(f"{variant} executable changed before warmup")
-                run_compiler(binaries[variant], request, args.jobs)
+                run_compiler(binaries[variant], request, args.jobs, args.parallel)
 
         for pair_index in range(args.runs):
-            order = (first, second) if pair_index % 2 == 0 else (second, first)
+            order = (first, second) if (pair_index + workload_index) % 2 == 0 else (second, first)
             for variant in order:
                 if sha256(binaries[variant]) != initial_hashes[variant]:
                     raise RuntimeError(f"{variant} executable changed before measurement")
-                sample = run_compiler(binaries[variant], request, args.jobs)
+                sample = run_compiler(binaries[variant], request, args.jobs, args.parallel)
                 sample["pair"] = pair_index + 1
                 sample["position"] = len(workload["invocation_order"]) + 1
                 workload["samples"][variant].append(sample)
