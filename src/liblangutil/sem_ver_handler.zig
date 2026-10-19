@@ -123,19 +123,15 @@ pub const MatchComponent = struct {
             return component.matches(candidate);
         }
 
-        var comparison: i2 = 0;
+        var comparison: i32 = 0;
         var did_compare = false;
         for (0..self.levels_present) |index| {
             if (comparison != 0) break;
             const expected = self.version.numbers[index];
             if (expected == wildcard) continue;
             did_compare = true;
-            comparison = if (candidate.numbers[index] < expected)
-                -1
-            else if (candidate.numbers[index] > expected)
-                1
-            else
-                0;
+            // solc 0.8.36 compares components by signed 32-bit subtraction.
+            comparison = @bitCast(candidate.numbers[index] -% expected);
         }
         if (comparison == 0 and candidate.prerelease.len != 0 and did_compare) {
             comparison = -1;
@@ -302,6 +298,7 @@ pub const SemVerMatchExpressionParser = struct {
         while (self.position == start_position) {
             const current = self.currentChar() orelse break;
             if (!isDigit(current)) break;
+            // Retain solc 0.8.36's wrapping overflow check for pragma parity.
             const multiplied = value *% 10;
             if (multiplied < value) return error.IntegerTooLarge;
             const next_value = multiplied +% (current - '0');
@@ -388,6 +385,47 @@ test "semantic versions preserve prerelease/build and pragma matching" {
     var prerelease = try SemVerVersion.init(std.testing.allocator, "1.2.0-alpha");
     defer prerelease.deinit();
     try std.testing.expect(!expression.matches(prerelease));
+}
+
+test "large pragma components preserve solc 0.8.36 comparison boundaries" {
+    const candidate = SemVerVersion{ .numbers = .{ 0, 8, 36 } };
+    const cases = [_]struct { literal: []const u8, order: std.math.Order, range_matches: bool = false }{
+        .{ .literal = "2147483647", .order = .lt },
+        .{ .literal = "2147483648", .order = .lt },
+        .{ .literal = "2147483649", .order = .gt },
+        .{ .literal = "3000000000", .order = .gt },
+        .{ .literal = "4294967294", .order = .gt },
+        .{ .literal = "4294967295", .order = .eq, .range_matches = true }, // Wildcard sentinel.
+        .{ .literal = "7000000000", .order = .gt }, // Reference parser wraps.
+        .{ .literal = "0.2147483656", .order = .lt },
+        .{ .literal = "0.2147483657", .order = .gt },
+        .{ .literal = "0.8.2147483685", .order = .gt, .range_matches = true },
+    };
+    const operators = [_]struct { token: Token, literal: []const u8 }{
+        .{ .token = .Assign, .literal = "=" },
+        .{ .token = .LessThan, .literal = "<" },
+        .{ .token = .LessThanOrEqual, .literal = "<=" },
+        .{ .token = .GreaterThan, .literal = ">" },
+        .{ .token = .GreaterThanOrEqual, .literal = ">=" },
+        .{ .token = .BitNot, .literal = "~" },
+        .{ .token = .BitXor, .literal = "^" },
+    };
+    for (cases) |case| for (operators) |operator| {
+        const tokens = [_]Token{ operator.token, .Number };
+        const literals = [_][]const u8{ operator.literal, case.literal };
+        var parser = try SemVerMatchExpressionParser.init(std.testing.allocator, &tokens, &literals);
+        var expression = try parser.parse();
+        defer expression.deinit();
+        const expected = switch (operator.token) {
+            .LessThan => case.order == .lt,
+            .LessThanOrEqual => case.order != .gt,
+            .GreaterThan => case.order == .gt,
+            .GreaterThanOrEqual => case.order != .lt,
+            .BitNot, .BitXor => case.range_matches,
+            else => case.order == .eq,
+        };
+        try std.testing.expectEqual(expected, expression.matches(candidate));
+    };
 }
 
 test "version pragma failures retain the upstream diagnostic reason" {

@@ -137,6 +137,16 @@ test "external static returndata totals cross the 32-bit size boundary" {
     }
 }
 
+test "large version pragmas retain reference compiler acceptance" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ ">3000000000", ">7000000000", "<2147483648" }) |range| {
+        const source = try allocator.print("pragma solidity {s}; contract C {{}}", .{range});
+        defer allocator.free(source);
+        const bytecode = try compileTestContract(allocator, source);
+        defer allocator.free(bytecode);
+    }
+}
+
 test "relative imports preserve virtual source names when normalized aliases coexist" {
     const allocator = std.testing.allocator;
     const input =
