@@ -4833,6 +4833,28 @@ pub const IRGeneratorForStatements = struct {
         return result;
     }
 
+    fn variableLValue(
+        self: *IRGeneratorForStatements,
+        declaration: *const AST.Node,
+    ) GeneratorError!IRLValueModule.IRLValue {
+        if (declaration.nodeKind() != .variable_declaration)
+            return error.UnsupportedLValue;
+        if (self.context.isLocalVariable(declaration)) {
+            const local = try self.context.localVariable(declaration);
+            return IRLValueModule.IRLValue.initStack(try local.clone());
+        }
+        if (self.context.isStateVariable(declaration))
+            return self.stateVariableLValue(declaration);
+        if (ASTImplementation.isStateVariable(declaration) and
+            declaration.payload.variable_declaration.mutability == .Immutable)
+            return IRLValueModule.IRLValue.initImmutable(
+                self.allocator,
+                try variableType(declaration),
+                declaration,
+            );
+        return error.UnsupportedLValue;
+    }
+
     fn resolveLValue(
         self: *IRGeneratorForStatements,
         node: *const AST.Node,
@@ -4840,26 +4862,9 @@ pub const IRGeneratorForStatements = struct {
     ) GeneratorError!IRLValueModule.IRLValue {
         if (depth >= max_ast_depth) return error.AstTooDeep;
         return switch (node.payload) {
-            .identifier => blk: {
-                const declaration = (try identifierAnnotation(node)).referenced_declaration orelse
-                    return error.InvalidAst;
-                if (declaration.nodeKind() != .variable_declaration)
-                    return error.UnsupportedLValue;
-                if (self.context.isLocalVariable(declaration)) {
-                    const local = try self.context.localVariable(declaration);
-                    break :blk IRLValueModule.IRLValue.initStack(try local.clone());
-                }
-                if (self.context.isStateVariable(declaration))
-                    break :blk try self.stateVariableLValue(declaration);
-                if (ASTImplementation.isStateVariable(declaration) and
-                    declaration.payload.variable_declaration.mutability == .Immutable)
-                    break :blk IRLValueModule.IRLValue.initImmutable(
-                        self.allocator,
-                        try variableType(declaration),
-                        declaration,
-                    );
-                return error.UnsupportedLValue;
-            },
+            .identifier => self.variableLValue(
+                (try identifierAnnotation(node)).referenced_declaration orelse return error.InvalidAst,
+            ),
             .tuple_expression => |tuple| blk: {
                 if (tuple.components.len == 1)
                     break :blk try self.resolveLValue(tuple.components[0] orelse return error.InvalidAst, depth + 1);
@@ -4902,19 +4907,16 @@ pub const IRGeneratorForStatements = struct {
                     return error.UnsupportedLValue;
                 break :blk self.emitArrayPushLValue(node, call_type, depth + 1);
             },
-            .member_access => blk: {
-                const structure_type = try expressionType(
-                    node.payload.member_access.expression,
-                );
-                const structure = switch (structure_type.payload) {
-                    .Struct => |value| value,
-                    else => return error.UnsupportedLValue,
-                };
-                break :blk self.resolveStructMemberLValue(
-                    node,
-                    structure,
-                    depth + 1,
-                );
+            .member_access => |access| switch ((try expressionType(access.expression)).payload) {
+                .Struct => |structure| self.resolveStructMemberLValue(node, structure, depth + 1),
+                .TypeType => |type_type| blk: {
+                    if (type_type.actual_type.category() != .Contract)
+                        return error.UnsupportedLValue;
+                    break :blk self.variableLValue(
+                        (try memberAccessAnnotation(node)).referenced_declaration orelse return error.InvalidAst,
+                    );
+                },
+                else => error.UnsupportedLValue,
             },
             else => error.UnsupportedLValue,
         };

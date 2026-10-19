@@ -62,6 +62,33 @@ test "fixed-bytes wrappers materialize string and hexadecimal literals" {
     }
 }
 
+test "qualified state writes preserve scalar immutable and function lvalues" {
+    const allocator = std.testing.allocator;
+    const template =
+        \\pragma solidity 0.8.36;
+        \\contract C {
+        \\    uint256 public value;
+        \\    uint256 public immutable initial;
+        \\    function(uint256) internal pure returns (uint256) handler;
+        \\    constructor() { QUAL.initial = 7; QUAL.handler = twice; }
+        \\    function twice(uint256 n) internal pure returns (uint256) { return n * 2; }
+        \\    function set(uint256 n) external { QUAL.value = QUAL.handler(n); }
+        \\}
+    ;
+    var expected: ?[]u8 = null;
+    defer if (expected) |bytes| allocator.free(bytes);
+    for ([_][]const u8{ "", "C." }) |qualifier| {
+        const source = try std.mem.replaceOwned(u8, allocator, template, "QUAL.", qualifier);
+        defer allocator.free(source);
+        const bytecode = try compileTestContract(allocator, source);
+        defer allocator.free(bytecode);
+        if (expected) |bytes|
+            try std.testing.expectEqualStrings(bytes, bytecode)
+        else
+            expected = try allocator.dupe(u8, bytecode);
+    }
+}
+
 test "relative imports preserve virtual source names when normalized aliases coexist" {
     const allocator = std.testing.allocator;
     const input =

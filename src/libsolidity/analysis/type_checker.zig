@@ -4972,6 +4972,7 @@ pub const TypeChecker = struct {
                     .type_ref = member.type_ref,
                     .declaration = member.declaration,
                     .lookup = .Static,
+                    .is_lvalue = if (member.declaration) |declaration| declarationIsLValue(declaration) else false,
                     .is_pure = true,
                 };
             },
