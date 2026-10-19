@@ -5782,18 +5782,18 @@ pub const IRGeneratorForStatements = struct {
 fn errorPayloadNeedsAllocation(
     parameter_types: []const *const Types.Type,
 ) GeneratorError!bool {
-    var static_size: usize = 0;
+    var static_size: u256 = 0;
     for (parameter_types) |type_ref| {
         if (!TypeBehavior.isValueType(type_ref) or
             TypeBehavior.isDynamicallyEncoded(type_ref))
             return true;
         static_size = std.math.add(
-            usize,
+            u256,
             static_size,
             try TypeBehavior.calldataEncodedSize(type_ref, true),
         ) catch return error.Overflow;
     }
-    const encoded_size = std.math.add(usize, static_size, 4) catch
+    const encoded_size = std.math.add(u256, static_size, 4) catch
         return error.Overflow;
     return encoded_size > ContextModule.general_purpose_memory_start;
 }

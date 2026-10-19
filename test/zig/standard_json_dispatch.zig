@@ -147,6 +147,24 @@ test "large version pragmas retain reference compiler acceptance" {
     }
 }
 
+test "calldata struct heads cross the 32-bit size boundary" {
+    const allocator = std.testing.allocator;
+    for ([_]u32{ 134217725, 134217726, 134217727 }) |length| {
+        for ([_][]const u8{ "[]", "[1]" }) |outer| {
+            const source = try allocator.print(
+                "pragma solidity 0.8.36; contract C {{" ++
+                    "struct Entry {{ uint256[{d}] values; uint256 tag; bytes data; }}" ++
+                    "function encode(Entry{s} calldata values) external pure returns (bytes memory) {{" ++
+                    "return abi.encode(values); }} }}",
+                .{ length, outer },
+            );
+            defer allocator.free(source);
+            const bytecode = try compileTestContract(allocator, source);
+            defer allocator.free(bytecode);
+        }
+    }
+}
+
 test "relative imports preserve virtual source names when normalized aliases coexist" {
     const allocator = std.testing.allocator;
     const input =

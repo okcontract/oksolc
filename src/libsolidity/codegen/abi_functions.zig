@@ -127,7 +127,7 @@ pub const ABIFunctions = struct {
         errdefer self.function_collector.abortFunction(name.items);
 
         var stack_size: usize = 0;
-        var head_size: usize = 0;
+        var head_size: u256 = 0;
         for (given_types, encoded_targets) |given, target| {
             stack_size = std.math.add(
                 usize,
@@ -135,7 +135,7 @@ pub const ABIFunctions = struct {
                 try TypeBehavior.sizeOnStack(given),
             ) catch return error.Overflow;
             head_size = std.math.add(
-                usize,
+                u256,
                 head_size,
                 try TypeBehavior.calldataHeadSize(target),
             ) catch return error.Overflow;
@@ -145,7 +145,7 @@ pub const ABIFunctions = struct {
         const parameters = try generator.indexedNames("value", stack_size);
         var body: Generated.Buffer = .{ .generator = generator };
         try body.add("tail := add(headStart, @0)", .{head_size});
-        var head_position: usize = 0;
+        var head_position: u256 = 0;
         var stack_position: usize = 0;
         for (given_types, encoded_targets) |given, target| {
             const stack_words = try TypeBehavior.sizeOnStack(given);
@@ -283,14 +283,14 @@ pub const ABIFunctions = struct {
             decoding.* = try self.decodingType(type_ref);
 
         var return_count: usize = 0;
-        var minimum_size: usize = 0;
+        var minimum_size: u256 = 0;
         for (types, decoding_types) |type_ref, decoding| {
             const size = try TypeBehavior.sizeOnStack(type_ref);
             if (size == 0 or size != try TypeBehavior.sizeOnStack(decoding))
                 return error.UnsupportedType;
             return_count = std.math.add(usize, return_count, size) catch return error.Overflow;
             minimum_size = std.math.add(
-                usize,
+                u256,
                 minimum_size,
                 try TypeBehavior.calldataHeadSize(decoding),
             ) catch return error.Overflow;
@@ -303,7 +303,7 @@ pub const ABIFunctions = struct {
         defer self.allocator.free(short_revert);
         var body: Generated.Buffer = .{ .generator = generator };
         try body.add("if slt(sub(dataEnd, headStart), @0) { @1() }", .{ minimum_size, short_revert });
-        var head_position: usize = 0;
+        var head_position: u256 = 0;
         var stack_position: usize = 0;
         for (types, decoding_types) |type_ref, decoding| {
             const invalid_offset_revert = try self.utils.revertReasonIfDebugFunction(
@@ -1515,7 +1515,7 @@ pub const ABIFunctions = struct {
         defer self.allocator.free(memory_size_text);
         const generator = try self.function_collector.generator(self.evm_version);
         var member_code: Generated.Buffer = .{ .generator = generator };
-        var head_position: u32 = 0;
+        var head_position: u256 = 0;
         for (structure.declaration.payload.struct_definition.members) |member| {
             if (member.nodeKind() != .variable_declaration) return error.InvalidType;
             const member_name = member.payload.variable_declaration.declaration.name;
@@ -1559,7 +1559,7 @@ pub const ABIFunctions = struct {
                     .{ head_position, try generator.numberToken(memory_offset_text), decoder },
                 );
             head_position = std.math.add(
-                u32,
+                u256,
                 head_position,
                 try TypeBehavior.calldataHeadSize(decoding),
             ) catch return error.Overflow;

@@ -792,7 +792,7 @@ pub const YulUtilFunctions = struct {
         const needed_length_text = try compactHex(self.allocator, needed_length);
         defer self.allocator.free(needed_length_text);
         const dynamic = TypeBehavior.isDynamicallySized(type_ref);
-        const stride: u32 = if (dynamic)
+        const stride: u256 = if (dynamic)
             try TypeBehavior.calldataStride(type_ref.payload.Array)
         else
             0;
@@ -2057,10 +2057,10 @@ pub const YulUtilFunctions = struct {
                 "ABI decoding: struct data too short",
             );
             defer self.allocator.free(short);
-            var head_size: u32 = 0;
+            var head_size: u256 = 0;
             for (source_members.items) |member|
                 head_size = std.math.add(
-                    u32,
+                    u256,
                     head_size,
                     try TypeBehavior.calldataHeadSize(member.type_ref),
                 ) catch return error.Overflow;
@@ -5291,7 +5291,7 @@ pub const YulUtilFunctions = struct {
     ) UtilError!Yul.Block {
         if ((pos_variable == null) != (end_variable == null))
             return error.InvalidType;
-        var static_size: usize = 0;
+        var static_size: u256 = 0;
         var static_value_parameters = true;
         for (parameter_types) |type_ref| {
             if (!TypeBehavior.isValueType(type_ref) or
@@ -5301,12 +5301,12 @@ pub const YulUtilFunctions = struct {
                 break;
             }
             static_size = std.math.add(
-                usize,
+                u256,
                 static_size,
                 try TypeBehavior.calldataEncodedSize(type_ref, true),
             ) catch return error.Overflow;
         }
-        const encoded_error_size = std.math.add(usize, static_size, 4) catch
+        const encoded_error_size = std.math.add(u256, static_size, 4) catch
             return error.Overflow;
         const needs_allocation = !static_value_parameters or
             encoded_error_size > 0x80;
