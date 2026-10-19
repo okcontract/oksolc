@@ -638,6 +638,44 @@ test "array member lookup preserves zero-parameter attachment diagnostics regard
     }
 }
 
+test "recursive memory copies distinguish cycles from nested mappings" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |has_mapping| {
+        const source = try allocator.print(
+            "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;" ++
+                "contract C {{ struct Node {{ Node[] children; uint256 value; {s} }}" ++
+                "Node root; function copy() external view returns (uint256) {{" ++
+                "Node memory snapshot = root; return snapshot.value; }} }}",
+            .{if (has_mapping) "mapping(uint256 => uint256) entries;" else ""},
+        );
+        defer allocator.free(source);
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = source } },
+            .settings = .{
+                .viaIR = true,
+                .optimizer = .{ .enabled = true },
+                .outputSelection = .{ .@"*" = .{ .C = &.{"evm.bytecode.object"} } },
+            },
+        }, .{});
+        defer allocator.free(input);
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        if (has_mapping) {
+            try std.testing.expect(!parsed.value.object.contains("contracts"));
+            const errors = parsed.value.object.get("errors").?.array.items;
+            try std.testing.expectEqualStrings("4061", errors[0].object.get("errorCode").?.string);
+        } else {
+            try std.testing.expect(!parsed.value.object.contains("errors"));
+            const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+            try std.testing.expect(bytecode.len != 0);
+        }
+    }
+}
+
 test "recursive struct diagnostics prefer a complete inner cycle" {
     const allocator = std.testing.allocator;
     const source =

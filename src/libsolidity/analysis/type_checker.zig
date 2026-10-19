@@ -701,7 +701,7 @@ pub const TypeChecker = struct {
         for (callable.parameters.payload.parameter_list.parameters) |parameter| {
             const type_ref = (try variableAnnotation(self.tree, parameter)).type_ref orelse
                 return error.InvalidAst;
-            if (containsNestedMapping(type_ref, 0)) {
+            if (try TypeBehavior.containsNestedMapping(self.type_provider, type_ref)) {
                 const message = try self.allocator.print(
                     "Type containing a (nested) mapping is not allowed as {s} parameter type.",
                     .{kind},
@@ -1185,7 +1185,7 @@ pub const TypeChecker = struct {
         )).type_ref orelse return error.InvalidAst;
         if (value.value) |expression| {
             if (ASTImplementation.isStateVariable(node) and
-                containsNestedMapping(variable_type, 0))
+                try TypeBehavior.containsNestedMapping(self.type_provider, variable_type))
             {
                 try self.reporter.typeError(
                     errorId(6280),
@@ -1229,7 +1229,7 @@ pub const TypeChecker = struct {
 
         if (!ASTImplementation.isStateVariable(node) and
             (value.reference_location == .CallData or value.reference_location == .Memory) and
-            containsNestedMapping(variable_type, 0))
+            try TypeBehavior.containsNestedMapping(self.type_provider, variable_type))
         {
             const type_name = try TypeBehavior.humanReadableNameAlloc(
                 self.allocator,
@@ -2600,7 +2600,7 @@ pub const TypeChecker = struct {
             }
             return;
         }
-        if (!TypeBehavior.nameable(type_ref) or !containsNestedMapping(type_ref, 0)) return;
+        if (!TypeBehavior.nameable(type_ref) or !try TypeBehavior.containsNestedMapping(self.type_provider, type_ref)) return;
         var local_or_return = false;
         if (expression.nodeKind() == .identifier) {
             const annotation = try identifierAnnotation(self.tree, @constCast(expression));
@@ -2743,7 +2743,7 @@ pub const TypeChecker = struct {
                         null,
                         "Unable to deduce nameable type for array elements. Try adding explicit type conversion for the first element.",
                     );
-                if (containsNestedMapping(common, 0)) {
+                if (try TypeBehavior.containsNestedMapping(self.type_provider, common)) {
                     const name = try TypeBehavior.humanReadableNameAlloc(
                         self.allocator,
                         common,
@@ -2877,7 +2877,7 @@ pub const TypeChecker = struct {
 
         if (callee.asTypeType()) |type_type| {
             if (type_type.actual_type.category() == .Struct) {
-                if (containsNestedMapping(type_type.actual_type, 0))
+                if (try TypeBehavior.containsNestedMapping(self.type_provider, type_type.actual_type))
                     try self.reporter.fatal(
                         errorId(9515),
                         .TypeError,
@@ -4150,7 +4150,7 @@ pub const TypeChecker = struct {
                 try assignOnce(&annotation.is_pure, false);
             },
             .Array => |array| {
-                if (containsNestedMapping(type_ref, 0))
+                if (try TypeBehavior.containsNestedMapping(self.type_provider, type_ref))
                     try self.reporter.fatal(
                         errorId(1164),
                         .TypeError,
@@ -4475,7 +4475,7 @@ pub const TypeChecker = struct {
             if (member_function.kind == .ArrayPush and
                 annotation.expression.arguments != null and
                 annotation.expression.arguments.?.types.items.len > 0 and
-                containsNestedMapping(owner_type, 0))
+                try TypeBehavior.containsNestedMapping(self.type_provider, owner_type))
                 try self.reporter.typeError(
                     errorId(8871),
                     node.location,
@@ -6379,26 +6379,6 @@ fn rationalValueU256(
     var result: u256 = 0;
     for (bytes) |byte| result = (result << 8) | @as(u256, byte);
     return result;
-}
-
-fn containsNestedMapping(type_ref: *const Types.Type, depth: usize) bool {
-    if (depth >= 256) return true;
-    return switch (type_ref.payload) {
-        .Mapping => true,
-        .Array => |value| containsNestedMapping(value.base_type, depth + 1),
-        .Struct => |value| blk: {
-            for (value.declaration.payload.struct_definition.members) |member| {
-                const annotation = ASTAnnotations.annotationConst(member) orelse continue;
-                const member_type = switch (annotation.*) {
-                    .variable_declaration => |entry| entry.type_ref,
-                    else => null,
-                } orelse continue;
-                if (containsNestedMapping(member_type, depth + 1)) break :blk true;
-            }
-            break :blk false;
-        },
-        else => false,
-    };
 }
 
 fn findConstructor(contract: *const AST.Node) ?*AST.Node {
