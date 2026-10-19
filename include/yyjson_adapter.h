@@ -37,15 +37,18 @@ typedef struct solidity_json_summary
 
 /*
  * Called synchronously while solidity_json_inspect() owns the yyjson document.
- * name and url are borrowed, non-null-terminated byte ranges. Return 0 when a
- * URL was loaded, 1 when the next URL should be tried, and -1 to stop.
+ * name, url, and optional hash are borrowed, non-null-terminated byte ranges.
+ * Return 0 when a URL was loaded and validated, 1 to try the next URL, or -1
+ * to stop. A null hash means the source has no string-valued keccak256 field.
  */
 typedef int (*solidity_source_url_callback)(
     void* context,
     char const* name,
     size_t name_length,
     char const* url,
-    size_t url_length
+    size_t url_length,
+    char const* hash,
+    size_t hash_length
 );
 
 solidity_json_status solidity_json_inspect(

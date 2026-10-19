@@ -3478,6 +3478,136 @@ const RecordingLoaderState = struct {
     }
 };
 
+test "hash-pinned URL sources skip mismatches and retain diagnostics" {
+    const allocator = std.testing.allocator;
+    const Loader = struct {
+        source: []const u8,
+        calls: usize = 0,
+
+        fn read(context: ?*anyopaque, gpa: std.mem.Allocator, _: []const u8, url: []const u8) standard_json.SourceReadError!standard_json.SourceReadResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            return .{ .contents = try gpa.dupe(u8, if (std.mem.eql(u8, url, "good")) self.source else "wrong source") };
+        }
+    };
+    for ([_][]const u8{ "Solidity", "Yul" }) |language| {
+        const source = if (std.mem.eql(u8, language, "Solidity"))
+            "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36; contract C {}"
+        else
+            "object \"C\" { code { mstore(0, 7) return(0, 32) } }";
+        const digest = solidity.libsolutil.keccak256.keccak256(source);
+        const hash = try allocator.print("0x{s}", .{&digest.hex()});
+        defer allocator.free(hash);
+        for ([_]bool{ false, true }) |has_fallback| {
+            const urls: []const []const u8 = if (has_fallback)
+                &.{ "bad-first", "bad-second", "good", "unused" }
+            else
+                &.{ "bad-first", "bad-second" };
+            const input = try std.json.Stringify.valueAlloc(allocator, .{
+                .language = language,
+                .sources = .{ .@"C.sol" = .{ .urls = urls, .keccak256 = hash } },
+                .settings = .{
+                    .viaIR = true,
+                    .optimizer = .{ .enabled = true },
+                    .outputSelection = .{ .@"*" = .{ .@"*" = &.{"evm.bytecode.object"} } },
+                },
+            }, .{});
+            defer allocator.free(input);
+            var loader: Loader = .{ .source = source };
+            var dispatcher: libsolc.Dispatcher = .{};
+            var output = try dispatcher.compiler().compile(allocator, .{
+                .input = input,
+                .source_loader = .{ .context = &loader, .read_fn = Loader.read },
+            });
+            defer output.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqual(@as(usize, if (has_fallback) 3 else 2), loader.calls);
+            const errors = parsed.value.object.get("errors").?.array.items;
+            try std.testing.expectEqual(@as(usize, 2), errors.len);
+            for (errors, [_][]const u8{ "bad-first", "bad-second" }) |diagnostic, url| {
+                try std.testing.expectEqualStrings("IOError", diagnostic.object.get("type").?.string);
+                try std.testing.expect(std.mem.find(u8, diagnostic.object.get("message").?.string, url) != null);
+            }
+            try std.testing.expectEqual(has_fallback, parsed.value.object.contains("contracts"));
+            if (has_fallback) {
+                const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+                try std.testing.expect(bytecode.len != 0);
+            }
+        }
+    }
+}
+
+test "hash-pinned URL sources retain terminal callback failures" {
+    const allocator = std.testing.allocator;
+    const Loader = struct {
+        source: []const u8,
+        calls: usize = 0,
+
+        fn read(context: ?*anyopaque, gpa: std.mem.Allocator, _: []const u8, url: []const u8) standard_json.SourceReadError!standard_json.SourceReadResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (std.mem.eql(u8, url, "bad")) return .{ .contents = try gpa.dupe(u8, "wrong source") };
+            if (std.mem.eql(u8, url, "good")) return .{ .contents = try gpa.dupe(u8, self.source) };
+            if (std.mem.eql(u8, url, "unsupported")) return .unsupported;
+            if (std.mem.eql(u8, url, "invalid")) return error.InvalidPath;
+            if (std.mem.eql(u8, url, "internal")) return error.InternalFailure;
+            if (std.mem.eql(u8, url, "oom")) return error.OutOfMemory;
+            return .{ .failure = try gpa.dupe(u8, "not found") };
+        }
+    };
+    const cases = [_]struct { url: []const u8, message: ?[]const u8 }{
+        .{ .url = "missing", .message = "Source callback failed." },
+        .{ .url = "unsupported", .message = "Source callback is not available in this request." },
+        .{ .url = "invalid", .message = "Source callback failed." },
+        .{ .url = "internal", .message = "Source callback failed." },
+        .{ .url = "oom", .message = null },
+    };
+    for ([_][]const u8{ "Solidity", "Yul" }) |language| {
+        const source = if (std.mem.eql(u8, language, "Solidity")) "contract A {}" else "object \"A\" { code { stop() } }";
+        const digest = solidity.libsolutil.keccak256.keccak256(source);
+        const hash = try allocator.print("0x{s}", .{&digest.hex()});
+        defer allocator.free(hash);
+        for (cases) |case| {
+            for ([_]bool{ false, true }) |has_fallback| {
+                const urls: []const []const u8 = if (has_fallback) &.{ "bad", "good" } else &.{ "bad", case.url };
+                const input = try std.json.Stringify.valueAlloc(allocator, .{
+                    .language = language,
+                    .sources = .{
+                        .@"A.sol" = .{ .urls = urls, .keccak256 = hash },
+                        .@"B.sol" = .{ .urls = &.{case.url} },
+                    },
+                }, .{});
+                defer allocator.free(input);
+                var loader: Loader = .{ .source = source };
+                var dispatcher: libsolc.Dispatcher = .{};
+                const result = dispatcher.compiler().compile(allocator, .{
+                    .input = input,
+                    .source_loader = .{ .context = &loader, .read_fn = Loader.read },
+                });
+                if (case.message == null) {
+                    try std.testing.expectError(error.OutOfMemory, result);
+                    continue;
+                }
+                var output = try result;
+                defer output.deinit();
+                const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+                defer parsed.deinit();
+                try std.testing.expectEqual(@as(usize, if (has_fallback) 3 else 2), loader.calls);
+                try std.testing.expect(!parsed.value.object.contains("contracts"));
+                const errors = parsed.value.object.get("errors").?.array.items;
+                try std.testing.expectEqual(@as(usize, 2), errors.len);
+                try std.testing.expectEqualStrings("Mismatch between content and supplied hash for \"A.sol\" at \"bad\"", errors[0].object.get("message").?.string);
+                try std.testing.expectEqualStrings(case.message.?, errors[1].object.get("message").?.string);
+                for (errors) |diagnostic| {
+                    try std.testing.expectEqualStrings("IOError", diagnostic.object.get("type").?.string);
+                    try std.testing.expectEqualStrings("error", diagnostic.object.get("severity").?.string);
+                }
+            }
+        }
+    }
+}
+
 test "URL callbacks consume and release owned failure and content results" {
     var loader_state: LoaderState = .{};
     const loader: standard_json.SourceLoader = .{

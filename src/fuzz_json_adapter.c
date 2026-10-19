@@ -48,13 +48,17 @@ static int source_callback(
     char const* name,
     size_t name_length,
     char const* url,
-    size_t url_length
+    size_t url_length,
+    char const* hash,
+    size_t hash_length
 )
 {
     callback_state* state = (callback_state*)context;
     ++state->calls;
     consume_bytes(state, name, name_length);
     consume_bytes(state, url, url_length);
+    if (hash != NULL)
+        consume_bytes(state, hash, hash_length);
     if (starts_with(url, url_length, "ok:"))
         return 0;
     if (starts_with(url, url_length, "error:"))

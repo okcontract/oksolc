@@ -255,6 +255,7 @@ pub fn compileSolidityStandardJsonAlloc(
     allocator: std.mem.Allocator,
     input: *const Json,
     loaded_sources: []const SourceContent,
+    source_errors: []const []const u8,
     read_callback: ?SolidityReadFile.ReadCallback,
     profiler: ?*Profiler,
     progress: ?StandardJson.ProgressReporter,
@@ -288,6 +289,8 @@ pub fn compileSolidityStandardJsonAlloc(
     var output: Json = .{ .object = .empty };
     try output.object.put(arena, "errors", .{ .array = std.json.Array.init(arena) });
     const errors_value = output.object.getPtr("errors").?;
+    for (source_errors) |message|
+        try appendError(arena, errors_value, .IOError, message, message, null, null);
 
     const parsed_options = try parseSettings(
         arena,
@@ -3985,6 +3988,7 @@ pub fn compileYulStandardJsonAlloc(
     allocator: std.mem.Allocator,
     input: *const Json,
     loaded_sources: []const SourceContent,
+    source_errors: []const []const u8,
     shared_object_optimizer: ?*ObjectOptimizer,
     shared_backend_cache: ?*BackendArtifactCache,
 ) ![]u8 {
@@ -3997,6 +4001,8 @@ pub fn compileYulStandardJsonAlloc(
     const errors = std.json.Array.init(arena);
     try output.object.put(arena, "errors", .{ .array = errors });
     const errors_value = output.object.getPtr("errors").?;
+    for (source_errors) |message|
+        try appendError(arena, errors_value, .IOError, message, message, null, null);
 
     const parsed_options = try parseSettings(
         arena,
@@ -5065,11 +5071,25 @@ fn resolveSource(
     return null;
 }
 
-fn hashMatchesContent(hash: []const u8, content: []const u8) bool {
+pub fn hashMatchesContent(hash: []const u8, content: []const u8) bool {
     if (hash.len != 66 or !std.mem.startsWith(u8, hash, "0x")) return false;
     const expected = FixedHash.H256.fromString(hash, .from_hex, .fail_if_different) catch return false;
     const actual = Keccak256.keccak256(content);
     return expected.eql(&actual);
+}
+
+/// Renders source-resolution failures before a compiler frontend is entered.
+pub fn sourceErrorsAlloc(allocator: std.mem.Allocator, messages: []const []const u8, failure: ?[]const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var output: Json = .{ .object = .empty };
+    try output.object.put(scratch, "errors", .{ .array = std.json.Array.init(scratch) });
+    for (messages) |message|
+        try appendError(scratch, output.object.getPtr("errors").?, .IOError, message, message, null, null);
+    if (failure) |message|
+        try appendError(scratch, output.object.getPtr("errors").?, .IOError, message, message, null, null);
+    return finishOutput(allocator, &output);
 }
 
 fn checkKeys(
