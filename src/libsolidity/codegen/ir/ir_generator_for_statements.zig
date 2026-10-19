@@ -2331,7 +2331,7 @@ pub const IRGeneratorForStatements = struct {
                         );
                         return result;
                     },
-                    .stack, .memory => {},
+                    .stack, .memory, .immutable => {},
                     else => return error.UnsupportedLValue,
                 }
                 const raw_name = try self.context.newYulVariable();

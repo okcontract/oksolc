@@ -89,6 +89,38 @@ test "qualified state writes preserve scalar immutable and function lvalues" {
     }
 }
 
+test "constructor immutable deletion matches zero assignment" {
+    const allocator = std.testing.allocator;
+    const template =
+        \\pragma solidity 0.8.36;
+        \\contract C {
+        \\    uint256 public immutable number;
+        \\    address public immutable owner;
+        \\    bool public immutable enabled;
+        \\    bytes16 public immutable tag;
+        \\    constructor(uint256 n, address a) {
+        \\        number = n; owner = a; enabled = true; tag = "tag";
+        \\        CLEAR
+        \\    }
+        \\}
+    ;
+    var expected: ?[]u8 = null;
+    defer if (expected) |bytes| allocator.free(bytes);
+    for ([_][]const u8{
+        "number = 0; owner = address(0); enabled = false; tag = bytes16(0);",
+        "delete number; delete owner; delete enabled; delete tag;",
+    }) |clear| {
+        const source = try std.mem.replaceOwned(u8, allocator, template, "CLEAR", clear);
+        defer allocator.free(source);
+        const bytecode = try compileTestContract(allocator, source);
+        defer allocator.free(bytecode);
+        if (expected) |bytes|
+            try std.testing.expectEqualStrings(bytes, bytecode)
+        else
+            expected = try allocator.dupe(u8, bytecode);
+    }
+}
+
 test "relative imports preserve virtual source names when normalized aliases coexist" {
     const allocator = std.testing.allocator;
     const input =
