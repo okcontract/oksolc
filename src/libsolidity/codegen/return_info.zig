@@ -31,7 +31,7 @@ pub const ReturnInfo = struct {
     allocator: std.mem.Allocator,
     return_types: []*const Types.Type,
     dynamic_return_size: bool = false,
-    estimated_return_size: u32 = 0,
+    estimated_return_size: u256 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -72,7 +72,7 @@ pub const ReturnInfo = struct {
                 break;
             }
             result.estimated_return_size = std.math.add(
-                u32,
+                u256,
                 result.estimated_return_size,
                 try TypeBehavior.calldataEncodedSize(decoding, true),
             ) catch return error.Overflow;

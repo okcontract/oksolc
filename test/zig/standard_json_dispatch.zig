@@ -121,6 +121,22 @@ test "constructor immutable deletion matches zero assignment" {
     }
 }
 
+test "external static returndata totals cross the 32-bit size boundary" {
+    const allocator = std.testing.allocator;
+    for ([_]u32{ 67108863, 67108864, 67108865 }) |length| {
+        const source = try allocator.print(
+            "pragma solidity 0.8.36; interface Target {{" ++
+                "function values() external returns (uint256[{d}] memory, uint256[{d}] memory); }}" ++
+                "contract C {{ function first(Target target) external returns (uint256) {{" ++
+                "(uint256[{d}] memory values,) = target.values(); return values[0]; }} }}",
+            .{ length, length, length },
+        );
+        defer allocator.free(source);
+        const bytecode = try compileTestContract(allocator, source);
+        defer allocator.free(bytecode);
+    }
+}
+
 test "relative imports preserve virtual source names when normalized aliases coexist" {
     const allocator = std.testing.allocator;
     const input =

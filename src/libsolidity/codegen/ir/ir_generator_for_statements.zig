@@ -3609,19 +3609,14 @@ pub const IRGeneratorForStatements = struct {
             try stackSize(return_info.return_types))
             return error.StackLayoutMismatch;
 
-        var encoded_head_size: u32 = 0;
-        for (return_info.return_types) |return_type| {
+        const has_return_data = for (return_info.return_types) |return_type| {
             const decoding = (try TypeBehavior.decodingType(
                 self.context.type_provider,
                 return_type,
             )) orelse return error.InvalidAst;
-            encoded_head_size = std.math.add(
-                u32,
-                encoded_head_size,
-                try TypeBehavior.calldataHeadSize(decoding),
-            ) catch return error.Overflow;
-        }
-        const check_extcodesize = encoded_head_size == 0 or
+            if (try TypeBehavior.calldataHeadSize(decoding) != 0) break true;
+        } else false;
+        const check_extcodesize = !has_return_data or
             !self.context.evm_version.supportsReturndata() or
             @backingInt(self.context.revert_strings) >=
                 @backingInt(DebugSettings.RevertStrings.Debug);

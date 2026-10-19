@@ -40,6 +40,8 @@ Intentional exceptions:
 - Yul `memoryguard` retains the exclusive `2^32 - 1` size limit.
 - Yul rejects literal names that collide with qualified object or data paths
   in every declaration order, including orders accepted by solc 0.8.36.
+- Static returndata totals above `2^32 - 1` remain exact instead
+  of reproducing solc's 32-bit wrapping.
 
 The `compile` command enables the optimizer with 200 runs. Use `standard-json`
 when exact control of compiler settings or output selection is required.
