@@ -3091,6 +3091,51 @@ test "experimental Yul backends fail explicitly without semantic substitution" {
     }
 }
 
+test "experimental settings preserve ordinary Solidity typing and session recovery" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\// SPDX-License-Identifier: UNLICENSED
+        \\pragma solidity 0.8.36;
+        \\contract C {
+        \\    uint256 public value;
+        \\    function set(uint256 input) external returns (uint256 result) {
+        \\        uint256 local = input + 1;
+        \\        value = local;
+        \\        return value;
+        \\    }
+        \\}
+    ;
+    var session = solidity.CompilerSession.init(allocator);
+    defer session.deinit();
+    var expected: ?[]u8 = null;
+    defer if (expected) |bytes| allocator.free(bytes);
+    for ([_]bool{ false, true, false }) |experimental| {
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = source } },
+            .settings = .{
+                .experimental = experimental,
+                .viaIR = true,
+                .optimizer = .{ .enabled = true },
+                .metadata = .{ .appendCBOR = false },
+                .outputSelection = .{ .@"*" = .{ .@"*" = &.{"evm.bytecode.object"} } },
+            },
+        }, .{});
+        defer allocator.free(input);
+        var output = try session.compiler().compile(allocator, .{ .input = input });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expect(!parsed.value.object.contains("errors"));
+        const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+        try std.testing.expect(bytecode.len != 0);
+        if (expected) |bytes|
+            try std.testing.expectEqualStrings(bytes, bytecode)
+        else
+            expected = try allocator.dupe(u8, bytecode);
+    }
+}
+
 test "experimental Solidity backends fail explicitly without semantic substitution" {
     const cases = [_]struct { input: []const u8, message: []const u8 }{
         .{

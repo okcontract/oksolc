@@ -969,7 +969,9 @@ fn analyzeSolidityFrontend(
         global_context,
         settings.frontend.evm_version,
         reporter,
-        settings.frontend.experimental,
+        for (parsed_sources) |parsed| {
+            if (parsed.tree.root.?.payload.source_unit.experimental_solidity) break true;
+        } else false,
     );
     defer resolver.deinit();
 
