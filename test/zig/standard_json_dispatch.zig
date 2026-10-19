@@ -165,6 +165,48 @@ test "calldata struct heads cross the 32-bit size boundary" {
     }
 }
 
+test "deep inheritance preserves callable collection and ambiguity diagnostics" {
+    for ([_]usize{ 255, 256, 257 }) |count| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const callables = count == 257;
+        var source = std.Io.Writer.Allocating.init(allocator);
+        defer source.deinit();
+        try source.writer.writeAll("pragma solidity 0.8.36; contract Base0 {");
+        if (callables)
+            try source.writer.writeAll("function f() public pure virtual returns (uint256) { return 1; }");
+        try source.writer.writeAll("}");
+        for (1..count) |index| {
+            try source.writer.print("contract Base{d} is Base{d} {{", .{ index, index - 1 });
+            if (callables)
+                try source.writer.writeAll("function f() public pure virtual override returns (uint256) { return 2; }");
+            try source.writer.writeAll("}");
+        }
+        try source.writer.print("contract C is Base{d} {{}}", .{count - 1});
+        if (!callables) {
+            const bytecode = try compileTestContract(allocator, source.written());
+            defer allocator.free(bytecode);
+            continue;
+        }
+
+        try source.writer.print("contract Side is Base0 {{}} contract Diamond is Side, Base{d} {{}}", .{count - 1});
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = source.written() } },
+            .settings = .{ .outputSelection = .{ .@"*" = .{ .@"*" = &.{"abi"} } } },
+        }, .{});
+        defer allocator.free(input);
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        const errors = parsed.value.object.get("errors").?.array.items;
+        try std.testing.expectEqualStrings("6480", errors[errors.len - 1].object.get("errorCode").?.string);
+    }
+}
+
 test "relative imports preserve virtual source names when normalized aliases coexist" {
     const allocator = std.testing.allocator;
     const input =

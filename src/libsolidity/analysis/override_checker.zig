@@ -144,35 +144,36 @@ const OverrideGraph = struct {
         const sorted = try self.allocator.dupe(OverrideProxy, roots);
         defer self.allocator.free(sorted);
         sortProxiesById(sorted);
-        for (sorted) |root| try self.addEdge(0, try self.visit(root, 0));
+        for (sorted) |root| try self.addEdge(0, try self.visit(root));
         for (self.edges.items) |*neighbors| sortIndices(neighbors.items);
     }
 
-    fn visit(
-        self: *OverrideGraph,
-        proxy: OverrideProxy,
-        depth: usize,
-    ) CheckError!usize {
-        if (depth >= 256) return error.InvalidAst;
+    fn visit(self: *OverrideGraph, proxy: OverrideProxy) CheckError!usize {
+        var index = self.proxies.items.len;
+        const root = try self.ensureProxy(proxy);
+        while (index < self.proxies.items.len) : (index += 1) {
+            const raw_bases = try baseFunctions(self.tree, self.proxies.items[index].node);
+            if (raw_bases.len == 0) {
+                try self.addEdge(index + 2, 1);
+                continue;
+            }
+            const bases = try self.allocator.alloc(OverrideProxy, raw_bases.len);
+            defer self.allocator.free(bases);
+            for (raw_bases, bases) |base, *target|
+                target.* = try OverrideProxy.init(@constCast(base));
+            sortProxiesById(bases);
+            for (bases) |base|
+                try self.addEdge(index + 2, try self.ensureProxy(base));
+        }
+        return root;
+    }
+
+    fn ensureProxy(self: *OverrideGraph, proxy: OverrideProxy) CheckError!usize {
         for (self.proxies.items, 0..) |existing, index|
             if (existing.node == proxy.node) return index + 2;
-
         const node_index = self.edges.items.len;
         try self.proxies.append(self.allocator, proxy);
         try self.edges.append(self.allocator, .empty);
-
-        const raw_bases = try baseFunctions(self.tree, proxy.node);
-        if (raw_bases.len == 0) {
-            try self.addEdge(node_index, 1);
-            return node_index;
-        }
-        const bases = try self.allocator.alloc(OverrideProxy, raw_bases.len);
-        defer self.allocator.free(bases);
-        for (raw_bases, bases) |base, *target|
-            target.* = try OverrideProxy.init(@constCast(base));
-        sortProxiesById(bases);
-        for (bases) |base|
-            try self.addEdge(node_index, try self.visit(base, depth + 1));
         return node_index;
     }
 
@@ -192,17 +193,35 @@ const CutVertexTraversal = struct {
     parents: []?usize,
     cuts: []bool,
 
-    fn run(self: *CutVertexTraversal, node: usize, depth: usize) void {
-        self.visited[node] = true;
-        self.depths[node] = @intCast(depth);
-        self.low[node] = @intCast(depth);
-        for (self.graph.edges.items[node].items) |neighbor| {
+    fn run(self: *CutVertexTraversal, allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+        const Frame = struct { node: usize, next: usize = 0 };
+        var frames: std.ArrayList(Frame) = .empty;
+        defer frames.deinit(allocator);
+        try frames.append(allocator, .{ .node = 0 });
+        self.visited[0] = true;
+        self.depths[0] = 0;
+        self.low[0] = 0;
+        while (frames.items.len != 0) {
+            const frame = &frames.items[frames.items.len - 1];
+            const node = frame.node;
+            const neighbors = self.graph.edges.items[node].items;
+            if (frame.next == neighbors.len) {
+                _ = frames.pop();
+                if (self.parents[node]) |parent| {
+                    if (self.low[node] >= self.depths[parent] and self.parents[parent] != null)
+                        self.cuts[parent] = true;
+                    self.low[parent] = @min(self.low[parent], self.low[node]);
+                }
+                continue;
+            }
+            const neighbor = neighbors[frame.next];
+            frame.next += 1;
             if (!self.visited[neighbor]) {
                 self.parents[neighbor] = node;
-                self.run(neighbor, depth + 1);
-                if (self.low[neighbor] >= self.depths[node] and self.parents[node] != null)
-                    self.cuts[node] = true;
-                self.low[node] = @min(self.low[node], self.low[neighbor]);
+                self.visited[neighbor] = true;
+                self.depths[neighbor] = self.depths[node] + 1;
+                self.low[neighbor] = self.depths[neighbor];
+                try frames.append(allocator, .{ .node = neighbor });
             } else if (self.parents[node] == null or neighbor != self.parents[node].?) {
                 self.low[node] = @min(self.low[node], self.depths[neighbor]);
             }
@@ -246,9 +265,9 @@ pub const OverrideChecker = struct {
     }
 
     fn checkIllegalOverrides(self: *OverrideChecker, contract: *AST.Node) CheckError!void {
-        const inherited_functions = try self.inheritedCallablesAlloc(contract, .function, 0);
+        const inherited_functions = try self.inheritedCallablesAlloc(contract, .function);
         defer self.allocator.free(inherited_functions);
-        const inherited_modifiers = try self.inheritedCallablesAlloc(contract, .modifier, 0);
+        const inherited_modifiers = try self.inheritedCallablesAlloc(contract, .modifier);
         defer self.allocator.free(inherited_modifiers);
 
         for (contract.payload.contract_definition.sub_nodes) |member| switch (member.nodeKind()) {
@@ -669,10 +688,10 @@ pub const OverrideChecker = struct {
     }
 
     fn checkAmbiguousOverrides(self: *OverrideChecker, contract: *AST.Node) CheckError!void {
-        const functions = try self.inheritedCallablesAlloc(contract, .function, 0);
+        const functions = try self.inheritedCallablesAlloc(contract, .function);
         defer self.allocator.free(functions);
         try self.checkAmbiguousGroups(contract, functions, .function);
-        const modifiers = try self.inheritedCallablesAlloc(contract, .modifier, 0);
+        const modifiers = try self.inheritedCallablesAlloc(contract, .modifier);
         defer self.allocator.free(modifiers);
         try self.checkAmbiguousGroups(contract, modifiers, .modifier);
     }
@@ -736,7 +755,7 @@ pub const OverrideChecker = struct {
             .parents = parents,
             .cuts = cuts,
         };
-        traversal.run(0, 0);
+        try traversal.run(self.allocator);
 
         const remove = try self.allocator.alloc(bool, callables.items.len);
         defer self.allocator.free(remove);
@@ -744,7 +763,7 @@ pub const OverrideChecker = struct {
         for (graph.proxies.items, 0..) |cut, proxy_index| {
             if (!cuts[proxy_index + 2]) continue;
             for (callables.items, 0..) |candidate, candidate_index| {
-                if (try self.isBaseFunctionOf(candidate.node, cut.node, 0))
+                if (try self.isBaseFunctionOf(candidate.node, cut.node))
                     remove[candidate_index] = true;
             }
             if (cut.unimplemented()) {
@@ -815,42 +834,63 @@ pub const OverrideChecker = struct {
         self: *OverrideChecker,
         contract: *AST.Node,
         kind: ProxyKind,
-        depth: usize,
     ) CheckError![]OverrideProxy {
-        if (depth >= 256 or contract.nodeKind() != .contract_definition)
-            return error.InvalidAst;
-        var result: std.ArrayList(OverrideProxy) = .empty;
-        errdefer result.deinit(self.allocator);
-        for (contract.payload.contract_definition.base_contracts) |specifier| {
+        const Frame = struct {
+            contract: *AST.Node,
+            next_base: usize = 0,
+            direct: std.ArrayList(OverrideProxy) = .empty,
+            result: std.ArrayList(OverrideProxy) = .empty,
+        };
+        var frames: std.ArrayList(Frame) = .empty;
+        defer {
+            for (frames.items) |*frame| {
+                frame.direct.deinit(self.allocator);
+                frame.result.deinit(self.allocator);
+            }
+            frames.deinit(self.allocator);
+        }
+        if (contract.nodeKind() != .contract_definition) return error.InvalidAst;
+        try frames.append(self.allocator, .{ .contract = contract });
+        while (true) {
+            const frame = &frames.items[frames.items.len - 1];
+            const bases = frame.contract.payload.contract_definition.base_contracts;
+            if (frame.next_base == bases.len) {
+                var completed = frames.pop().?;
+                defer completed.direct.deinit(self.allocator);
+                defer completed.result.deinit(self.allocator);
+                if (frames.items.len == 0)
+                    return completed.result.toOwnedSlice(self.allocator);
+                const parent = &frames.items[frames.items.len - 1];
+                if (kind == .modifier) {
+                    // Collapse inherited modifier signatures within each branch.
+                    for (completed.result.items) |proxy|
+                        if (!containsSignature(self, parent.direct.items, proxy))
+                            try parent.direct.append(self.allocator, proxy);
+                    try parent.result.appendSlice(self.allocator, parent.direct.items);
+                } else {
+                    try parent.result.appendSlice(self.allocator, parent.direct.items);
+                    for (completed.result.items) |proxy|
+                        if (!containsSignature(self, parent.direct.items, proxy))
+                            try parent.result.append(self.allocator, proxy);
+                }
+                parent.direct.clearRetainingCapacity();
+                continue;
+            }
+            const specifier = bases[frame.next_base];
+            frame.next_base += 1;
             const base = try referencedDeclaration(
                 self.tree,
                 specifier.payload.inheritance_specifier.base_name,
             );
-            var direct: std.ArrayList(OverrideProxy) = .empty;
-            defer direct.deinit(self.allocator);
+            if (base.nodeKind() != .contract_definition) return error.InvalidAst;
             for (base.payload.contract_definition.sub_nodes) |member| {
                 if (!memberMatchesProxyKind(member, kind)) continue;
                 const proxy = try OverrideProxy.init(member);
-                if (!containsSignature(self, direct.items, proxy))
-                    try direct.append(self.allocator, proxy);
+                if (!containsSignature(self, frame.direct.items, proxy))
+                    try frame.direct.append(self.allocator, proxy);
             }
-            const inherited = try self.inheritedCallablesAlloc(base, kind, depth + 1);
-            defer self.allocator.free(inherited);
-            if (kind == .modifier) {
-                // Upstream builds one signature-set per direct-base branch for
-                // modifiers, so inherited duplicates in that branch collapse.
-                for (inherited) |proxy|
-                    if (!containsSignature(self, direct.items, proxy))
-                        try direct.append(self.allocator, proxy);
-                try result.appendSlice(self.allocator, direct.items);
-            } else {
-                try result.appendSlice(self.allocator, direct.items);
-                for (inherited) |proxy|
-                    if (!containsSignature(self, direct.items, proxy))
-                        try result.append(self.allocator, proxy);
-            }
+            try frames.append(self.allocator, .{ .contract = base });
         }
-        return result.toOwnedSlice(self.allocator);
     }
 
     pub fn signatureEqual(
@@ -1023,13 +1063,17 @@ pub const OverrideChecker = struct {
         self: *OverrideChecker,
         candidate: *const AST.Node,
         descendant: *AST.Node,
-        depth: usize,
     ) CheckError!bool {
-        if (depth >= 256) return error.InvalidAst;
-        const bases = try baseFunctions(self.tree, descendant);
-        for (bases) |base| {
-            if (base == candidate) return true;
-            if (try self.isBaseFunctionOf(candidate, @constCast(base), depth + 1)) return true;
+        var pending: std.ArrayList(*const AST.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        try pending.append(self.allocator, descendant);
+        var index: usize = 0;
+        while (index < pending.items.len) : (index += 1) {
+            for (try baseFunctions(self.tree, @constCast(pending.items[index]))) |base| {
+                if (base == candidate) return true;
+                if (!containsConstNode(pending.items, base))
+                    try pending.append(self.allocator, base);
+            }
         }
         return false;
     }

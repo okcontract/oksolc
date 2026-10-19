@@ -29,6 +29,9 @@ pub const max_standard_json_source_entries: usize =
     @intCast(adapter.SOLIDITY_JSON_MAX_SOURCE_ENTRIES);
 
 pub const responses = struct {
+    pub const internal_failure =
+        \\{"errors":[{"component":"general","formattedMessage":"Internal compiler failure.","message":"Internal compiler failure.","severity":"error","type":"InternalCompilerError"}]}
+    ++ "\n";
     pub const no_input_sources =
         \\{"errors":[{"component":"general","formattedMessage":"No input sources specified.","message":"No input sources specified.","severity":"error","type":"JSONError"}]}
     ++ "\n";
