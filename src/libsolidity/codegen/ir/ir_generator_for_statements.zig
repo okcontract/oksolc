@@ -2644,23 +2644,8 @@ pub const IRGeneratorForStatements = struct {
                 node,
             );
             errdefer result.deinit();
-            if (try TypeBehavior.sizeOnStack(value.type_ref) !=
-                try TypeBehavior.sizeOnStack(result.type_ref))
-                return error.UnsupportedConversion;
-            const conversion = try self.utils.conversionFunction(
-                value.type_ref,
-                result.type_ref,
-            );
-            defer self.allocator.free(conversion);
-            var value_text_slots = try value.stackSlotsAlloc();
-            defer value_text_slots.deinit();
-            const value_text = value_text_slots.borrowed();
-            const expression = try self.buildExpression(
-                "@0(@1)",
-                .{ conversion, value_text },
-            );
             try self.setLocation(node);
-            try self.defineExpression(&result, expression);
+            try self.assignConverted(&result, &value, true);
             return result;
         }
         switch (function_type.kind) {

@@ -10,6 +10,58 @@ const standard_json = solidity.standard_json;
 const Profiler = solidity.libsolutil.profiler.Profiler;
 const ObjectOptimizer = solidity.libyul.object_optimizer.ObjectOptimizer;
 
+fn compileTestContract(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    const input = try std.json.Stringify.valueAlloc(allocator, .{
+        .language = "Solidity",
+        .sources = .{ .@"C.sol" = .{ .content = source } },
+        .settings = .{
+            .viaIR = true,
+            .optimizer = .{ .enabled = true },
+            .metadata = .{ .appendCBOR = false },
+            .outputSelection = .{ .@"*" = .{ .C = &.{"evm.bytecode.object"} } },
+        },
+    }, .{});
+    defer allocator.free(input);
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    defer output.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value.object.get("errors")) |errors| {
+        for (errors.array.items) |diagnostic| {
+            if (!std.mem.eql(u8, diagnostic.object.get("severity").?.string, "error")) continue;
+            std.debug.print("{s}\n", .{output.bytes});
+            return error.TestUnexpectedResult;
+        }
+    }
+    const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+    try std.testing.expect(bytecode.len != 0);
+    return allocator.dupe(u8, bytecode);
+}
+
+test "fixed-bytes wrappers materialize string and hexadecimal literals" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "\"hi\"", "hex\"0102\"", "\"\"" }) |literal| {
+        var expected: ?[]u8 = null;
+        defer if (expected) |bytes| allocator.free(bytes);
+        for ([_]bool{ true, false }) |explicit| {
+            const source = try allocator.print(
+                "pragma solidity 0.8.36; type Tag is bytes4; contract C {{" ++
+                    "function value() external pure returns (bytes4) {{" ++
+                    "return Tag.unwrap(Tag.wrap({s}{s}{s})); }} }}",
+                .{ if (explicit) "bytes4(" else "", literal, if (explicit) ")" else "" },
+            );
+            defer allocator.free(source);
+            const bytecode = try compileTestContract(allocator, source);
+            defer allocator.free(bytecode);
+            if (expected) |bytes|
+                try std.testing.expectEqualStrings(bytes, bytecode)
+            else
+                expected = try allocator.dupe(u8, bytecode);
+        }
+    }
+}
+
 test "relative imports preserve virtual source names when normalized aliases coexist" {
     const allocator = std.testing.allocator;
     const input =
