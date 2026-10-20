@@ -700,6 +700,11 @@ pub fn compileSolidityStandardJsonAlloc(
         if (stack_exception) {
             reporter.clear();
             discardSolidityCodegenArtifacts(&artifact_contracts);
+            // Backend handlers replaced diagnostics; restore source errors first.
+            const backend_error_count = errors_value.array.items.len;
+            for (source_errors) |message|
+                try appendError(arena, errors_value, .IOError, message, message, null, null);
+            std.mem.rotate(Json, errors_value.array.items, backend_error_count);
         }
         if (!frontend_ok or reporter.hasErrors()) {
             semantic.markFailed();

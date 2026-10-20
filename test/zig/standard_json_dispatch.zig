@@ -3538,6 +3538,81 @@ test "hash-pinned URL sources skip mismatches and retain diagnostics" {
     }
 }
 
+test "hash-pinned URL diagnostics survive sequential and parallel stack exceptions" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\contract A {
+        \\    function encode(
+        \\        uint256 p0, uint256 p1, uint256 p2, uint256 p3, uint256 p4, uint256 p5,
+        \\        uint256 p6, uint256 p7, uint256 p8, uint256 p9, uint256 p10, uint256 p11,
+        \\        uint256 p12, uint256 p13, uint256 p14, uint256 p15, uint256 p16, uint256 p17,
+        \\        uint256 p18, uint256 p19, uint256 p20, uint256 p21, uint256 p22, uint256 p23
+        \\    ) external pure returns (bytes memory) {
+        \\        assembly { calldatacopy(0, 0, calldatasize()) }
+        \\        return abi.encode(p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11,
+        \\            p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23);
+        \\    }
+        \\}
+        \\contract B {}
+    ;
+    const Loader = struct {
+        calls: usize = 0,
+
+        fn read(context: ?*anyopaque, gpa: std.mem.Allocator, _: []const u8, url: []const u8) standard_json.SourceReadError!standard_json.SourceReadResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            return .{ .contents = try gpa.dupe(u8, if (std.mem.eql(u8, url, "good")) source else "wrong source") };
+        }
+    };
+    const digest = solidity.libsolutil.keccak256.keccak256(source);
+    const hash = try allocator.print("0x{s}", .{&digest.hex()});
+    defer allocator.free(hash);
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(1) });
+    defer threaded.deinit();
+    const candidates = [_][]const u8{ "bad-first", "bad-second", "good" };
+    for ([_]bool{ false, true }) |parallel| {
+        for ([_]usize{ 0, 1, 2 }) |mismatches| {
+            const urls = candidates[2 - mismatches ..];
+            const input = try std.json.Stringify.valueAlloc(allocator, .{
+                .language = "Solidity",
+                .sources = .{ .@"C.sol" = .{ .urls = urls, .keccak256 = hash } },
+                .settings = .{
+                    .viaIR = true,
+                    .optimizer = .{ .enabled = true },
+                    .outputSelection = .{ .@"*" = .{ .@"*" = &.{ "abi", "metadata", "evm.bytecode.object" } } },
+                },
+            }, .{});
+            defer allocator.free(input);
+            var loader: Loader = .{};
+            var dispatcher: libsolc.Dispatcher = .{};
+            var output = try dispatcher.compiler().compile(allocator, .{
+                .input = input,
+                .source_loader = .{ .context = &loader, .read_fn = Loader.read },
+                .io = if (parallel) threaded.io() else null,
+            });
+            defer output.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqual(mismatches + 1, loader.calls);
+            const errors = parsed.value.object.get("errors").?.array.items;
+            try std.testing.expectEqual(mismatches + 1, errors.len);
+            for (errors[0..mismatches], urls[0..mismatches]) |diagnostic, url| {
+                try std.testing.expectEqualStrings("IOError", diagnostic.object.get("type").?.string);
+                const expected = try allocator.print("Mismatch between content and supplied hash for \"C.sol\" at \"{s}\"", .{url});
+                defer allocator.free(expected);
+                try std.testing.expectEqualStrings(expected, diagnostic.object.get("message").?.string);
+            }
+            const exception = errors[mismatches];
+            try std.testing.expectEqualStrings("YulException", exception.object.get("type").?.string);
+            try std.testing.expect(std.mem.find(u8, exception.object.get("message").?.string, "too deep in the stack") != null);
+            const contract = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("A").?;
+            try std.testing.expect(contract.object.contains("abi"));
+            try std.testing.expect(contract.object.contains("metadata"));
+            try std.testing.expect(!contract.object.contains("evm"));
+        }
+    }
+}
+
 test "hash-pinned URL sources retain terminal callback failures" {
     const allocator = std.testing.allocator;
     const Loader = struct {
