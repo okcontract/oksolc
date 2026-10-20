@@ -77,3 +77,14 @@ test "public dependency mask marker exposes explicit collection ownership" {
     marker.mark(importer, imported);
     try std.testing.expectEqual(incremental.semantic_fingerprint.CategoryMask.all, revision.dependencyMasks()[0].categories);
 }
+
+test "public Yul Repository retains generatedHandle compatibility" {
+    const strings = libyul.yul_string;
+    var repository = try strings.Repository.init(std.testing.allocator);
+    defer repository.deinit();
+    const base = try repository.stringToHandle("generated");
+    const generated = try repository.generatedHandle(base, 7);
+    const ordinary = try repository.stringToHandle("generated_7");
+    try std.testing.expectEqual(ordinary, generated);
+    try std.testing.expectEqual(generated, try repository.generatedHandle(base, 7));
+}

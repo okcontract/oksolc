@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.2-dev - Unreleased
+
+Solidity compatibility target: `0.8.36`.
+
+### Changed
+
+- Return `error.InternerAlreadyInitialized` from the lower-level Zig
+  `yul_string.setSharded` API instead of silently ignoring late configuration.
+
+### Performance
+
+- Shard Yul string interning for multiple compilation workers while preserving
+  serial storage and transferring long generated-name buffers without copying.
+
+### Fixed
+
+- Retain the public Zig `libyul.yul_string.Repository.generatedHandle` method for
+  callers managing their own string repositories.
+- Keep Yul string interning unsharded for `--parallel --jobs 1` and validate
+  worker counts before configuring the interner.
+
 ## 0.2.1 - 2026-10-19
 
 Solidity compatibility target: `0.8.36`.
