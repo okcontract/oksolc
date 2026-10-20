@@ -55,10 +55,10 @@ compatibility target. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ```console
 $ oksolc version
-oksolc 0.2.1 (Solidity 0.8.36)
+oksolc 0.2.2 (Solidity 0.8.36)
 $ oksolc --version
 oksolc, a solidity compiler commandline interface
-Version: 0.8.36+oksolc.0.2.1
+Version: 0.8.36+oksolc.0.2.2
 ```
 
 `oksolc version --json` returns `version` (the product version),
