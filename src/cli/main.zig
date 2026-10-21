@@ -708,7 +708,7 @@ fn serveCommand(
     while (try readServeFrameAlloc(&reader.interface, init.gpa)) |input| {
         defer init.gpa.free(input);
         if (loader_state) |*loader| loader.reset();
-        var output = try session.compiler().compile(init.gpa, .{
+        var output = try compileServeRequest(session.compiler(), init.gpa, .{
             .input = input,
             .io = compiler_io,
             .source_loader = if (loader_state) |*loader|
@@ -1820,6 +1820,20 @@ fn readServeFrameAlloc(
 
     const length = content_length orelse return error.MissingContentLength;
     return try reader.readAllocAll(allocator, length);
+}
+
+fn compileServeRequest(
+    compiler: solidity.standard_json.Compiler,
+    allocator: std.mem.Allocator,
+    request: solidity.standard_json.Request,
+) solidity.standard_json.CompileError!solidity.standard_json.Output {
+    return compiler.compile(allocator, request) catch |err| switch (err) {
+        error.InternalFailure => .{
+            .allocator = allocator,
+            .bytes = try allocator.dupe(u8, solidity.libsolc.libsolc.responses.internal_failure),
+        },
+        else => return err,
+    };
 }
 
 fn writeServeFrame(writer: *std.Io.Writer, bytes: []const u8) !void {
@@ -3534,6 +3548,31 @@ test "project config overrides user defaults except for cache opt-in" {
     );
     defer project_opt_out.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(?bool, false), project_opt_out.cache);
+}
+
+test "stdio compilation contains internal failures and preserves allocation errors" {
+    const FailingCompiler = struct {
+        failure: ?solidity.standard_json.CompileError = error.InternalFailure,
+
+        fn compile(context: *anyopaque, allocator: std.mem.Allocator, _: solidity.standard_json.Request) solidity.standard_json.CompileError!solidity.standard_json.Output {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.failure) |err| {
+                self.failure = null;
+                return err;
+            }
+            return .{ .allocator = allocator, .bytes = try allocator.dupe(u8, "{}") };
+        }
+    };
+    var state: FailingCompiler = .{};
+    const compiler: solidity.standard_json.Compiler = .{ .context = &state, .compile_fn = FailingCompiler.compile };
+    var failed = try compileServeRequest(compiler, std.testing.allocator, .{ .input = "{}" });
+    defer failed.deinit();
+    try std.testing.expectEqualStrings(solidity.libsolc.libsolc.responses.internal_failure, failed.bytes);
+    var later = try compileServeRequest(compiler, std.testing.allocator, .{ .input = "{}" });
+    defer later.deinit();
+    try std.testing.expectEqualStrings("{}", later.bytes);
+    state.failure = error.OutOfMemory;
+    try std.testing.expectError(error.OutOfMemory, compileServeRequest(compiler, std.testing.allocator, .{ .input = "{}" }));
 }
 
 test "serve framing accepts CRLF and LF messages" {

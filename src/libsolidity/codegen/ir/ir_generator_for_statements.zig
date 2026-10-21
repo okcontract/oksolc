@@ -2331,7 +2331,7 @@ pub const IRGeneratorForStatements = struct {
                         );
                         return result;
                     },
-                    .stack, .memory => {},
+                    .stack, .memory, .immutable => {},
                     else => return error.UnsupportedLValue,
                 }
                 const raw_name = try self.context.newYulVariable();
@@ -2644,23 +2644,8 @@ pub const IRGeneratorForStatements = struct {
                 node,
             );
             errdefer result.deinit();
-            if (try TypeBehavior.sizeOnStack(value.type_ref) !=
-                try TypeBehavior.sizeOnStack(result.type_ref))
-                return error.UnsupportedConversion;
-            const conversion = try self.utils.conversionFunction(
-                value.type_ref,
-                result.type_ref,
-            );
-            defer self.allocator.free(conversion);
-            var value_text_slots = try value.stackSlotsAlloc();
-            defer value_text_slots.deinit();
-            const value_text = value_text_slots.borrowed();
-            const expression = try self.buildExpression(
-                "@0(@1)",
-                .{ conversion, value_text },
-            );
             try self.setLocation(node);
-            try self.defineExpression(&result, expression);
+            try self.assignConverted(&result, &value, true);
             return result;
         }
         switch (function_type.kind) {
@@ -3624,19 +3609,14 @@ pub const IRGeneratorForStatements = struct {
             try stackSize(return_info.return_types))
             return error.StackLayoutMismatch;
 
-        var encoded_head_size: u32 = 0;
-        for (return_info.return_types) |return_type| {
+        const has_return_data = for (return_info.return_types) |return_type| {
             const decoding = (try TypeBehavior.decodingType(
                 self.context.type_provider,
                 return_type,
             )) orelse return error.InvalidAst;
-            encoded_head_size = std.math.add(
-                u32,
-                encoded_head_size,
-                try TypeBehavior.calldataHeadSize(decoding),
-            ) catch return error.Overflow;
-        }
-        const check_extcodesize = encoded_head_size == 0 or
+            if (try TypeBehavior.calldataHeadSize(decoding) != 0) break true;
+        } else false;
+        const check_extcodesize = !has_return_data or
             !self.context.evm_version.supportsReturndata() or
             @backingInt(self.context.revert_strings) >=
                 @backingInt(DebugSettings.RevertStrings.Debug);
@@ -4848,6 +4828,28 @@ pub const IRGeneratorForStatements = struct {
         return result;
     }
 
+    fn variableLValue(
+        self: *IRGeneratorForStatements,
+        declaration: *const AST.Node,
+    ) GeneratorError!IRLValueModule.IRLValue {
+        if (declaration.nodeKind() != .variable_declaration)
+            return error.UnsupportedLValue;
+        if (self.context.isLocalVariable(declaration)) {
+            const local = try self.context.localVariable(declaration);
+            return IRLValueModule.IRLValue.initStack(try local.clone());
+        }
+        if (self.context.isStateVariable(declaration))
+            return self.stateVariableLValue(declaration);
+        if (ASTImplementation.isStateVariable(declaration) and
+            declaration.payload.variable_declaration.mutability == .Immutable)
+            return IRLValueModule.IRLValue.initImmutable(
+                self.allocator,
+                try variableType(declaration),
+                declaration,
+            );
+        return error.UnsupportedLValue;
+    }
+
     fn resolveLValue(
         self: *IRGeneratorForStatements,
         node: *const AST.Node,
@@ -4855,26 +4857,9 @@ pub const IRGeneratorForStatements = struct {
     ) GeneratorError!IRLValueModule.IRLValue {
         if (depth >= max_ast_depth) return error.AstTooDeep;
         return switch (node.payload) {
-            .identifier => blk: {
-                const declaration = (try identifierAnnotation(node)).referenced_declaration orelse
-                    return error.InvalidAst;
-                if (declaration.nodeKind() != .variable_declaration)
-                    return error.UnsupportedLValue;
-                if (self.context.isLocalVariable(declaration)) {
-                    const local = try self.context.localVariable(declaration);
-                    break :blk IRLValueModule.IRLValue.initStack(try local.clone());
-                }
-                if (self.context.isStateVariable(declaration))
-                    break :blk try self.stateVariableLValue(declaration);
-                if (ASTImplementation.isStateVariable(declaration) and
-                    declaration.payload.variable_declaration.mutability == .Immutable)
-                    break :blk IRLValueModule.IRLValue.initImmutable(
-                        self.allocator,
-                        try variableType(declaration),
-                        declaration,
-                    );
-                return error.UnsupportedLValue;
-            },
+            .identifier => self.variableLValue(
+                (try identifierAnnotation(node)).referenced_declaration orelse return error.InvalidAst,
+            ),
             .tuple_expression => |tuple| blk: {
                 if (tuple.components.len == 1)
                     break :blk try self.resolveLValue(tuple.components[0] orelse return error.InvalidAst, depth + 1);
@@ -4917,19 +4902,16 @@ pub const IRGeneratorForStatements = struct {
                     return error.UnsupportedLValue;
                 break :blk self.emitArrayPushLValue(node, call_type, depth + 1);
             },
-            .member_access => blk: {
-                const structure_type = try expressionType(
-                    node.payload.member_access.expression,
-                );
-                const structure = switch (structure_type.payload) {
-                    .Struct => |value| value,
-                    else => return error.UnsupportedLValue,
-                };
-                break :blk self.resolveStructMemberLValue(
-                    node,
-                    structure,
-                    depth + 1,
-                );
+            .member_access => |access| switch ((try expressionType(access.expression)).payload) {
+                .Struct => |structure| self.resolveStructMemberLValue(node, structure, depth + 1),
+                .TypeType => |type_type| blk: {
+                    if (type_type.actual_type.category() != .Contract)
+                        return error.UnsupportedLValue;
+                    break :blk self.variableLValue(
+                        (try memberAccessAnnotation(node)).referenced_declaration orelse return error.InvalidAst,
+                    );
+                },
+                else => error.UnsupportedLValue,
             },
             else => error.UnsupportedLValue,
         };
@@ -5800,18 +5782,18 @@ pub const IRGeneratorForStatements = struct {
 fn errorPayloadNeedsAllocation(
     parameter_types: []const *const Types.Type,
 ) GeneratorError!bool {
-    var static_size: usize = 0;
+    var static_size: u256 = 0;
     for (parameter_types) |type_ref| {
         if (!TypeBehavior.isValueType(type_ref) or
             TypeBehavior.isDynamicallyEncoded(type_ref))
             return true;
         static_size = std.math.add(
-            usize,
+            u256,
             static_size,
             try TypeBehavior.calldataEncodedSize(type_ref, true),
         ) catch return error.Overflow;
     }
-    const encoded_size = std.math.add(usize, static_size, 4) catch
+    const encoded_size = std.math.add(u256, static_size, 4) catch
         return error.Overflow;
     return encoded_size > ContextModule.general_purpose_memory_start;
 }

@@ -3669,7 +3669,7 @@ pub fn isDynamicallyEncoded(type_ref: *const Types.Type) bool {
 
 /// Size occupied by a value in the ABI head. Dynamically encoded values use
 /// one offset word; statically encoded values occupy their full encoding.
-pub fn calldataHeadSize(type_ref: *const Types.Type) QueryError!u32 {
+pub fn calldataHeadSize(type_ref: *const Types.Type) QueryError!u256 {
     if (isDynamicallyEncoded(type_ref)) return 32;
     return calldataEncodedSize(type_ref, true);
 }
@@ -3677,7 +3677,7 @@ pub fn calldataHeadSize(type_ref: *const Types.Type) QueryError!u32 {
 /// Minimum number of bytes that must be present at the ABI tail for a
 /// dynamically encoded value. This mirrors the virtual query used by the C++
 /// decoder for its up-front bounds checks.
-pub fn calldataEncodedTailSize(type_ref: *const Types.Type) QueryError!u32 {
+pub fn calldataEncodedTailSize(type_ref: *const Types.Type) QueryError!u256 {
     if (!isDynamicallyEncoded(type_ref)) return error.NotDynamicallyEncoded;
     return switch (type_ref.payload) {
         .Array => |array| if (array.isDynamicallySized())
@@ -3688,8 +3688,7 @@ pub fn calldataEncodedTailSize(type_ref: *const Types.Type) QueryError!u32 {
                 array.length.?,
                 try calldataStride(array),
             ) catch return error.Overflow;
-            if (raw > std.math.maxInt(u32)) return error.Overflow;
-            break :blk @intCast(raw);
+            break :blk raw;
         },
         .ArraySlice => 32,
         .Struct => |structure| structCalldataTailSize(structure),
@@ -3698,7 +3697,7 @@ pub fn calldataEncodedTailSize(type_ref: *const Types.Type) QueryError!u32 {
 }
 
 /// One array element's stride in ABI calldata.
-pub fn calldataStride(array: Types.ArrayType) QueryError!u32 {
+pub fn calldataStride(array: Types.ArrayType) QueryError!u256 {
     if (array.isByteArrayOrString()) return 1;
     return calldataHeadSize(array.base_type);
 }
@@ -3788,10 +3787,10 @@ pub fn structMemoryOffsetOfMember(
 pub fn structCalldataOffsetOfMember(
     structure: Types.StructType,
     member_name: []const u8,
-) QueryError!u32 {
+) QueryError!u256 {
     if (structure.declaration.nodeKind() != .struct_definition)
         return error.InvalidType;
-    var offset: u32 = 0;
+    var offset: u256 = 0;
     for (structure.declaration.payload.struct_definition.members) |member| {
         if (member.nodeKind() != .variable_declaration) return error.InvalidType;
         if (std.mem.eql(
@@ -3800,7 +3799,7 @@ pub fn structCalldataOffsetOfMember(
             member_name,
         )) return offset;
         offset = std.math.add(
-            u32,
+            u256,
             offset,
             try calldataHeadSize(try variableDeclarationType(member)),
         ) catch return error.Overflow;
@@ -3832,13 +3831,13 @@ pub fn variableDeclarationType(node: *const AST.Node) QueryError!*const Types.Ty
     } orelse error.InvalidType;
 }
 
-fn structCalldataTailSize(structure: Types.StructType) QueryError!u32 {
+fn structCalldataTailSize(structure: Types.StructType) QueryError!u256 {
     if (structure.declaration.nodeKind() != .struct_definition)
         return error.InvalidType;
-    var size: u32 = 0;
+    var size: u256 = 0;
     for (structure.declaration.payload.struct_definition.members) |member| {
         size = std.math.add(
-            u32,
+            u256,
             size,
             try calldataHeadSize(try variableDeclarationType(member)),
         ) catch return error.Overflow;
@@ -4003,7 +4002,7 @@ fn structStorageSize(structure: Types.StructType, depth: usize) QueryError!u256 
     return @max(@as(u256, 1), slot);
 }
 
-pub fn calldataEncodedSize(type_ref: *const Types.Type, padded: bool) QueryError!u32 {
+pub fn calldataEncodedSize(type_ref: *const Types.Type, padded: bool) QueryError!u256 {
     return switch (type_ref.payload) {
         .Address => if (padded) 32 else 20,
         .Integer => |value| if (padded) 32 else @intCast(value.bits / 8),
@@ -4036,12 +4035,12 @@ pub fn calldataEncodedSize(type_ref: *const Types.Type, padded: bool) QueryError
     };
 }
 
-fn structCalldataSize(structure: Types.StructType) QueryError!u32 {
+fn structCalldataSize(structure: Types.StructType) QueryError!u256 {
     if (isDynamicallyEncoded(&.{ .payload = .{ .Struct = structure } }))
         return error.DynamicEncoding;
     if (structure.declaration.nodeKind() != .struct_definition)
         return error.InvalidType;
-    var size: u32 = 0;
+    var size: u256 = 0;
     for (structure.declaration.payload.struct_definition.members) |member| {
         const annotation = ASTAnnotations.annotationConst(member) orelse
             return error.InvalidType;
@@ -4050,7 +4049,7 @@ fn structCalldataSize(structure: Types.StructType) QueryError!u32 {
             else => null,
         } orelse return error.InvalidType;
         size = std.math.add(
-            u32,
+            u256,
             size,
             try calldataEncodedSize(member_type, true),
         ) catch return error.Overflow;
@@ -4058,23 +4057,21 @@ fn structCalldataSize(structure: Types.StructType) QueryError!u32 {
     return size;
 }
 
-fn arrayCalldataSize(array: Types.ArrayType, padded: bool) QueryError!u32 {
+fn arrayCalldataSize(array: Types.ArrayType, padded: bool) QueryError!u256 {
     if (array.length == null or isDynamicallyEncoded(array.base_type))
         return error.DynamicEncoding;
-    const stride: u32 = if (array.isByteArrayOrString())
+    const stride: u256 = if (array.isByteArrayOrString())
         1
     else if (isDynamicallyEncoded(array.base_type))
         32
     else
         try calldataEncodedSize(array.base_type, true);
     const raw = std.math.mul(u256, array.length.?, stride) catch return error.Overflow;
-    if (raw > std.math.maxInt(u32)) return error.Overflow;
     const sized = if (padded) blk: {
         const rounded = std.math.add(u256, raw, 31) catch return error.Overflow;
         break :blk std.math.mul(u256, rounded / 32, 32) catch return error.Overflow;
     } else raw;
-    if (sized > std.math.maxInt(u32)) return error.Overflow;
-    return @intCast(sized);
+    return sized;
 }
 
 pub fn leftAligned(type_ref: *const Types.Type) QueryError!bool {

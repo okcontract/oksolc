@@ -271,6 +271,7 @@ solidity_json_status solidity_json_inspect(
     {
         yyjson_val* source = entries[source_index].value;
         yyjson_val* content = object_value_last(source, "content");
+        yyjson_val* hash = object_value_last(source, "keccak256");
         yyjson_val* urls;
         yyjson_arr_iter url_iterator;
         yyjson_val* url;
@@ -294,7 +295,9 @@ solidity_json_status solidity_json_inspect(
                 yyjson_get_str(entries[source_index].name),
                 yyjson_get_len(entries[source_index].name),
                 yyjson_get_str(url),
-                yyjson_get_len(url)
+                yyjson_get_len(url),
+                yyjson_is_str(hash) ? yyjson_get_str(hash) : NULL,
+                yyjson_is_str(hash) ? yyjson_get_len(hash) : 0
             );
             if (callback_status == 0)
             {

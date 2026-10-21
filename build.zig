@@ -1122,6 +1122,8 @@ pub fn build(b: *std.Build) !void {
         unit_test_step.dependOn(&run_tests.step);
         if (module == cli_module)
             b.step("test-cli", "Run CLI unit tests").dependOn(&run_tests.step);
+        if (module == standard_json_dispatch_module)
+            b.step("test-standard-json", "Run Standard JSON compiler tests").dependOn(&run_tests.step);
     }
 
     const evm_tests = b.addTest(.{ .root_module = b.createModule(.{

@@ -10,6 +10,203 @@ const standard_json = solidity.standard_json;
 const Profiler = solidity.libsolutil.profiler.Profiler;
 const ObjectOptimizer = solidity.libyul.object_optimizer.ObjectOptimizer;
 
+fn compileTestContract(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    const input = try std.json.Stringify.valueAlloc(allocator, .{
+        .language = "Solidity",
+        .sources = .{ .@"C.sol" = .{ .content = source } },
+        .settings = .{
+            .viaIR = true,
+            .optimizer = .{ .enabled = true },
+            .metadata = .{ .appendCBOR = false },
+            .outputSelection = .{ .@"*" = .{ .C = &.{"evm.bytecode.object"} } },
+        },
+    }, .{});
+    defer allocator.free(input);
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    defer output.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value.object.get("errors")) |errors| {
+        for (errors.array.items) |diagnostic| {
+            if (!std.mem.eql(u8, diagnostic.object.get("severity").?.string, "error")) continue;
+            std.debug.print("{s}\n", .{output.bytes});
+            return error.TestUnexpectedResult;
+        }
+    }
+    const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+    try std.testing.expect(bytecode.len != 0);
+    return allocator.dupe(u8, bytecode);
+}
+
+test "fixed-bytes wrappers materialize string and hexadecimal literals" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "\"hi\"", "hex\"0102\"", "\"\"" }) |literal| {
+        var expected: ?[]u8 = null;
+        defer if (expected) |bytes| allocator.free(bytes);
+        for ([_]bool{ true, false }) |explicit| {
+            const source = try allocator.print(
+                "pragma solidity 0.8.36; type Tag is bytes4; contract C {{" ++
+                    "function value() external pure returns (bytes4) {{" ++
+                    "return Tag.unwrap(Tag.wrap({s}{s}{s})); }} }}",
+                .{ if (explicit) "bytes4(" else "", literal, if (explicit) ")" else "" },
+            );
+            defer allocator.free(source);
+            const bytecode = try compileTestContract(allocator, source);
+            defer allocator.free(bytecode);
+            if (expected) |bytes|
+                try std.testing.expectEqualStrings(bytes, bytecode)
+            else
+                expected = try allocator.dupe(u8, bytecode);
+        }
+    }
+}
+
+test "qualified state writes preserve scalar immutable and function lvalues" {
+    const allocator = std.testing.allocator;
+    const template =
+        \\pragma solidity 0.8.36;
+        \\contract C {
+        \\    uint256 public value;
+        \\    uint256 public immutable initial;
+        \\    function(uint256) internal pure returns (uint256) handler;
+        \\    constructor() { QUAL.initial = 7; QUAL.handler = twice; }
+        \\    function twice(uint256 n) internal pure returns (uint256) { return n * 2; }
+        \\    function set(uint256 n) external { QUAL.value = QUAL.handler(n); }
+        \\}
+    ;
+    var expected: ?[]u8 = null;
+    defer if (expected) |bytes| allocator.free(bytes);
+    for ([_][]const u8{ "", "C." }) |qualifier| {
+        const source = try std.mem.replaceOwned(u8, allocator, template, "QUAL.", qualifier);
+        defer allocator.free(source);
+        const bytecode = try compileTestContract(allocator, source);
+        defer allocator.free(bytecode);
+        if (expected) |bytes|
+            try std.testing.expectEqualStrings(bytes, bytecode)
+        else
+            expected = try allocator.dupe(u8, bytecode);
+    }
+}
+
+test "constructor immutable deletion matches zero assignment" {
+    const allocator = std.testing.allocator;
+    const template =
+        \\pragma solidity 0.8.36;
+        \\contract C {
+        \\    uint256 public immutable number;
+        \\    address public immutable owner;
+        \\    bool public immutable enabled;
+        \\    bytes16 public immutable tag;
+        \\    constructor(uint256 n, address a) {
+        \\        number = n; owner = a; enabled = true; tag = "tag";
+        \\        CLEAR
+        \\    }
+        \\}
+    ;
+    var expected: ?[]u8 = null;
+    defer if (expected) |bytes| allocator.free(bytes);
+    for ([_][]const u8{
+        "number = 0; owner = address(0); enabled = false; tag = bytes16(0);",
+        "delete number; delete owner; delete enabled; delete tag;",
+    }) |clear| {
+        const source = try std.mem.replaceOwned(u8, allocator, template, "CLEAR", clear);
+        defer allocator.free(source);
+        const bytecode = try compileTestContract(allocator, source);
+        defer allocator.free(bytecode);
+        if (expected) |bytes|
+            try std.testing.expectEqualStrings(bytes, bytecode)
+        else
+            expected = try allocator.dupe(u8, bytecode);
+    }
+}
+
+test "external static returndata totals cross the 32-bit size boundary" {
+    const allocator = std.testing.allocator;
+    for ([_]u32{ 67108863, 67108864, 67108865 }) |length| {
+        const source = try allocator.print(
+            "pragma solidity 0.8.36; interface Target {{" ++
+                "function values() external returns (uint256[{d}] memory, uint256[{d}] memory); }}" ++
+                "contract C {{ function first(Target target) external returns (uint256) {{" ++
+                "(uint256[{d}] memory values,) = target.values(); return values[0]; }} }}",
+            .{ length, length, length },
+        );
+        defer allocator.free(source);
+        const bytecode = try compileTestContract(allocator, source);
+        defer allocator.free(bytecode);
+    }
+}
+
+test "large version pragmas retain reference compiler acceptance" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ ">3000000000", ">7000000000", "<2147483648" }) |range| {
+        const source = try allocator.print("pragma solidity {s}; contract C {{}}", .{range});
+        defer allocator.free(source);
+        const bytecode = try compileTestContract(allocator, source);
+        defer allocator.free(bytecode);
+    }
+}
+
+test "calldata struct heads cross the 32-bit size boundary" {
+    const allocator = std.testing.allocator;
+    for ([_]u32{ 134217725, 134217726, 134217727 }) |length| {
+        for ([_][]const u8{ "[]", "[1]" }) |outer| {
+            const source = try allocator.print(
+                "pragma solidity 0.8.36; contract C {{" ++
+                    "struct Entry {{ uint256[{d}] values; uint256 tag; bytes data; }}" ++
+                    "function encode(Entry{s} calldata values) external pure returns (bytes memory) {{" ++
+                    "return abi.encode(values); }} }}",
+                .{ length, outer },
+            );
+            defer allocator.free(source);
+            const bytecode = try compileTestContract(allocator, source);
+            defer allocator.free(bytecode);
+        }
+    }
+}
+
+test "deep inheritance preserves callable collection and ambiguity diagnostics" {
+    for ([_]usize{ 255, 256, 257 }) |count| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const callables = count == 257;
+        var source = std.Io.Writer.Allocating.init(allocator);
+        defer source.deinit();
+        try source.writer.writeAll("pragma solidity 0.8.36; contract Base0 {");
+        if (callables)
+            try source.writer.writeAll("function f() public pure virtual returns (uint256) { return 1; }");
+        try source.writer.writeAll("}");
+        for (1..count) |index| {
+            try source.writer.print("contract Base{d} is Base{d} {{", .{ index, index - 1 });
+            if (callables)
+                try source.writer.writeAll("function f() public pure virtual override returns (uint256) { return 2; }");
+            try source.writer.writeAll("}");
+        }
+        try source.writer.print("contract C is Base{d} {{}}", .{count - 1});
+        if (!callables) {
+            const bytecode = try compileTestContract(allocator, source.written());
+            defer allocator.free(bytecode);
+            continue;
+        }
+
+        try source.writer.print("contract Side is Base0 {{}} contract Diamond is Side, Base{d} {{}}", .{count - 1});
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = source.written() } },
+            .settings = .{ .outputSelection = .{ .@"*" = .{ .@"*" = &.{"abi"} } } },
+        }, .{});
+        defer allocator.free(input);
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        const errors = parsed.value.object.get("errors").?.array.items;
+        try std.testing.expectEqualStrings("6480", errors[errors.len - 1].object.get("errorCode").?.string);
+    }
+}
+
 test "relative imports preserve virtual source names when normalized aliases coexist" {
     const allocator = std.testing.allocator;
     const input =
@@ -634,6 +831,44 @@ test "array member lookup preserves zero-parameter attachment diagnostics regard
                 "The function \"g\" does not have any parameters, and therefore cannot be attached to the type \"uint256[]\".",
                 diagnostics[0].object.get("message").?.string,
             );
+        }
+    }
+}
+
+test "recursive memory copies distinguish cycles from nested mappings" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |has_mapping| {
+        const source = try allocator.print(
+            "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;" ++
+                "contract C {{ struct Node {{ Node[] children; uint256 value; {s} }}" ++
+                "Node root; function copy() external view returns (uint256) {{" ++
+                "Node memory snapshot = root; return snapshot.value; }} }}",
+            .{if (has_mapping) "mapping(uint256 => uint256) entries;" else ""},
+        );
+        defer allocator.free(source);
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = source } },
+            .settings = .{
+                .viaIR = true,
+                .optimizer = .{ .enabled = true },
+                .outputSelection = .{ .@"*" = .{ .C = &.{"evm.bytecode.object"} } },
+            },
+        }, .{});
+        defer allocator.free(input);
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        if (has_mapping) {
+            try std.testing.expect(!parsed.value.object.contains("contracts"));
+            const errors = parsed.value.object.get("errors").?.array.items;
+            try std.testing.expectEqualStrings("4061", errors[0].object.get("errorCode").?.string);
+        } else {
+            try std.testing.expect(!parsed.value.object.contains("errors"));
+            const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+            try std.testing.expect(bytecode.len != 0);
         }
     }
 }
@@ -3091,6 +3326,51 @@ test "experimental Yul backends fail explicitly without semantic substitution" {
     }
 }
 
+test "experimental settings preserve ordinary Solidity typing and session recovery" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\// SPDX-License-Identifier: UNLICENSED
+        \\pragma solidity 0.8.36;
+        \\contract C {
+        \\    uint256 public value;
+        \\    function set(uint256 input) external returns (uint256 result) {
+        \\        uint256 local = input + 1;
+        \\        value = local;
+        \\        return value;
+        \\    }
+        \\}
+    ;
+    var session = solidity.CompilerSession.init(allocator);
+    defer session.deinit();
+    var expected: ?[]u8 = null;
+    defer if (expected) |bytes| allocator.free(bytes);
+    for ([_]bool{ false, true, false }) |experimental| {
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = source } },
+            .settings = .{
+                .experimental = experimental,
+                .viaIR = true,
+                .optimizer = .{ .enabled = true },
+                .metadata = .{ .appendCBOR = false },
+                .outputSelection = .{ .@"*" = .{ .@"*" = &.{"evm.bytecode.object"} } },
+            },
+        }, .{});
+        defer allocator.free(input);
+        var output = try session.compiler().compile(allocator, .{ .input = input });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expect(!parsed.value.object.contains("errors"));
+        const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+        try std.testing.expect(bytecode.len != 0);
+        if (expected) |bytes|
+            try std.testing.expectEqualStrings(bytes, bytecode)
+        else
+            expected = try allocator.dupe(u8, bytecode);
+    }
+}
+
 test "experimental Solidity backends fail explicitly without semantic substitution" {
     const cases = [_]struct { input: []const u8, message: []const u8 }{
         .{
@@ -3197,6 +3477,211 @@ const RecordingLoaderState = struct {
         return .{ .context = self, .read_fn = read };
     }
 };
+
+test "hash-pinned URL sources skip mismatches and retain diagnostics" {
+    const allocator = std.testing.allocator;
+    const Loader = struct {
+        source: []const u8,
+        calls: usize = 0,
+
+        fn read(context: ?*anyopaque, gpa: std.mem.Allocator, _: []const u8, url: []const u8) standard_json.SourceReadError!standard_json.SourceReadResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            return .{ .contents = try gpa.dupe(u8, if (std.mem.eql(u8, url, "good")) self.source else "wrong source") };
+        }
+    };
+    for ([_][]const u8{ "Solidity", "Yul" }) |language| {
+        const source = if (std.mem.eql(u8, language, "Solidity"))
+            "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36; contract C {}"
+        else
+            "object \"C\" { code { mstore(0, 7) return(0, 32) } }";
+        const digest = solidity.libsolutil.keccak256.keccak256(source);
+        const hash = try allocator.print("0x{s}", .{&digest.hex()});
+        defer allocator.free(hash);
+        for ([_]bool{ false, true }) |has_fallback| {
+            const urls: []const []const u8 = if (has_fallback)
+                &.{ "bad-first", "bad-second", "good", "unused" }
+            else
+                &.{ "bad-first", "bad-second" };
+            const input = try std.json.Stringify.valueAlloc(allocator, .{
+                .language = language,
+                .sources = .{ .@"C.sol" = .{ .urls = urls, .keccak256 = hash } },
+                .settings = .{
+                    .viaIR = true,
+                    .optimizer = .{ .enabled = true },
+                    .outputSelection = .{ .@"*" = .{ .@"*" = &.{"evm.bytecode.object"} } },
+                },
+            }, .{});
+            defer allocator.free(input);
+            var loader: Loader = .{ .source = source };
+            var dispatcher: libsolc.Dispatcher = .{};
+            var output = try dispatcher.compiler().compile(allocator, .{
+                .input = input,
+                .source_loader = .{ .context = &loader, .read_fn = Loader.read },
+            });
+            defer output.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqual(@as(usize, if (has_fallback) 3 else 2), loader.calls);
+            const errors = parsed.value.object.get("errors").?.array.items;
+            try std.testing.expectEqual(@as(usize, 2), errors.len);
+            for (errors, [_][]const u8{ "bad-first", "bad-second" }) |diagnostic, url| {
+                try std.testing.expectEqualStrings("IOError", diagnostic.object.get("type").?.string);
+                try std.testing.expect(std.mem.find(u8, diagnostic.object.get("message").?.string, url) != null);
+            }
+            try std.testing.expectEqual(has_fallback, parsed.value.object.contains("contracts"));
+            if (has_fallback) {
+                const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+                try std.testing.expect(bytecode.len != 0);
+            }
+        }
+    }
+}
+
+test "hash-pinned URL diagnostics survive sequential and parallel stack exceptions" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\contract A {
+        \\    function encode(
+        \\        uint256 p0, uint256 p1, uint256 p2, uint256 p3, uint256 p4, uint256 p5,
+        \\        uint256 p6, uint256 p7, uint256 p8, uint256 p9, uint256 p10, uint256 p11,
+        \\        uint256 p12, uint256 p13, uint256 p14, uint256 p15, uint256 p16, uint256 p17,
+        \\        uint256 p18, uint256 p19, uint256 p20, uint256 p21, uint256 p22, uint256 p23
+        \\    ) external pure returns (bytes memory) {
+        \\        assembly { calldatacopy(0, 0, calldatasize()) }
+        \\        return abi.encode(p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11,
+        \\            p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23);
+        \\    }
+        \\}
+        \\contract B {}
+    ;
+    const Loader = struct {
+        calls: usize = 0,
+
+        fn read(context: ?*anyopaque, gpa: std.mem.Allocator, _: []const u8, url: []const u8) standard_json.SourceReadError!standard_json.SourceReadResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            return .{ .contents = try gpa.dupe(u8, if (std.mem.eql(u8, url, "good")) source else "wrong source") };
+        }
+    };
+    const digest = solidity.libsolutil.keccak256.keccak256(source);
+    const hash = try allocator.print("0x{s}", .{&digest.hex()});
+    defer allocator.free(hash);
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(1) });
+    defer threaded.deinit();
+    const candidates = [_][]const u8{ "bad-first", "bad-second", "good" };
+    for ([_]bool{ false, true }) |parallel| {
+        for ([_]usize{ 0, 1, 2 }) |mismatches| {
+            const urls = candidates[2 - mismatches ..];
+            const input = try std.json.Stringify.valueAlloc(allocator, .{
+                .language = "Solidity",
+                .sources = .{ .@"C.sol" = .{ .urls = urls, .keccak256 = hash } },
+                .settings = .{
+                    .viaIR = true,
+                    .optimizer = .{ .enabled = true },
+                    .outputSelection = .{ .@"*" = .{ .@"*" = &.{ "abi", "metadata", "evm.bytecode.object" } } },
+                },
+            }, .{});
+            defer allocator.free(input);
+            var loader: Loader = .{};
+            var dispatcher: libsolc.Dispatcher = .{};
+            var output = try dispatcher.compiler().compile(allocator, .{
+                .input = input,
+                .source_loader = .{ .context = &loader, .read_fn = Loader.read },
+                .io = if (parallel) threaded.io() else null,
+            });
+            defer output.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqual(mismatches + 1, loader.calls);
+            const errors = parsed.value.object.get("errors").?.array.items;
+            try std.testing.expectEqual(mismatches + 1, errors.len);
+            for (errors[0..mismatches], urls[0..mismatches]) |diagnostic, url| {
+                try std.testing.expectEqualStrings("IOError", diagnostic.object.get("type").?.string);
+                const expected = try allocator.print("Mismatch between content and supplied hash for \"C.sol\" at \"{s}\"", .{url});
+                defer allocator.free(expected);
+                try std.testing.expectEqualStrings(expected, diagnostic.object.get("message").?.string);
+            }
+            const exception = errors[mismatches];
+            try std.testing.expectEqualStrings("YulException", exception.object.get("type").?.string);
+            try std.testing.expect(std.mem.find(u8, exception.object.get("message").?.string, "too deep in the stack") != null);
+            const contract = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("A").?;
+            try std.testing.expect(contract.object.contains("abi"));
+            try std.testing.expect(contract.object.contains("metadata"));
+            try std.testing.expect(!contract.object.contains("evm"));
+        }
+    }
+}
+
+test "hash-pinned URL sources retain terminal callback failures" {
+    const allocator = std.testing.allocator;
+    const Loader = struct {
+        source: []const u8,
+        calls: usize = 0,
+
+        fn read(context: ?*anyopaque, gpa: std.mem.Allocator, _: []const u8, url: []const u8) standard_json.SourceReadError!standard_json.SourceReadResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (std.mem.eql(u8, url, "bad")) return .{ .contents = try gpa.dupe(u8, "wrong source") };
+            if (std.mem.eql(u8, url, "good")) return .{ .contents = try gpa.dupe(u8, self.source) };
+            if (std.mem.eql(u8, url, "unsupported")) return .unsupported;
+            if (std.mem.eql(u8, url, "invalid")) return error.InvalidPath;
+            if (std.mem.eql(u8, url, "internal")) return error.InternalFailure;
+            if (std.mem.eql(u8, url, "oom")) return error.OutOfMemory;
+            return .{ .failure = try gpa.dupe(u8, "not found") };
+        }
+    };
+    const cases = [_]struct { url: []const u8, message: ?[]const u8 }{
+        .{ .url = "missing", .message = "Source callback failed." },
+        .{ .url = "unsupported", .message = "Source callback is not available in this request." },
+        .{ .url = "invalid", .message = "Source callback failed." },
+        .{ .url = "internal", .message = "Source callback failed." },
+        .{ .url = "oom", .message = null },
+    };
+    for ([_][]const u8{ "Solidity", "Yul" }) |language| {
+        const source = if (std.mem.eql(u8, language, "Solidity")) "contract A {}" else "object \"A\" { code { stop() } }";
+        const digest = solidity.libsolutil.keccak256.keccak256(source);
+        const hash = try allocator.print("0x{s}", .{&digest.hex()});
+        defer allocator.free(hash);
+        for (cases) |case| {
+            for ([_]bool{ false, true }) |has_fallback| {
+                const urls: []const []const u8 = if (has_fallback) &.{ "bad", "good" } else &.{ "bad", case.url };
+                const input = try std.json.Stringify.valueAlloc(allocator, .{
+                    .language = language,
+                    .sources = .{
+                        .@"A.sol" = .{ .urls = urls, .keccak256 = hash },
+                        .@"B.sol" = .{ .urls = &.{case.url} },
+                    },
+                }, .{});
+                defer allocator.free(input);
+                var loader: Loader = .{ .source = source };
+                var dispatcher: libsolc.Dispatcher = .{};
+                const result = dispatcher.compiler().compile(allocator, .{
+                    .input = input,
+                    .source_loader = .{ .context = &loader, .read_fn = Loader.read },
+                });
+                if (case.message == null) {
+                    try std.testing.expectError(error.OutOfMemory, result);
+                    continue;
+                }
+                var output = try result;
+                defer output.deinit();
+                const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+                defer parsed.deinit();
+                try std.testing.expectEqual(@as(usize, if (has_fallback) 3 else 2), loader.calls);
+                try std.testing.expect(!parsed.value.object.contains("contracts"));
+                const errors = parsed.value.object.get("errors").?.array.items;
+                try std.testing.expectEqual(@as(usize, 2), errors.len);
+                try std.testing.expectEqualStrings("Mismatch between content and supplied hash for \"A.sol\" at \"bad\"", errors[0].object.get("message").?.string);
+                try std.testing.expectEqualStrings(case.message.?, errors[1].object.get("message").?.string);
+                for (errors) |diagnostic| {
+                    try std.testing.expectEqualStrings("IOError", diagnostic.object.get("type").?.string);
+                    try std.testing.expectEqualStrings("error", diagnostic.object.get("severity").?.string);
+                }
+            }
+        }
+    }
+}
 
 test "URL callbacks consume and release owned failure and content results" {
     var loader_state: LoaderState = .{};

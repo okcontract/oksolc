@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.2.2 - 2026-10-20
+
+Solidity compatibility target: `0.8.36`.
+
+### Changed
+
+- Lower-level Zig ABI size and offset queries and
+  `ReturnInfo.estimated_return_size` now use `u256` instead of `u32`.
+- Direct calls to `compileSolidityStandardJsonAlloc` and
+  `compileYulStandardJsonAlloc` now take a `source_errors` slice after
+  `loaded_sources`; pass `&.{}` when source resolution produced no diagnostics.
+
+### Fixed
+
+- Preserve ordinary Solidity typing when `settings.experimental` is enabled
+  ([#30](https://github.com/okcontract/oksolc/issues/30)).
+- Traverse deep inheritance and override graphs without fixed recursion limits,
+  and keep the stdio service running after internal compiler failures
+  ([#31](https://github.com/okcontract/oksolc/issues/31)).
+- Validate each source URL candidate against `keccak256` before accepting it,
+  continuing to later URLs after a hash mismatch. Retain hash diagnostics
+  alongside callback failures and `StackTooDeep` exceptions in sequential and
+  parallel compilation ([#32](https://github.com/okcontract/oksolc/issues/32)).
+- Use cycle-aware mapping detection so recursive structs are not misclassified
+  as containing mappings ([#33](https://github.com/okcontract/oksolc/issues/33)).
+- Materialize string and hexadecimal literals when wrapping fixed bytes in
+  user-defined value types ([#34](https://github.com/okcontract/oksolc/issues/34)).
+- Allow state variable writes qualified by contract name, including immutables
+  and internal function pointers ([#35](https://github.com/okcontract/oksolc/issues/35)).
+- Support deleting immutable variables during construction
+  ([#36](https://github.com/okcontract/oksolc/issues/36)).
+- Match solc 0.8.36 version-range comparisons for large numeric pragma
+  components ([#37](https://github.com/okcontract/oksolc/issues/37)).
+- Keep ABI calldata sizes, strides, and offsets exact across the 4 GiB boundary
+  ([#38](https://github.com/okcontract/oksolc/issues/38)).
+- Keep static external-call return size totals exact across the 4 GiB boundary
+  ([#39](https://github.com/okcontract/oksolc/issues/39)).
+
+### Compatibility
+
+- ABI calldata layouts and static return size totals above `2^32 - 1` bytes use
+  exact `u256` arithmetic instead of reproducing solc 0.8.36's 32-bit wrapping.
+  See the [documented compatibility exceptions](README.md#status-and-compatibility).
+
 ## 0.2.1 - 2026-10-19
 
 Solidity compatibility target: `0.8.36`.

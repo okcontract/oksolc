@@ -29,6 +29,9 @@ pub const max_standard_json_source_entries: usize =
     @intCast(adapter.SOLIDITY_JSON_MAX_SOURCE_ENTRIES);
 
 pub const responses = struct {
+    pub const internal_failure =
+        \\{"errors":[{"component":"general","formattedMessage":"Internal compiler failure.","message":"Internal compiler failure.","severity":"error","type":"InternalCompilerError"}]}
+    ++ "\n";
     pub const no_input_sources =
         \\{"errors":[{"component":"general","formattedMessage":"No input sources specified.","message":"No input sources specified.","severity":"error","type":"JSONError"}]}
     ++ "\n";
@@ -384,11 +387,19 @@ pub const Dispatcher = struct {
             return ownedOutput(allocator, responses.invalid_json);
         }
         if (status == adapter.SOLIDITY_JSON_CALLBACK_FAILED) {
-            return ownedOutput(allocator, switch (callback_state.outcome) {
-                .unsupported, .none => responses.source_callback_unsupported,
-                .failure, .loaded => responses.source_callback_failed,
+            const failure: ?[]const u8 = switch (callback_state.outcome) {
+                .hash_mismatch => null,
+                .unsupported, .none => "Source callback is not available in this request.",
+                .failure, .loaded => "Source callback failed.",
                 .out_of_memory => unreachable,
-            });
+            };
+            return .{
+                .allocator = allocator,
+                .bytes = StandardCompiler.sourceErrorsAlloc(allocator, callback_state.source_errors.items, failure) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.InternalFailure,
+                },
+            };
         }
         if (status != adapter.SOLIDITY_JSON_OK) {
             if (status == adapter.SOLIDITY_JSON_ROOT_NOT_OBJECT or
@@ -428,6 +439,7 @@ pub const Dispatcher = struct {
                 allocator,
                 root,
                 callback_state.loaded_sources.items,
+                callback_state.source_errors.items,
                 object_optimizer,
                 backend_cache,
             ) catch |err| switch (err) {
@@ -463,6 +475,7 @@ pub const Dispatcher = struct {
                 allocator,
                 root,
                 callback_state.loaded_sources.items,
+                callback_state.source_errors.items,
                 read_callback,
                 self.optimizer_profiler,
                 request.progress,
@@ -542,6 +555,7 @@ const CallbackOutcome = enum {
     none,
     loaded,
     failure,
+    hash_mismatch,
     unsupported,
     out_of_memory,
 };
@@ -551,6 +565,7 @@ const CallbackState = struct {
     loader: ?common.standard_json.SourceLoader,
     outcome: CallbackOutcome = .none,
     loaded_sources: std.ArrayList(StandardCompiler.SourceContent) = .empty,
+    source_errors: std.ArrayList([]const u8) = .empty,
 
     fn deinit(self: *CallbackState) void {
         for (self.loaded_sources.items) |source| {
@@ -558,6 +573,8 @@ const CallbackState = struct {
             self.allocator.free(source.content);
         }
         self.loaded_sources.deinit(self.allocator);
+        for (self.source_errors.items) |message| self.allocator.free(message);
+        self.source_errors.deinit(self.allocator);
         self.* = undefined;
     }
 };
@@ -568,6 +585,8 @@ fn sourceUrlCallback(
     name_length: usize,
     url_pointer: [*c]const u8,
     url_length: usize,
+    hash_pointer: [*c]const u8,
+    hash_length: usize,
 ) callconv(.c) c_int {
     const context_pointer = opaque_context orelse return -1;
     const state: *CallbackState = @ptrCast(@alignCast(context_pointer));
@@ -593,10 +612,26 @@ fn sourceUrlCallback(
     };
     defer result.deinit(state.allocator);
 
-    // The source name remains borrowed by yyjson for this synchronous call.
-    _ = name_pointer[0..name_length];
     return switch (result) {
         .contents => |contents| blk: {
+            if (hash_pointer != null and
+                !StandardCompiler.hashMatchesContent(hash_pointer[0..hash_length], contents))
+            {
+                const message = state.allocator.print(
+                    "Mismatch between content and supplied hash for \"{s}\" at \"{s}\"",
+                    .{ name_pointer[0..name_length], url_pointer[0..url_length] },
+                ) catch {
+                    state.outcome = .out_of_memory;
+                    break :blk -1;
+                };
+                state.source_errors.append(state.allocator, message) catch {
+                    state.allocator.free(message);
+                    state.outcome = .out_of_memory;
+                    break :blk -1;
+                };
+                state.outcome = .hash_mismatch;
+                break :blk 1;
+            }
             const owned_name = state.allocator.dupe(
                 u8,
                 name_pointer[0..name_length],
