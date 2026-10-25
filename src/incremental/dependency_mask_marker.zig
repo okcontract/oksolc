@@ -5,6 +5,7 @@
 //! masks in the frozen graph's CSR edge order; this marker only borrows them.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const GraphModule = @import("source_graph.zig");
 const SourceGraph = GraphModule.SourceGraph;
 const SourceId = GraphModule.SourceId;
@@ -16,6 +17,9 @@ pub const DependencyMaskMarker = struct {
     masks: []Fingerprint.DependencyMaskEntry,
     importer: ?SourceId = null,
     seen: std.bit_set.Dynamic,
+    failed: std.bit_set.Dynamic,
+    // Deterministic scaling assertions without production counter overhead.
+    edge_visits: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
     /// Graph topology and mask keys must stay frozen until deinit. Only this
     /// marker may mutate categories, monotonically widening them to `.all`.
@@ -25,15 +29,19 @@ pub const DependencyMaskMarker = struct {
         masks: []Fingerprint.DependencyMaskEntry,
     ) !DependencyMaskMarker {
         std.debug.assert(masks.len == graph.edgeCount());
+        var seen = try std.bit_set.Dynamic.initEmpty(allocator, graph.activeSourceCount());
+        errdefer seen.deinit(allocator);
         return .{
             .allocator = allocator,
             .graph = graph,
             .masks = masks,
-            .seen = try .initEmpty(allocator, graph.activeSourceCount()),
+            .seen = seen,
+            .failed = try .initEmpty(allocator, graph.activeSourceCount()),
         };
     }
 
     pub fn deinit(self: *DependencyMaskMarker) void {
+        self.failed.deinit(self.allocator);
         self.seen.deinit(self.allocator);
         self.* = undefined;
     }
@@ -50,6 +58,11 @@ pub const DependencyMaskMarker = struct {
         // writes only assigns `.all` again; categories never narrow here.
         if (self.seen.isSet(target_index)) return;
         self.seen.set(target_index);
+        // Negative results belong to this target search. Key by source node,
+        // not SCC: intra-SCC edges are skipped, so members can differ in their
+        // reachable outgoing paths. Successful paths still perform every mask
+        // write in the original deterministic traversal order.
+        self.failed.unsetAll();
         if (self.markPath(source_index, self.graph.scc_by_active_index[target_index])) return;
         // Preserve the original active-but-unreachable fallback exactly.
         for (self.masks[self.graph.forward_offsets[source_index]..self.graph.forward_offsets[source_index + 1]]) |*entry|
@@ -59,9 +72,11 @@ pub const DependencyMaskMarker = struct {
     fn markPath(self: *DependencyMaskMarker, source_index: usize, target_scc: GraphModule.SourceSccId) bool {
         const source_scc = self.graph.scc_by_active_index[source_index];
         if (source_scc == target_scc) return true;
+        if (self.failed.isSet(source_index)) return false;
         const begin = self.graph.forward_offsets[source_index];
         const end = self.graph.forward_offsets[source_index + 1];
         for (self.graph.forward_edges[begin..end], begin..) |imported, edge_index| {
+            if (builtin.is_test) self.edge_visits += 1;
             const imported_index = self.graph.activeIndex(imported).?;
             if (self.graph.scc_by_active_index[imported_index] == source_scc) continue;
             if (!self.markPath(imported_index, target_scc)) continue;
@@ -72,6 +87,7 @@ pub const DependencyMaskMarker = struct {
             entry.categories = .all;
             return true;
         }
+        self.failed.set(source_index);
         return false;
     }
 };
@@ -203,4 +219,86 @@ test "dependency mask marker preserves the first diamond path with sparse source
         }
     };
     try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ &graph, a, d, tombstone });
+}
+
+test "dependency mask marker visits shared unsuccessful subgraphs linearly" {
+    const allocator = std.testing.allocator;
+    for ([_]usize{ 4, 8, 12 }) |layers| {
+        var registry = GraphModule.SourceRegistry.init(allocator);
+        defer registry.deinit();
+        _ = try registry.beginRevision();
+        var ids: std.ArrayList(SourceId) = .empty;
+        defer ids.deinit(allocator);
+        for (0..2 * layers + 2) |i| {
+            const name = try allocator.print("source-{d}.sol", .{i});
+            defer allocator.free(name);
+            try ids.append(allocator, (try registry.upsert(name, "")).id);
+        }
+        _ = try registry.finishRevision();
+        registry.commitRevision();
+        var edges: std.ArrayList(GraphModule.SourceEdge) = .empty;
+        defer edges.deinit(allocator);
+        for (ids.items[1..3]) |imported|
+            try edges.append(allocator, .{ .importer = ids.items[0], .imported = imported });
+        for (0..layers - 1) |layer| {
+            for (ids.items[1 + 2 * layer ..][0..2]) |from|
+                for (ids.items[3 + 2 * layer ..][0..2]) |to| {
+                    try edges.append(allocator, .{ .importer = from, .imported = to });
+                };
+        }
+        const target = ids.items[ids.items.len - 1];
+        try edges.append(allocator, .{ .importer = ids.items[0], .imported = target });
+        var graph = try SourceGraph.initAlloc(allocator, &registry, edges.items);
+        defer graph.deinit();
+        const masks = try masksAlloc(allocator, &graph);
+        defer allocator.free(masks);
+        var marker = try DependencyMaskMarker.init(allocator, &graph, masks);
+        defer marker.deinit();
+        marker.mark(ids.items[0], target);
+        try std.testing.expect(marker.edge_visits <= graph.edgeCount());
+        for (masks) |mask| {
+            const expected: Fingerprint.CategoryMask = if (mask.imported == target) .all else .exported_only;
+            try std.testing.expectEqual(expected, mask.categories);
+        }
+        const first_visits = marker.edge_visits;
+        marker.mark(ids.items[0], target);
+        try std.testing.expectEqual(first_visits, marker.edge_visits);
+        // A different target must not inherit negative results from the first.
+        marker.mark(ids.items[0], ids.items[ids.items.len - 2]);
+        try std.testing.expect(marker.edge_visits - first_visits <= graph.edgeCount());
+        try std.testing.expectEqual(Fingerprint.CategoryMask.all, masks[0].categories);
+    }
+}
+
+test "dependency mask marker keeps negative results distinct within an SCC" {
+    const allocator = std.testing.allocator;
+    var registry = GraphModule.SourceRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.beginRevision();
+    const root = (try registry.upsert("root.sol", "")).id;
+    const a = (try registry.upsert("a.sol", "")).id;
+    const b = (try registry.upsert("b.sol", "")).id;
+    const target = (try registry.upsert("target.sol", "")).id;
+    _ = try registry.finishRevision();
+    registry.commitRevision();
+    var graph = try SourceGraph.initAlloc(allocator, &registry, &.{
+        .{ .importer = root, .imported = a },
+        .{ .importer = root, .imported = b },
+        .{ .importer = a, .imported = b },
+        .{ .importer = b, .imported = a },
+        .{ .importer = b, .imported = target },
+    });
+    defer graph.deinit();
+    const masks = try masksAlloc(allocator, &graph);
+    defer allocator.free(masks);
+    const expected = try allocator.dupe(Fingerprint.DependencyMaskEntry, masks);
+    defer allocator.free(expected);
+    var marker = try DependencyMaskMarker.init(allocator, &graph, masks);
+    defer marker.deinit();
+    Reference.mark(&graph, expected, root, target);
+    marker.mark(root, target);
+    try std.testing.expectEqualDeep(expected, masks);
+    try std.testing.expectEqual(Fingerprint.CategoryMask.exported_only, masks[0].categories);
+    try std.testing.expectEqual(Fingerprint.CategoryMask.all, masks[1].categories);
+    try std.testing.expectEqual(Fingerprint.CategoryMask.all, masks[4].categories);
 }
