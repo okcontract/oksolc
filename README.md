@@ -115,7 +115,7 @@ same revision. Standard JSON and C ABI callers need no migration.
 ## Requirements
 
 - Zig `0.17.0`
-- TypeScript `7.0.2` (`tsc`) and Bun `1.4.3` only for the optional web browser
+- TypeScript `7.0.2` (`tsc`) and Bun `1.4.4` only for the optional web browser
 - libc and a working C toolchain
 - Clang with ASan/UBSan runtimes for `fuzz-json-adapter` and `fuzz` (limited to
   the yyjson adapter for now)
