@@ -44,6 +44,9 @@ Intentional exceptions:
   of reproducing solc's 32-bit wrapping.
 - ABI calldata heads and member offsets above `2^32 - 1` remain exact instead
   of reproducing solc's 32-bit wrapping.
+- `MCOPY` gas estimates include the full memory expansion over both accessed
+  ranges, correcting solc 0.8.36's underestimate. This affects reported gas
+  estimates, not emitted bytecode.
 
 The `compile` command enables the optimizer with 200 runs. Use `standard-json`
 when exact control of compiler settings or output selection is required.

@@ -1150,6 +1150,15 @@ pub fn build(b: *std.Build) !void {
     dependOnValidation(&run_constant_tests.step, addCompilerBuildIdentityValidation(b, constant_tests, compiler_build_validation_identity));
     b.step("test-constants", "Test constant evaluation and ownership").dependOn(&run_constant_tests.step);
 
+    const gas_meter_tests = b.addTest(.{
+        .name = "gas-meter",
+        .root_module = compiler_module,
+        .filters = &.{ "compiler module inventory", "MCOPY gas", "gas schedule", "gas consumption", "state-aware gas", "data gas" },
+    });
+    const run_gas_meter_tests = b.addRunArtifact(gas_meter_tests);
+    dependOnValidation(&run_gas_meter_tests.step, addCompilerBuildIdentityValidation(b, gas_meter_tests, compiler_build_validation_identity));
+    b.step("test-gas-meter", "Test EVM gas estimates and memory expansion").dependOn(&run_gas_meter_tests.step);
+
     const frontend_index_tests = b.addTest(.{
         .name = "frontend-indexes",
         .root_module = compiler_module,
