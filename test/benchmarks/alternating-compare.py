@@ -3,7 +3,11 @@
 # Copyright (C) 2014-2026 The Solidity Authors.
 # Copyright (C) 2026 OKcontract Pte. Ltd.
 
-"""Benchmark two immutable solidity-zig executables in balanced alternating order."""
+"""Compare fresh compiler processes with persistent caching disabled.
+
+Every timed invocation includes output capture; validation and hashing follow
+the timed interval. Warmups warm OS caches, not a persistent compiler cache.
+"""
 
 import argparse
 import hashlib
@@ -16,6 +20,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import compare
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -25,20 +31,99 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def run_compiler(binary: Path, request: Path, jobs: int) -> dict[str, float | int]:
-    arguments = [str(binary), "standard-json"]
+def validate_output(raw: bytes, request: dict) -> list[tuple[str, str, str]]:
+    output = compare.parse_output("compiler", raw)
+    diagnostics = output.get("errors", [])
+    if not isinstance(diagnostics, list) or any(not isinstance(item, dict) for item in diagnostics):
+        raise RuntimeError("compiler emitted malformed diagnostics")
+    errors = compare.compiler_errors(output)
+    if errors:
+        raise RuntimeError("compiler errors: " + "\n".join(errors))
+    selection = request.get("settings", {}).get("outputSelection", {})
+
+    def check_selected(source, contract, artifact):
+        requested = set()
+        for source_rule in ("*", source):
+            rules = selection.get(source_rule, {})
+            for contract_rule in (("*", contract) if contract else ("",)):
+                requested.update(rules.get(contract_rule, []))
+        if not requested:
+            return
+        # Some requested outputs are legitimately absent, for example deployed
+        # bytecode for a Yul object without a deployed subobject. Require a
+        # selected artifact here; cross-sample manifests detect partial output.
+        for name in requested:
+            if name == "*" and artifact:
+                return
+            value = artifact
+            for component in name.split("."):
+                if not isinstance(value, dict) or component not in value:
+                    break
+                value = value[component]
+            else:
+                return
+        raise RuntimeError(f"missing requested artifact: {source}:{contract}:{sorted(requested)}")
+
+    manifest = []
+
+    def record(source, contract, name, value):
+        # EVM outputs have nested selections such as evm.bytecode.object.
+        # ABI arrays and large storage layouts remain one artifact each.
+        if name.startswith("evm") and isinstance(value, dict) and value:
+            for child, item in value.items():
+                record(source, contract, name + "." + child, item)
+        else:
+            manifest.append((source, contract, name))
+
+    contracts = output.get("contracts", {})
+    if not isinstance(contracts, dict):
+        raise RuntimeError("compiler emitted malformed contracts")
+    for source, entries in contracts.items():
+        if not isinstance(entries, dict):
+            raise RuntimeError("compiler emitted malformed contract entries")
+        for contract, artifact in entries.items():
+            if not isinstance(artifact, dict):
+                raise RuntimeError("compiler emitted malformed contract artifact")
+            check_selected(source, contract, artifact)
+            for name, value in artifact.items():
+                if name != "evm" or value:
+                    record(source, contract, name, value)
+
+    sources = output.get("sources", {})
+    if not isinstance(sources, dict):
+        raise RuntimeError("compiler emitted malformed sources")
+    for source in set(request.get("sources", {})) | set(sources):
+        artifact = sources.get(source, {})
+        if not isinstance(artifact, dict):
+            raise RuntimeError("compiler emitted malformed source artifact")
+        check_selected(source, "", artifact)
+        if "ast" in artifact:
+            manifest.append((source, "", "ast"))
+    if not manifest:
+        raise RuntimeError("compiler emitted no artifacts; select benchmark outputs explicitly")
+    return sorted(manifest)
+
+
+def run_compiler(binary: Path, request: Path, jobs: int) -> dict[str, object]:
+    arguments = [str(binary), "standard-json", "--no-cache"]
     if jobs != 1:
         arguments.extend(("--parallel", "--jobs", str(jobs)))
     arguments.append("-")
 
-    with request.open("rb") as standard_json, open(os.devnull, "wb") as discard, tempfile.TemporaryFile() as errors:
+    request_value = json.loads(request.read_bytes())
+    with (request.open("rb") as standard_json,
+          tempfile.TemporaryFile() as captured,
+          tempfile.TemporaryFile() as errors,
+          tempfile.TemporaryDirectory(prefix="oksolc-alternating-") as workspace):
         started = time.perf_counter()
         pid = os.fork()
         if pid == 0:
             try:
-                os.chdir(tempfile.gettempdir())
+                os.chdir(workspace)
+                os.environ["XDG_CONFIG_HOME"] = str(Path(workspace) / "config")
+                os.environ["XDG_CACHE_HOME"] = str(Path(workspace) / "cache")
                 os.dup2(standard_json.fileno(), 0)
-                os.dup2(discard.fileno(), 1)
+                os.dup2(captured.fileno(), 1)
                 os.dup2(errors.fileno(), 2)
                 os.execv(binary, arguments)
             except BaseException:
@@ -50,15 +135,22 @@ def run_compiler(binary: Path, request: Path, jobs: int) -> dict[str, float | in
             errors.seek(0)
             diagnostic = errors.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"compiler failed ({status}): {diagnostic}")
+        captured.seek(0)
+        raw_output = captured.read()
+        manifest = validate_output(raw_output, request_value)
 
     rss_scale = 1 if sys.platform == "darwin" else 1024
     return {
         "wall_seconds": wall_seconds,
         "max_rss_bytes": usage.ru_maxrss * rss_scale,
+        "user_seconds": usage.ru_utime,
+        "system_seconds": usage.ru_stime,
+        "output_sha256": hashlib.sha256(raw_output).hexdigest(),
+        "artifact_manifest": manifest,
     }
 
 
-def summary(samples: list[dict[str, float | int]]) -> dict[str, float | int]:
+def summary(samples: list[dict[str, object]]) -> dict[str, float | int]:
     walls = [float(sample["wall_seconds"]) for sample in samples]
     rss = [int(sample["max_rss_bytes"]) for sample in samples]
     return {
@@ -99,7 +191,7 @@ def main() -> None:
         raise RuntimeError("Baseline and Candidate executables have identical SHA-256 hashes")
 
     report = {
-        "schema": 1,
+        "schema": 2,
         "generated_unix_seconds": time.time(),
         "platform": platform.platform(),
         "jobs": args.jobs,
@@ -110,7 +202,14 @@ def main() -> None:
             "baseline": args.baseline_label,
             "candidate": args.candidate_label,
         },
-        "working_directory": tempfile.gettempdir(),
+        "protocol": {
+            "process": "fresh per invocation",
+            "persistent_compiler_cache": "disabled with --no-cache",
+            "working_directory": "isolated temporary directory per invocation",
+            "configuration": "isolated XDG config and cache directories per invocation",
+            "warmups": "OS caches only; no retained compiler state",
+            "validation": "captured output validated after timing; artifact manifests must match",
+        },
         "binaries": {
             name: {"path": str(path), "sha256_before": initial_hashes[name]}
             for name, path in binaries.items()
@@ -129,19 +228,27 @@ def main() -> None:
             "invocation_order": [],
         }
 
+        def accept(sample):
+            manifest = sample.pop("artifact_manifest")
+            if "artifact_manifest" not in workload:
+                workload["artifact_manifest"] = manifest
+            elif manifest != workload["artifact_manifest"]:
+                raise RuntimeError(f"{workload_name}: compiler artifact manifests differ")
+            return sample
+
         for warmup_index in range(args.warmups):
             warmup_order = (second, first) if warmup_index % 2 == 0 else (first, second)
             for variant in warmup_order:
                 if sha256(binaries[variant]) != initial_hashes[variant]:
                     raise RuntimeError(f"{variant} executable changed before warmup")
-                run_compiler(binaries[variant], request, args.jobs)
+                accept(run_compiler(binaries[variant], request, args.jobs))
 
         for pair_index in range(args.runs):
             order = (first, second) if pair_index % 2 == 0 else (second, first)
             for variant in order:
                 if sha256(binaries[variant]) != initial_hashes[variant]:
                     raise RuntimeError(f"{variant} executable changed before measurement")
-                sample = run_compiler(binaries[variant], request, args.jobs)
+                sample = accept(run_compiler(binaries[variant], request, args.jobs))
                 sample["pair"] = pair_index + 1
                 sample["position"] = len(workload["invocation_order"]) + 1
                 workload["samples"][variant].append(sample)
