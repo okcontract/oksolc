@@ -915,6 +915,13 @@ pub fn build(b: *std.Build) !void {
     });
     cli_smoke_step.dependOn(&cli_watch_check.step);
 
+    const watch_path_smoke = b.addSystemCommand(&.{"python3"});
+    watch_path_smoke.addFileArg2(b.path("test/zig/cli/watch_path_smoke.py"), .{});
+    watch_path_smoke.addArtifactArg2(cli, .{});
+    dependOnValidation(&watch_path_smoke.step, cli_identity_validation);
+    cli_smoke_step.dependOn(&watch_path_smoke.step);
+    b.step("watch-path-smoke", "Test watch input protection and atomic output path aliases").dependOn(&watch_path_smoke.step);
+
     const cli_progress_command = b.addRunArtifact(cli);
     isolateCliSmokeEnvironment(b, cli_progress_command);
     dependOnValidation(&cli_progress_command.step, cli_identity_validation);
