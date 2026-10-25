@@ -1143,7 +1143,7 @@ pub fn build(b: *std.Build) !void {
     const constant_tests = b.addTest(.{
         .name = "constant-evaluation",
         .root_module = compiler_module,
-        .filters = &.{ "compiler module inventory", "constant rational conversion", "constant arithmetic" },
+        .filters = &.{ "compiler module inventory", "constant rational conversion", "constant arithmetic", "constant optimiser" },
     });
     constant_tests.stack_size = 32 * 1024 * 1024;
     const run_constant_tests = b.addRunArtifact(constant_tests);
