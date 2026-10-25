@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const common = @import("common");
+const CompilationScope = @import("compilation_scope.zig");
 const ArtifactStoreModule = @import("artifact_store.zig");
 const PhaseKey = @import("phase_key.zig");
 const Libsolc = @import("../libsolc/libsolc.zig");
@@ -234,19 +235,16 @@ pub const CompilerSession = struct {
         allocator: std.mem.Allocator,
         request: common.standard_json.Request,
     ) common.standard_json.CompileError!common.standard_json.Output {
-        if (compilationSessionIsActive(self)) {
+        if (CompilationScope.contains(self)) {
             _ = self.reentrant_rejection_count.fetchAdd(1, .monotonic);
             return error.ReentrantCompilation;
         }
-        var session_frame: CompilationSessionFrame = .{
+        const session_frame: CompilationScope.Frame = .{
             .session = self,
-            .parent = active_compilation_session,
+            .parent = CompilationScope.capture(),
         };
-        active_compilation_session = &session_frame;
-        defer {
-            std.debug.assert(active_compilation_session == &session_frame);
-            active_compilation_session = session_frame.parent;
-        }
+        const activation = CompilationScope.activate(&session_frame);
+        defer activation.deinit();
         _ = self.request_count.fetchAdd(1, .monotonic);
 
         const reference = exactResponseReference(
@@ -411,20 +409,6 @@ pub const CompilerSession = struct {
         return output;
     }
 };
-
-const CompilationSessionFrame = struct {
-    session: *CompilerSession,
-    parent: ?*CompilationSessionFrame,
-};
-
-threadlocal var active_compilation_session: ?*CompilationSessionFrame = null;
-
-fn compilationSessionIsActive(session: *CompilerSession) bool {
-    var frame = active_compilation_session;
-    while (frame) |current| : (frame = current.parent)
-        if (current.session == session) return true;
-    return false;
-}
 
 fn exactResponseReference(
     compiler_fingerprint: PhaseKey.CompilerFingerprint,
@@ -1604,6 +1588,127 @@ test "Solidity progress callbacks can read committed session statistics" {
     try std.testing.expect(recorder.rejected_reentrant_compile);
     try std.testing.expectEqual(@as(u64, 1), session.statistics().reentrant_rejections);
     try std.testing.expectEqual(@as(u64, 2), session.statistics().frontend.revision);
+}
+
+test "parallel session callbacks reject recursive Yul and Solidity through the full ancestry" {
+    const Harness = struct {
+        const input =
+            \\{"language":"Solidity","sources":{"A.sol":{"content":"contract A { function f(uint x) public pure returns(uint) { return x + 1; } } contract B { function f(uint x) public pure returns(uint) { return x + 2; } } contract C { function f(uint x) public pure returns(uint) { return x + 3; } }"}},"settings":{"viaIR":true,"optimizer":{"enabled":true},"outputSelection":{"*":{"*":["evm.bytecode.object"]}}}}
+        ;
+        const yul =
+            \\{"language":"Yul","sources":{"A.yul":{"content":"object \"A\" { code { stop() } }"}},"settings":{"outputSelection":{"*":{"*":["evm.bytecode.object"]}}}}
+        ;
+        const solidity =
+            \\{"language":"Solidity","sources":{"A.sol":{"content":"contract A {}"}},"settings":{"stopAfter":"parsing"}}
+        ;
+
+        outer: *CompilerSession,
+        other: *CompilerSession,
+        producer: std.Thread.Id,
+        nested_producer: ?std.Thread.Id = null,
+        worker_calls: usize = 0,
+        nested_worker_calls: usize = 0,
+        attempted_other: bool = false,
+        failed: bool = false,
+
+        fn reject(self: *@This(), session: *CompilerSession) void {
+            _ = session.statistics();
+            for ([_][]const u8{ yul, solidity }) |request| {
+                if (session.compile(std.heap.smp_allocator, .{ .input = request })) |value| {
+                    var output = value;
+                    output.deinit();
+                    self.failed = true;
+                } else |err| {
+                    if (err != error.ReentrantCompilation) self.failed = true;
+                }
+            }
+        }
+
+        fn nestedReport(context: ?*anyopaque, _: common.standard_json.ProgressUpdate) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.Thread.getCurrentId() == self.nested_producer.?) return;
+            self.nested_worker_calls += 1;
+            self.reject(self.other);
+            self.reject(self.outer);
+        }
+
+        fn report(context: ?*anyopaque, _: common.standard_json.ProgressUpdate) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.Thread.getCurrentId() == self.producer) return;
+            self.worker_calls += 1;
+            self.reject(self.outer);
+            if (self.attempted_other) return;
+            self.attempted_other = true;
+            self.nested_producer = std.Thread.getCurrentId();
+            // A separate worker pool also exercises a second thread boundary
+            // in A -> B -> A without relying on spare workers in A's pool.
+            var nested_io = std.Io.Threaded.init(std.heap.smp_allocator, .{
+                .async_limit = .limited(2),
+            });
+            defer nested_io.deinit();
+            var output = self.other.compile(std.heap.smp_allocator, .{
+                .input = input,
+                .io = nested_io.io(),
+                .progress = .{ .context = self, .report_fn = nestedReport },
+            }) catch {
+                self.failed = true;
+                return;
+            };
+            defer output.deinit();
+            if (std.mem.find(u8, output.bytes, "\"contracts\"") == null)
+                self.failed = true;
+        }
+
+        fn watchdog(done: *std.Io.Event, io: std.Io) void {
+            const deadline: std.Io.Timeout = .{ .deadline = .fromNow(io, .{
+                .raw = .fromSeconds(30),
+                .clock = .awake,
+            }) };
+            while (!done.isSet()) {
+                done.waitTimeout(io, deadline) catch |err| switch (err) {
+                    error.Timeout => {
+                        if (deadline.deadline.durationFromNow(io).raw.nanoseconds <= 0)
+                            @panic("parallel session callback compilation did not finish");
+                    },
+                    error.Canceled => @panic("callback watchdog canceled"),
+                };
+            }
+        }
+    };
+
+    var outer = CompilerSession.init(std.heap.smp_allocator);
+    defer outer.deinit();
+    var other = CompilerSession.init(std.heap.smp_allocator);
+    defer other.deinit();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
+        .async_limit = .limited(2),
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var done: std.Io.Event = .unset;
+    const watchdog = try std.Thread.spawn(.{}, Harness.watchdog, .{ &done, io });
+    defer {
+        done.set(io);
+        watchdog.join();
+    }
+    var harness: Harness = .{
+        .outer = &outer,
+        .other = &other,
+        .producer = std.Thread.getCurrentId(),
+    };
+    var output = try outer.compile(std.heap.smp_allocator, .{
+        .input = Harness.input,
+        .io = io,
+        .progress = .{ .context = &harness, .report_fn = Harness.report },
+    });
+    defer output.deinit();
+    try std.testing.expect(std.mem.find(u8, output.bytes, "\"contracts\"") != null);
+    try std.testing.expect(harness.worker_calls > 0);
+    try std.testing.expect(harness.nested_worker_calls > 0);
+    try std.testing.expect(!harness.failed);
+    try std.testing.expectEqual(@as(u64, 1), outer.statistics().requests);
+    try std.testing.expectEqual(@as(u64, 1), other.statistics().requests);
+    try std.testing.expect(CompilationScope.capture() == null);
 }
 
 test "compiler session reloads an exact response after process-style restart" {

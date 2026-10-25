@@ -1226,9 +1226,10 @@ pub fn build(b: *std.Build) !void {
     structured_yul_step.dependOn(&run_structured_yul_artifact_tests.step);
     const parallel_group_tests = b.addTest(.{
         .root_module = compiler_module,
-        .filters = &.{ "compiler module inventory", "parallel group cancellation", "parallel prepared jobs" },
+        .filters = &.{ "compiler module inventory", "parallel group cancellation", "parallel prepared jobs", "parallel session callbacks", "concurrent duplicate compilations", "Solidity progress callbacks", "source callbacks reject" },
     });
     const run_parallel_group_tests = b.addRunArtifact(parallel_group_tests);
+    parallel_group_tests.stack_size = 32 * 1024 * 1024;
     structured_yul_step.dependOn(&run_parallel_group_tests.step);
     const parallel_artifacts_step = b.step("test-parallel-artifacts", "Test artifact ownership, parallel output and retained-storage profiling");
     parallel_artifacts_step.dependOn(&run_structured_yul_artifact_tests.step);
