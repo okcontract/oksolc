@@ -1140,6 +1140,16 @@ pub fn build(b: *std.Build) !void {
     }) });
     b.step("test-evm", "Run shared EVM semantics tests").dependOn(&b.addRunArtifact(evm_tests).step);
 
+    const constant_tests = b.addTest(.{
+        .name = "constant-evaluation",
+        .root_module = compiler_module,
+        .filters = &.{ "compiler module inventory", "constant rational conversion", "constant arithmetic" },
+    });
+    constant_tests.stack_size = 32 * 1024 * 1024;
+    const run_constant_tests = b.addRunArtifact(constant_tests);
+    dependOnValidation(&run_constant_tests.step, addCompilerBuildIdentityValidation(b, constant_tests, compiler_build_validation_identity));
+    b.step("test-constants", "Test constant evaluation and ownership").dependOn(&run_constant_tests.step);
+
     const frontend_index_tests = b.addTest(.{
         .name = "frontend-indexes",
         .root_module = compiler_module,

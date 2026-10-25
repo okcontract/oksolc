@@ -375,8 +375,18 @@ pub const ConstantEvaluator = struct {
         input: *const RationalValue,
         target_type: *const Types.Type,
     ) EvaluateError!TypedValue {
-        var value = input.clone();
-        errdefer value.deinit();
+        return self.convertOwnedRational(input.clone(), target_type);
+    }
+
+    /// Consumes the temporary on every return, including successful unknown
+    /// values. Only a rational result transfers its numerator and denominator.
+    fn convertOwnedRational(
+        self: *ConstantEvaluator,
+        input: RationalValue,
+        target_type: *const Types.Type,
+    ) EvaluateError!TypedValue {
+        var value = input;
+        defer value.deinit();
         try normalize(&value);
         if (target_type.category() == .RationalNumber) {
             const rational_type = try self.type_provider.rationalNumber(
@@ -386,7 +396,10 @@ pub const ConstantEvaluator = struct {
             );
             return .{
                 .type_ref = rational_type,
-                .value = .{ .rational = value },
+                .value = .{ .rational = .{
+                    .numerator = value.numerator.take(),
+                    .denominator = value.denominator.take(),
+                } },
             };
         }
         const integer = target_type.asInteger() orelse return .{};
@@ -395,7 +408,6 @@ pub const ConstantEvaluator = struct {
             &value.numerator,
             &value.denominator,
         ) catch unreachable;
-        value.deinit();
         return .{
             .type_ref = target_type,
             .value = .{ .rational = .{
@@ -537,6 +549,57 @@ fn rationalFitsInteger(
 
 fn errorId(value: u64) Diagnostics.ErrorId {
     return .{ .value = value };
+}
+
+test "constant rational conversion releases unknown results and transfers successful owners" {
+    const Tracked = struct {
+        fn rational(numerator: []const u8, denominator: []const u8) !RationalValue {
+            var value = try Types.BigInt.parse(std.testing.allocator, numerator, 10);
+            errdefer value.deinit();
+            var divisor = try Types.BigInt.parse(std.testing.allocator, denominator, 10);
+            return .{
+                .numerator = value.take(),
+                .denominator = divisor.take(),
+            };
+        }
+    };
+    const allocator = std.testing.allocator;
+    var provider = try TypeProviderModule.TypeProvider.init(allocator);
+    defer provider.deinit();
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var evaluator = ConstantEvaluator.init(allocator, &reporter, &provider);
+    defer evaluator.deinit();
+    const uint8_type = try provider.uint(8);
+
+    // Coprime values retain the tracked allocations through normalization.
+    // A successful empty return must free both, just like an error return.
+    for ([_][]const u8{ "256", "-1" }) |number| {
+        var result = try evaluator.convertOwnedRational(try Tracked.rational(number, "1"), uint8_type);
+        defer result.deinit();
+        try std.testing.expect(result.type_ref == null and result.value == .unknown);
+    }
+    var unsupported = try evaluator.convertOwnedRational(try Tracked.rational("1", "1"), provider.boolean());
+    defer unsupported.deinit();
+    try std.testing.expect(unsupported.type_ref == null and unsupported.value == .unknown);
+    try std.testing.expectError(error.InvalidAst, evaluator.convertOwnedRational(try Tracked.rational("1", "0"), uint8_type));
+
+    var integer = try evaluator.convertOwnedRational(try Tracked.rational("255", "1"), uint8_type);
+    defer integer.deinit();
+    try std.testing.expectEqual(uint8_type, integer.type_ref.?);
+    try std.testing.expectEqual(.eq, integer.value.rational.numerator.compareUnsigned(255));
+
+    var original = try Tracked.rational("1", "2");
+    defer original.deinit();
+    const rational_type = try provider.rationalNumber(&original.numerator, &original.denominator, null);
+    var rational = try evaluator.convertOwnedRational(try Tracked.rational("1", "2"), rational_type);
+    defer rational.deinit();
+    try std.testing.expectEqual(.eq, rational.value.rational.numerator.compareUnsigned(1));
+    try std.testing.expectEqual(.eq, rational.value.rational.denominator.compareUnsigned(2));
+    var cloned = try evaluator.convertRational(&original, rational_type);
+    cloned.deinit();
+    try std.testing.expectEqual(.eq, original.numerator.compareUnsigned(1));
+    try std.testing.expectEqual(.eq, original.denominator.compareUnsigned(2));
 }
 
 test "constant arithmetic matches upstream fractional modulo and signed powers" {
