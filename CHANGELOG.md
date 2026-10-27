@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.3 - 2026-10-27
+
+Solidity compatibility target: `0.8.36`.
+
+### Changed
+
+- Upgrade the optional web browser's Bun requirement to `1.4.4`.
+
+### Performance
+
+- Memoize unsuccessful dependency-path searches to avoid repeatedly traversing
+  shared import subgraphs, preserving deterministic path selection and behavior
+  within strongly connected components.
+
+### Fixed
+
+- Reject same-session recursive compilation from backend worker progress
+  callbacks, preventing deadlocks while preserving unrelated concurrent callers
+  and compilation through other sessions.
+- Prevent `watch` from overwriting its input through relative, absolute, or
+  directory aliases of the output path.
+- Release cloned rational storage when constant conversion produces no value.
+- Prevent reduced Yul constant-search budgets from underflowing after recursive
+  calls exhaust the remaining steps.
+- Validate every alternating benchmark sample, rejecting zero-exit compiler
+  errors, malformed or empty output, and missing artifacts. Record output
+  digests and check artifact manifests with isolated configuration and cache
+  directories.
+- Include the full memory expansion cost of both accessed ranges in `MCOPY`
+  gas estimates.
+
+### Compatibility
+
+- `MCOPY` gas estimates correct an underestimate in solc 0.8.36. This affects
+  reported estimates, not emitted bytecode. See the
+  [documented compatibility exceptions](README.md#status-and-compatibility).
+
 ## 0.2.2 - 2026-10-20
 
 Solidity compatibility target: `0.8.36`.
