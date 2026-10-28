@@ -172,11 +172,11 @@ pub const AsmJsonConverter = struct {
             try variables.append(try self.convertName(variable));
         }
         try result.object.put(self.allocator, "variables", .{ .array = variables });
-        try result.object.put(
-            self.allocator,
-            "value",
-            if (node.value) |value| try self.convertExpression(value) else .null,
-        );
+        // An omitted initializer is a valid zero-initialized Yul declaration.
+        // The stable JSON schema represents it by absence, not explicit null
+        // (which the strict AST importer correctly rejects).
+        if (node.value) |value|
+            try result.object.put(self.allocator, "value", try self.convertExpression(value));
         return result;
     }
 
@@ -381,4 +381,45 @@ test "Yul AST JSON owns its arena and preserves compatibility fields" {
     try std.testing.expect(std.mem.find(u8, encoded, "\"nodeType\":\"YulBlock\"") != null);
     try std.testing.expect(std.mem.find(u8, encoded, "\"nativeSrc\"") != null);
     try std.testing.expect(std.mem.find(u8, encoded, "\"type\":\"\"") != null);
+}
+
+test "Yul AST JSON preserves absent and explicit zero initializers" {
+    const Parser = @import("asm_parser.zig").Parser;
+    const Diagnostics = @import("../liblangutil/diagnostics.zig");
+    const Importer = @import("asm_json_importer.zig").AsmJsonImporter;
+    const allocator = std.testing.allocator;
+    var reporter = Diagnostics.ErrorReporter.init(allocator);
+    defer reporter.deinit();
+    var ast = (try Parser.parseSource(
+        allocator,
+        "{ let x let y := 0 x := y }",
+        "input.yul",
+        &reporter,
+        .{},
+        .{},
+    )).?;
+    defer ast.deinit();
+    const Helper = struct {
+        fn check(backing: std.mem.Allocator, original: *const AST.AST) !void {
+            var json = try AsmJsonConverter.convertAlloc(backing, original, 0);
+            defer json.deinit();
+            const statements = json.value.object.get("statements").?.array.items;
+            try std.testing.expect(!statements[0].object.contains("value"));
+            try std.testing.expectEqualStrings("0", statements[1].object.get("value").?.object.get("value").?.string);
+            const names = [_][]const u8{"input.yul"};
+            var importer = Importer.init(backing, .{}, &names);
+            var imported = try importer.createAST(json.value);
+            defer imported.deinit();
+            try std.testing.expect(imported.root().statements.items[0].variable_declaration.value == null);
+            try std.testing.expect(imported.root().statements.items[1].variable_declaration.value != null);
+            var roundtrip = try AsmJsonConverter.convertAlloc(backing, &imported, 0);
+            defer roundtrip.deinit();
+            const expected = try JSON.jsonCompactPrintAlloc(backing, json.rootConst());
+            defer backing.free(expected);
+            const actual = try JSON.jsonCompactPrintAlloc(backing, roundtrip.rootConst());
+            defer backing.free(actual);
+            try std.testing.expectEqualStrings(expected, actual);
+        }
+    };
+    try Helper.check(allocator, &ast);
 }
