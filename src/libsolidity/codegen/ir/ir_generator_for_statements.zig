@@ -2460,7 +2460,7 @@ pub const IRGeneratorForStatements = struct {
                 result.type_ref
         else
             right.type_ref;
-        const needs_value_conversion = !TypeBehavior.equals(value_type, right.type_ref);
+        const needs_value_conversion = !canSkipConversion(value_type, right.type_ref);
         if (!needs_value_conversion) _ = try self.emissionDebug(true);
         try self.setLocation(node);
         var converted: IRVariableModule.IRVariable = undefined;
@@ -2755,7 +2755,7 @@ pub const IRGeneratorForStatements = struct {
         try self.setLocation(node);
         for (sorted_arguments, parameter_types) |argument_node, target_type| {
             const argument = try evaluated.find(argument_node);
-            if (TypeBehavior.equals(argument.type_ref, target_type)) {
+            if (canSkipConversion(argument.type_ref, target_type)) {
                 try argument.appendStackSlots(self.allocator, &arguments);
                 continue;
             }
@@ -5544,12 +5544,23 @@ pub const IRGeneratorForStatements = struct {
         return self.buildExpression("linkersymbol(@0)", .{qualified});
     }
 
+    /// Preserve the reference compiler's tuple conversion/cleanup boundaries.
+    /// Semantic tuple equality is structural, but separately owned component
+    /// types still require the explicit conversion emitted by solc 0.8.36.
+    fn canSkipConversion(left: *const Types.Type, right: *const Types.Type) bool {
+        const tuple = left.asTuple() orelse return TypeBehavior.equals(left, right);
+        const other = right.asTuple() orelse return false;
+        if (tuple.components.len != other.components.len) return false;
+        for (tuple.components, other.components) |a, b| if (a != b) return false;
+        return true;
+    }
+
     fn convertedValue(
         self: *IRGeneratorForStatements,
         value: *const IRVariableModule.IRVariable,
         target_type: *const Types.Type,
     ) GeneratorError!YulAST.Expression {
-        if (TypeBehavior.equals(value.type_ref, target_type))
+        if (canSkipConversion(value.type_ref, target_type))
             return self.variableExpression(value);
         if (try TypeBehavior.sizeOnStack(value.type_ref) != 1 or
             try TypeBehavior.sizeOnStack(target_type) != 1)
@@ -5570,7 +5581,7 @@ pub const IRGeneratorForStatements = struct {
         value: *const IRVariableModule.IRVariable,
         target_type: *const Types.Type,
     ) GeneratorError!IRVariableModule.IRVariable {
-        if (TypeBehavior.equals(value.type_ref, target_type))
+        if (canSkipConversion(value.type_ref, target_type))
             return value.clone();
         const converted_name = try self.context.newYulVariable();
         defer self.allocator.free(converted_name);
@@ -5591,7 +5602,7 @@ pub const IRGeneratorForStatements = struct {
     ) GeneratorError!YulAST.Expression {
         var slots = try value.stackSlotsAlloc();
         defer slots.deinit();
-        const function = if (TypeBehavior.equals(value.type_ref, target_type))
+        const function = if (canSkipConversion(value.type_ref, target_type))
             try self.utils.cleanupFunction(target_type)
         else
             try self.utils.conversionFunction(value.type_ref, target_type);
@@ -5628,7 +5639,7 @@ pub const IRGeneratorForStatements = struct {
         right: *const IRVariableModule.IRVariable,
         declare_value: bool,
     ) GeneratorError!void {
-        if (TypeBehavior.equals(left.type_ref, right.type_ref))
+        if (canSkipConversion(left.type_ref, right.type_ref))
             return self.declareAssign(left, right, declare_value);
         const conversion = try self.utils.conversionFunction(
             right.type_ref,

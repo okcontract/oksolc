@@ -1800,7 +1800,10 @@ pub const YulUtilFunctions = struct {
     ) UtilError![]u8 {
         const from = from_type.asArray() orelse return error.InvalidType;
         const to = to_type.asArray() orelse return error.InvalidType;
+        // Tuple conversion can encounter equivalent, separately owned calldata
+        // array types. Copy their descriptor without admitting an element cast.
         if (to.reference.location == .CallData and
+            !TypeBehavior.equals(from_type, to_type) and
             (from.reference.location != .CallData or
                 !from.isByteArrayOrString() or !to.isByteArrayOrString()))
             return error.InvalidType;
@@ -6310,6 +6313,38 @@ test "Yul AST checked multiplication retains upstream width-specific overflow ch
     const int256_body = try renderArithmeticTestBody(&collector, &int256_tree);
     defer std.testing.allocator.free(int256_body);
     try std.testing.expect(std.mem.find(u8, int256_body, "if and(slt(x, 0)") != null);
+}
+
+test "Yul AST calldata array identity conversions preserve descriptor shape" {
+    const allocator = std.testing.allocator;
+    var types = try TypeProviderModule.TypeProvider.init(allocator);
+    defer types.deinit();
+    var collector = CollectorModule.MultiUseYulFunctionCollector.init(allocator);
+    defer collector.deinit();
+    var utils = YulUtilFunctions.init(allocator, &types, CompatibilityIdResolver.legacyNodeIds(), EVMVersion.current(), .Default, &collector);
+    const word = try types.integer(256, .Unsigned);
+    const dynamic = try types.array(.CallData, word);
+    const equivalent = try types.array(.CallData, word);
+    try std.testing.expect(dynamic != equivalent);
+    const dynamic_name = try utils.arrayConversionFunction(dynamic, equivalent);
+    defer allocator.free(dynamic_name);
+    const fixed = try types.arrayWithLength(.CallData, word, 2);
+    const fixed_name = try utils.arrayConversionFunction(fixed, try types.arrayWithLength(.CallData, word, 2));
+    defer allocator.free(fixed_name);
+    const code = try collector.testFunctionsAlloc();
+    defer allocator.free(code);
+    try std.testing.expect(std.mem.find(u8, code, "(value, length) -> converted, outLength") != null);
+    try std.testing.expect(std.mem.find(u8, code, "outLength := length") != null);
+    try std.testing.expect(std.mem.find(u8, code, "(value) -> converted") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, code, "converted := value"));
+    for ([_]*const Types.Type{
+        try types.array(.Memory, word),
+        try types.array(.CallData, try types.integer(8, .Unsigned)),
+        fixed,
+        try types.arrayWithLength(.CallData, word, 3),
+    }) |different| try std.testing.expectError(error.InvalidType, utils.arrayConversionFunction(different, dynamic));
+    try std.testing.expectError(error.InvalidType, utils.arrayConversionFunction(dynamic, fixed));
+    try std.testing.expectError(error.InvalidType, utils.arrayConversionFunction(try types.arrayWithLength(.CallData, word, 3), fixed));
 }
 
 test "Yul AST string literal to fixed bytes conversion emits upstream numeric value" {

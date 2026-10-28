@@ -10,6 +10,58 @@ const standard_json = solidity.standard_json;
 const Profiler = solidity.libsolutil.profiler.Profiler;
 const ObjectOptimizer = solidity.libyul.object_optimizer.ObjectOptimizer;
 
+test "tuple conversion cleanup matches solc with separately owned component types" {
+    const cases = .{
+        .{ @embedFile("standard-json/solidity-tuple-cleanup-optimized.json"), @embedFile("standard-json/expected/solidity-tuple-cleanup-optimized.json") },
+        .{ @embedFile("standard-json/solidity-tuple-cleanup-unoptimized.json"), @embedFile("standard-json/expected/solidity-tuple-cleanup-unoptimized.json") },
+    };
+    inline for (cases) |case| {
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = case[0] });
+        defer output.deinit();
+        try standard_json.compareExact(case[1], output.bytes);
+    }
+}
+
+test "tuple conversion accepts equivalent dynamic fixed and nested calldata arrays" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\// SPDX-License-Identifier: GPL-3.0
+        \\// Copyright (C) 2026 OKcontract Pte. Ltd.
+        \\pragma solidity ^0.8.36;
+        \\contract Arrays {
+        \\  function dynamic(uint[] calldata a, uint[] calldata b, bool yes) external pure returns (uint, uint) {
+        \\    (a, b) = yes ? (a, b) : (b, a); return (a[0], b[0]);
+        \\  }
+        \\  function fixedSize(address[2] calldata a, address[2] calldata b, bool yes) external pure returns (address, address) {
+        \\    (a, b) = yes ? (a, b) : (b, a); return (a[1], b[1]);
+        \\  }
+        \\  function nested(uint[][] calldata a, uint[][] calldata b, bool yes) external pure returns (uint, uint) {
+        \\    (a, b) = yes ? (a, b) : (b, a); return (a[0][0], b[0][0]);
+        \\  }
+        \\}
+    ;
+    for ([_]bool{ false, true }) |optimized| {
+        const request = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = source } },
+            .settings = .{ .viaIR = true, .optimizer = .{ .enabled = optimized }, .outputSelection = .{ .@"*" = .{ .@"*" = &.{"evm.bytecode.object"} } } },
+        }, .{});
+        defer allocator.free(request);
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(allocator, .{ .input = request });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        if (parsed.value.object.get("errors")) |errors| for (errors.array.items) |err| {
+            try std.testing.expect(!std.mem.eql(u8, err.object.get("severity").?.string, "error"));
+        };
+        const contracts = parsed.value.object.get("contracts") orelse return error.MissingContracts;
+        const bytecode = contracts.object.get("C.sol").?.object.get("Arrays").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
+        try std.testing.expect(bytecode.len != 0);
+    }
+}
+
 fn compileTestContract(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     const input = try std.json.Stringify.valueAlloc(allocator, .{
         .language = "Solidity",
