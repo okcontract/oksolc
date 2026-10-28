@@ -989,6 +989,77 @@ fn optionalTextEqual(left: ?[]const u8, right: ?[]const u8) bool {
     return if (left) |previous| if (right) |current| std.mem.eql(u8, previous, current) else false else right == null;
 }
 
+/// Resolve existing components before collapsing `..`, including paths whose
+/// missing directories will be created by atomic output publication.
+fn canonicalWatchPathAlloc(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) std.Io.Dir.RealPathFileAllocError![:0]u8 {
+    return std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator) catch |err| switch (err) {
+        error.FileNotFound => missing: {
+            const parent_path = std.Io.Dir.path.dirname(path) orelse ".";
+            if (std.mem.eql(u8, parent_path, path)) return err;
+            const parent = try canonicalWatchPathAlloc(allocator, io, parent_path);
+            defer allocator.free(parent);
+            const resolved = try std.Io.Dir.path.resolveAlloc(allocator, &.{ parent, std.Io.Dir.path.basename(path) });
+            defer allocator.free(resolved);
+            break :missing std.Io.Dir.cwd().realPathFileAlloc(io, resolved, allocator) catch |resolved_err| switch (resolved_err) {
+                error.FileNotFound => try allocator.dupeSentinel(u8, resolved, 0),
+                else => return resolved_err,
+            };
+        },
+        else => return err,
+    };
+}
+
+fn validateWatchOutput(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    input_path: []const u8,
+    output_path: ?[]const u8,
+) !void {
+    const destination = output_path orelse return;
+    if (std.mem.eql(u8, destination, "-")) return;
+    const input = try canonicalWatchPathAlloc(allocator, io, input_path);
+    defer allocator.free(input);
+    const output = try canonicalWatchPathAlloc(allocator, io, destination);
+    defer allocator.free(output);
+    // Conservatively reject symlink aliases as well. Distinct hard-link names
+    // remain valid: atomic replacement replaces a directory entry, not the
+    // shared inode. Comparing inode numbers would reject those safe outputs.
+    if (std.mem.eql(u8, input, output)) return error.DuplicateOutputPath;
+}
+
+test "watch output validation owns canonical paths across allocation failures" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(io, .{ .sub_path = "request.json", .data = "{}" });
+    const root = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const input = try std.Io.Dir.path.join(allocator, &.{ root, "request.json" });
+    defer allocator.free(input);
+    const alias = try std.Io.Dir.path.join(allocator, &.{ root, "missing/../request.json" });
+    defer allocator.free(alias);
+    const output = try std.Io.Dir.path.join(allocator, &.{ root, "missing/output.json" });
+    defer allocator.free(output);
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, test_io: std.Io, source: []const u8, duplicate: []const u8, destination: []const u8) !void {
+            var rejected = false;
+            validateWatchOutput(failing, test_io, source, duplicate) catch |err| switch (err) {
+                error.DuplicateOutputPath => rejected = true,
+                else => return err,
+            };
+            try std.testing.expect(rejected);
+            try validateWatchOutput(failing, test_io, source, destination);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ io, input, alias, output });
+    try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(io, "missing", .{}));
+}
+
 fn watchCommand(
     init: std.process.Init,
     iterator: *std.process.Args.Iterator,
@@ -1013,8 +1084,7 @@ fn watchCommand(
         result.args.@"include-path",
     );
     const input_path = result.positionals[0] orelse return error.MissingInput;
-    if (result.args.output) |output_path|
-        if (std.mem.eql(u8, input_path, output_path)) return error.DuplicateOutputPath;
+    try validateWatchOutput(init.gpa, init.io, input_path, result.args.output);
     const poll_milliseconds = result.args.@"poll-ms" orelse
         default_watch_poll_milliseconds;
     if (poll_milliseconds == 0 or poll_milliseconds > std.math.maxInt(i64))
@@ -1087,6 +1157,9 @@ fn watchCommand(
                         .source_loader = loader_state.interface(),
                     });
                     defer output.deinit();
+                    // Recheck because directory and symlink aliases can change
+                    // during a long-running watch session.
+                    try validateWatchOutput(init.gpa, init.io, input_path, result.args.output);
                     try writeOutput(init.io, result.args.output, output.bytes);
                     last_digest = digest;
                 }

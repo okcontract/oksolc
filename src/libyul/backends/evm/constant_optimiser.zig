@@ -215,7 +215,8 @@ pub const RepresentationFinder = struct {
                 new_routine.deinit(self.allocator);
                 new_routine = adjusted;
             }
-            self.max_steps -= 1;
+            // Recursive searches share this budget and may already exhaust it.
+            self.max_steps -|= 1;
             routine = chooseMin(self.allocator, routine, new_routine);
         }
 
@@ -363,6 +364,32 @@ const MiniEVMInterpreter = struct {
         };
     }
 };
+
+test "constant optimiser tolerates recursively exhausted search budgets" {
+    const EVMVersion = @import("../../../liblangutil/evm_version.zig").EVMVersion;
+    const allocator = std.testing.allocator;
+    var dialect = try EVMDialect.init(allocator, EVMVersion.init(.Osaka), true);
+    defer dialect.deinit();
+    var meter = EVMMetrics.GasMeter.initUnsigned(&dialect, false, 200);
+    defer meter.deinit();
+    const value: u256 = 0x00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff;
+    for ([_]usize{ 0, 1, 2, 8, 10_000 }) |budget| {
+        var optimiser = ConstantOptimiser.init(allocator, &dialect, &meter);
+        defer optimiser.deinit();
+        var finder: RepresentationFinder = .{
+            .allocator = allocator,
+            .dialect = &dialect,
+            .meter = &meter,
+            .debug_data = null,
+            .cache = &optimiser.cache,
+            .max_steps = budget,
+        };
+        if (try finder.tryFindRepresentation(value)) |expression|
+            try std.testing.expectEqual(value, try MiniEVMInterpreter.eval(&dialect, expression));
+        try std.testing.expect(finder.max_steps <= budget);
+        if (budget == 1) try std.testing.expectEqual(@as(usize, 0), finder.max_steps);
+    }
+}
 
 test "constant optimiser replaces a large mask with a cheaper expression" {
     const Diagnostics = @import("../../../liblangutil/diagnostics.zig");

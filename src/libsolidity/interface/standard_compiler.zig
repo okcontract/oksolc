@@ -74,6 +74,7 @@ const OptimiserSuite = @import("../../libyul/optimiser/suite.zig").OptimiserSuit
 const ObjectOptimizer = @import("../../libyul/object_optimizer.zig").ObjectOptimizer;
 const BackendArtifactCache = @import("../../incremental/backend_artifact_cache.zig").BackendArtifactCache;
 const CompatibilityIds = @import("../../incremental/compatibility_ids.zig");
+const CompilationScope = @import("../../incremental/compilation_scope.zig");
 const FrontendRevisionState = @import("../../incremental/frontend_revision_state.zig").FrontendRevisionState;
 const PhaseKey = @import("../../incremental/phase_key.zig");
 const SourceRegistryModule = @import("../../incremental/source_registry.zig");
@@ -2632,6 +2633,7 @@ test "parallel group cancellation joins an outstanding async worker" {
 }
 
 const ParallelViaIRJob = struct {
+    compilation_scope: ?*const CompilationScope.Frame,
     artifact_arena: *std.heap.ArenaAllocator,
     artifact_arena_transferred: bool = false,
     output: Json = .{ .object = .empty },
@@ -2886,6 +2888,10 @@ fn parallelViaIRRequests(
 }
 
 fn runParallelViaIRJob(job: *ParallelViaIRJob) void {
+    // The producer joins every job before returning, keeping this immutable
+    // ancestry alive through cache diagnostics and the completion callback.
+    const activation = CompilationScope.activate(job.compilation_scope);
+    defer activation.deinit();
     defer job.progress.complete(job.contract_name);
     var scratch_arena = std.heap.ArenaAllocator.init(job.parallel_allocator);
     defer scratch_arena.deinit();
@@ -3045,6 +3051,7 @@ fn appendSolidityViaIRArtifactsParallel(
 
             {
                 var job: ParallelViaIRJob = .{
+                    .compilation_scope = CompilationScope.capture(),
                     .artifact_arena = try ArtifactOutput.createArena(allocator, parallel_allocator),
                     .contract = contract,
                     .compatibility_ids = compatibility_ids,

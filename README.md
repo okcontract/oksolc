@@ -44,6 +44,9 @@ Intentional exceptions:
   of reproducing solc's 32-bit wrapping.
 - ABI calldata heads and member offsets above `2^32 - 1` remain exact instead
   of reproducing solc's 32-bit wrapping.
+- `MCOPY` gas estimates include the full memory expansion over both accessed
+  ranges, correcting solc 0.8.36's underestimate. This affects reported gas
+  estimates, not emitted bytecode.
 
 The `compile` command enables the optimizer with 200 runs. Use `standard-json`
 when exact control of compiler settings or output selection is required.
@@ -55,10 +58,10 @@ compatibility target. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ```console
 $ oksolc version
-oksolc 0.2.2 (Solidity 0.8.36)
+oksolc 0.2.3 (Solidity 0.8.36)
 $ oksolc --version
 oksolc, a solidity compiler commandline interface
-Version: 0.8.36+oksolc.0.2.2
+Version: 0.8.36+oksolc.0.2.3
 ```
 
 `oksolc version --json` returns `version` (the product version),
@@ -112,7 +115,7 @@ same revision. Standard JSON and C ABI callers need no migration.
 ## Requirements
 
 - Zig `0.17.0`
-- TypeScript `7.0.2` (`tsc`) and Bun `1.4.3` only for the optional web browser
+- TypeScript `7.0.2` (`tsc`) and Bun `1.4.4` only for the optional web browser
 - libc and a working C toolchain
 - Clang with ASan/UBSan runtimes for `fuzz-json-adapter` and `fuzz` (limited to
   the yyjson adapter for now)

@@ -915,6 +915,13 @@ pub fn build(b: *std.Build) !void {
     });
     cli_smoke_step.dependOn(&cli_watch_check.step);
 
+    const watch_path_smoke = b.addSystemCommand(&.{"python3"});
+    watch_path_smoke.addFileArg2(b.path("test/zig/cli/watch_path_smoke.py"), .{});
+    watch_path_smoke.addArtifactArg2(cli, .{});
+    dependOnValidation(&watch_path_smoke.step, cli_identity_validation);
+    cli_smoke_step.dependOn(&watch_path_smoke.step);
+    b.step("watch-path-smoke", "Test watch input protection and atomic output path aliases").dependOn(&watch_path_smoke.step);
+
     const cli_progress_command = b.addRunArtifact(cli);
     isolateCliSmokeEnvironment(b, cli_progress_command);
     dependOnValidation(&cli_progress_command.step, cli_identity_validation);
@@ -1133,6 +1140,25 @@ pub fn build(b: *std.Build) !void {
     }) });
     b.step("test-evm", "Run shared EVM semantics tests").dependOn(&b.addRunArtifact(evm_tests).step);
 
+    const constant_tests = b.addTest(.{
+        .name = "constant-evaluation",
+        .root_module = compiler_module,
+        .filters = &.{ "compiler module inventory", "constant rational conversion", "constant arithmetic", "constant optimiser" },
+    });
+    constant_tests.stack_size = 32 * 1024 * 1024;
+    const run_constant_tests = b.addRunArtifact(constant_tests);
+    dependOnValidation(&run_constant_tests.step, addCompilerBuildIdentityValidation(b, constant_tests, compiler_build_validation_identity));
+    b.step("test-constants", "Test constant evaluation and ownership").dependOn(&run_constant_tests.step);
+
+    const gas_meter_tests = b.addTest(.{
+        .name = "gas-meter",
+        .root_module = compiler_module,
+        .filters = &.{ "compiler module inventory", "MCOPY gas", "gas schedule", "gas consumption", "state-aware gas", "data gas" },
+    });
+    const run_gas_meter_tests = b.addRunArtifact(gas_meter_tests);
+    dependOnValidation(&run_gas_meter_tests.step, addCompilerBuildIdentityValidation(b, gas_meter_tests, compiler_build_validation_identity));
+    b.step("test-gas-meter", "Test EVM gas estimates and memory expansion").dependOn(&run_gas_meter_tests.step);
+
     const frontend_index_tests = b.addTest(.{
         .name = "frontend-indexes",
         .root_module = compiler_module,
@@ -1226,9 +1252,10 @@ pub fn build(b: *std.Build) !void {
     structured_yul_step.dependOn(&run_structured_yul_artifact_tests.step);
     const parallel_group_tests = b.addTest(.{
         .root_module = compiler_module,
-        .filters = &.{ "compiler module inventory", "parallel group cancellation", "parallel prepared jobs" },
+        .filters = &.{ "compiler module inventory", "parallel group cancellation", "parallel prepared jobs", "parallel session callbacks", "concurrent duplicate compilations", "Solidity progress callbacks", "source callbacks reject" },
     });
     const run_parallel_group_tests = b.addRunArtifact(parallel_group_tests);
+    parallel_group_tests.stack_size = 32 * 1024 * 1024;
     structured_yul_step.dependOn(&run_parallel_group_tests.step);
     const parallel_artifacts_step = b.step("test-parallel-artifacts", "Test artifact ownership, parallel output and retained-storage profiling");
     parallel_artifacts_step.dependOn(&run_structured_yul_artifact_tests.step);

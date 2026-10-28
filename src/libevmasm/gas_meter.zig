@@ -265,7 +265,10 @@ pub const GasMeter = struct {
                 const read_gas = try self.memoryGasStack(-1, -2);
                 const write_gas = try self.memoryGasStack(0, -2);
                 gas.value = try runGas(instruction, self.evm_version);
-                gas.add(if (read_gas.lessThan(write_gas)) write_gas else read_gas);
+                // Both calls advance the memory high-water mark, so their
+                // incremental costs add up to expansion over the union.
+                gas.add(read_gas);
+                gas.add(write_gas);
                 gas.add(self.wordGas(GasCosts.copy_gas, try self.state.relativeStackElement(-2)));
             },
             .EXTCODESIZE => gas.value = GasCosts.extCodeGas(self.evm_version),
@@ -531,6 +534,70 @@ test "gas consumption becomes infinite on fixed-width overflow" {
     finite.addValue(1);
     try std.testing.expect(finite.is_infinite);
     try std.testing.expect((GasConsumption{ .value = 1 }).lessThan(GasConsumption.infinite()));
+}
+
+test "MCOPY gas covers both ranges and charges memory expansion only once" {
+    // EIP-5656: 3 base + 3 per copied word + expansion to the greatest end.
+    const Case = struct {
+        destination: u256,
+        source: u256,
+        size: u256,
+        initial_memory: u256,
+        gas: u256,
+        final_memory: u256,
+    };
+    const cases = [_]Case{
+        .{ .destination = 80, .source = 16, .size = 32, .initial_memory = 0, .gas = 18, .final_memory = 112 },
+        .{ .destination = 16, .source = 80, .size = 32, .initial_memory = 0, .gas = 18, .final_memory = 112 },
+        .{ .destination = 16, .source = 16, .size = 32, .initial_memory = 0, .gas = 12, .final_memory = 48 },
+        .{ .destination = 80, .source = 16, .size = 32, .initial_memory = 128, .gas = 6, .final_memory = 128 },
+        .{ .destination = 80, .source = 16, .size = 32, .initial_memory = 64, .gas = 12, .final_memory = 112 },
+        .{ .destination = 80, .source = 16, .size = 33, .initial_memory = 0, .gas = 21, .final_memory = 113 },
+        .{ .destination = 0, .source = 0, .size = 1, .initial_memory = 0, .gas = 9, .final_memory = 1 },
+        .{ .destination = 4096, .source = 16, .size = 32, .initial_memory = 0, .gas = 425, .final_memory = 4128 },
+        .{ .destination = std.math.maxInt(u256), .source = 16, .size = 0, .initial_memory = 0, .gas = 3, .final_memory = 0 },
+    };
+    const item = AssemblyItem.initInstruction(.MCOPY, .{});
+    for (cases) |case| {
+        var state: TestGasState = .{};
+        state.setRelative(0, try state.intern(case.destination));
+        state.setRelative(-1, try state.intern(case.source));
+        state.setRelative(-2, try state.intern(case.size));
+        var meter: GasMeter = .{
+            .state = state.view(),
+            .evm_version = EVMVersion.init(.Cancun),
+            .largest_memory_access = case.initial_memory,
+        };
+        const gas = try meter.estimateMax(&item, false);
+        try std.testing.expect(!gas.is_infinite);
+        try std.testing.expectEqual(case.gas, gas.value);
+        try std.testing.expectEqual(case.final_memory, meter.largest_memory_access);
+        const repeated = try meter.estimateMax(&item, false);
+        try std.testing.expect(!repeated.is_infinite);
+        try std.testing.expectEqual(3 + 3 * ((case.size + 31) / 32), repeated.value);
+    }
+}
+
+test "MCOPY gas remains unknown for unknown ranges except for zero length" {
+    const item = AssemblyItem.initInstruction(.MCOPY, .{});
+    for ([_]i32{ 0, -1, -2 }) |unknown_offset| {
+        var state: TestGasState = .{};
+        state.setRelative(0, try state.intern(80));
+        state.setRelative(-1, try state.intern(16));
+        state.setRelative(-2, try state.intern(32));
+        state.setRelative(unknown_offset, try state.unknown());
+        var meter: GasMeter = .{
+            .state = state.view(),
+            .evm_version = EVMVersion.init(.Cancun),
+        };
+        try std.testing.expect((try meter.estimateMax(&item, false)).is_infinite);
+        state.setRelative(-2, try state.intern(0));
+        const previous_memory = meter.largest_memory_access;
+        const empty = try meter.estimateMax(&item, false);
+        try std.testing.expect(!empty.is_infinite);
+        try std.testing.expectEqual(@as(u256, 3), empty.value);
+        try std.testing.expectEqual(previous_memory, meter.largest_memory_access);
+    }
 }
 
 test "state-aware gas estimation preserves memory growth and branch semantics" {
