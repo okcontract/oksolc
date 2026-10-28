@@ -383,7 +383,7 @@ test "Yul AST JSON owns its arena and preserves compatibility fields" {
     try std.testing.expect(std.mem.find(u8, encoded, "\"type\":\"\"") != null);
 }
 
-test "Yul AST JSON preserves absent and explicit zero initializers" {
+test "Yul AST JSON preserves absent and explicit zero initializers through allocation failures" {
     const Parser = @import("asm_parser.zig").Parser;
     const Diagnostics = @import("../liblangutil/diagnostics.zig");
     const Importer = @import("asm_json_importer.zig").AsmJsonImporter;
@@ -421,5 +421,5 @@ test "Yul AST JSON preserves absent and explicit zero initializers" {
             try std.testing.expectEqualStrings(expected, actual);
         }
     };
-    try Helper.check(allocator, &ast);
+    try std.testing.checkAllAllocationFailures(allocator, Helper.check, .{&ast});
 }
