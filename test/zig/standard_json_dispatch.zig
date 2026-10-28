@@ -2734,6 +2734,19 @@ test "Solidity struct construction, ABI builtins, concat, and meta types match v
     try std.testing.expectEqual(solidity.execution.Backend.zig, output.execution.backend);
 }
 
+test "Solidity ABI decode materializes literal bytes and preserves reference inputs" {
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .input = @embedFile("standard-json/solidity-abi-decode-literal.json"),
+    });
+    defer output.deinit();
+    try standard_json.compareExact(
+        @embedFile("standard-json/expected/solidity-abi-decode-literal.json"),
+        output.bytes,
+    );
+    try std.testing.expectEqual(solidity.execution.Backend.zig, output.execution.backend);
+}
+
 test "Solidity library and free-function using-for members match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{

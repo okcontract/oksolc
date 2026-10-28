@@ -1,0 +1,25 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "C.sol": {
+      "content": "// SPDX-License-Identifier: UNLICENSED\n// Copyright (C) 2026 OKcontract Pte. Ltd.\npragma solidity 0.8.36;\ncontract C {\n function number() external pure returns(uint) {return abi.decode(hex\"000000000000000000000000000000000000000000000000000000000000002a\",(uint));}\n function text() external pure returns(bytes32) {return abi.decode(\"abcdefghijklmnopqrstuvwxyzABCDEF\",(bytes32));}\n function empty() external pure returns(uint) {return abi.decode(\"\",(uint));}\n function short() external pure returns(uint) {return abi.decode(hex\"ff\",(uint));}\n function dirty() external pure returns(bool) {return abi.decode(hex\"0000000000000000000000000000000000000000000000000000000000000002\",(bool));}\n function pair() external pure returns(uint,bytes4) {return abi.decode(hex\"0000000000000000000000000000000000000000000000000000000000000007aabbccdd0000000000000000000000000000000000000000000000000000000000\",(uint,bytes4));}\n function dynamic() external pure returns(bytes memory) {return abi.decode(hex\"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003ff00420000000000000000000000000000000000000000000000000000000000\",(bytes));}\n function calldataValue(bytes calldata b) external pure returns(uint) {return abi.decode(b,(uint));}\n function memoryValue(bytes memory b) public pure returns(uint) {return abi.decode(b,(uint));}\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "evmVersion": "istanbul",
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode",
+          "evm.deployedBytecode"
+        ]
+      }
+    }
+  }
+}

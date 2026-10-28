@@ -3338,8 +3338,16 @@ pub const IRGeneratorForStatements = struct {
         if (call.arguments.len != 2) return error.InvalidAst;
         var input = try self.emitExpression(call.arguments[0], depth + 1);
         defer input.deinit();
-        const reference = input.type_ref.asReference() orelse return error.InvalidAst;
-        const canonical_type = if (reference.location == .CallData)
+        // Byte/string literals have no reference location until conversion.
+        // ABI decoding materializes them as bytes memory, just as an explicit
+        // bytes(literal) conversion does. Existing references keep their place.
+        const from_calldata = if (input.type_ref.asReference()) |reference|
+            reference.location == .CallData
+        else if (input.type_ref.category() == .StringLiteral)
+            false
+        else
+            return error.InvalidAst;
+        const canonical_type = if (from_calldata)
             self.context.type_provider.bytesCalldata()
         else
             self.context.type_provider.bytesMemory();
@@ -3356,10 +3364,10 @@ pub const IRGeneratorForStatements = struct {
         var abi = self.context.abiFunctions();
         const decoder = try abi.tupleDecoder(
             target_types,
-            reference.location != .CallData,
+            !from_calldata,
         );
         defer self.allocator.free(decoder);
-        const bounds: [2]YulAST.Expression = if (reference.location == .CallData) blk: {
+        const bounds: [2]YulAST.Expression = if (from_calldata) blk: {
             var offset = try converted.part("offset");
             defer offset.deinit();
             var length = try converted.part("length");
