@@ -183,6 +183,26 @@ pub const ExpressionClasses = struct {
             }
         }
 
+        normalized_owned = false;
+        return self.insertOwned(item, normalized, deterministic, sequence_number);
+    }
+
+    /// Consumes `normalized` on success and failure. Recursive simplification
+    /// may grow the graph after find's entry check, so check the ID bound again
+    /// before constructing a representative. The map and representative own
+    /// distinct argument buffers on the deterministic path.
+    fn insertOwned(
+        self: *ExpressionClasses,
+        item: *const AssemblyItem,
+        normalized: []Id,
+        deterministic: bool,
+        sequence_number: u32,
+    ) ExpressionError!Id {
+        var normalized_owned = true;
+        defer if (normalized_owned) self.allocator.free(normalized);
+        if (self.representatives.items.len >= std.math.maxInt(Id))
+            return error.ExpressionCapacity;
+
         const representative_arguments = if (deterministic)
             try self.allocator.dupe(Id, normalized)
         else blk: {
@@ -215,7 +235,7 @@ pub const ExpressionClasses = struct {
         }
 
         if (deterministic) {
-            try self.expressions.put(self.allocator, lookup_key, id);
+            try self.expressions.put(self.allocator, makeKey(item, normalized, sequence_number), id);
             normalized_owned = false;
         }
         return id;
@@ -455,6 +475,28 @@ test "expression classes misses retain owned arguments through allocation failur
             try classes.forceEqual(x, &add, &.{ y, x, three }, true);
             try std.testing.expectEqual(x, try classes.findDefault(&add, &.{ three, y, x }));
             try std.testing.expectEqualSlices(Id, &.{ y, x }, (try classes.representative(difference)).arguments);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "expression classes insertion failure preserves earlier IDs and constant borrows" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var classes = ExpressionClasses.init(allocator);
+            defer classes.deinit();
+            const seven = try classes.makeConstant(7, .{});
+            const borrowed = classes.knownConstant(seven).?;
+            const before = classes.size();
+            _ = classes.makeConstant(13, .{}) catch |err| {
+                try std.testing.expectEqual(before, classes.size());
+                try std.testing.expectEqual(@as(u256, 7), borrowed.*);
+                try std.testing.expectEqual(borrowed, classes.knownConstant(seven).?);
+                try std.testing.expectEqual(seven, try classes.makeConstant(7, .{}));
+                return err;
+            };
+            try std.testing.expectEqual(before + 1, classes.size());
+            try std.testing.expectEqual(@as(u256, 7), borrowed.*);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
