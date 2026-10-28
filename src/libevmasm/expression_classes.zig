@@ -177,7 +177,7 @@ pub const ExpressionClasses = struct {
                 normalized,
                 item.debug_data,
             )) |simplified| {
-                try self.expressions.put(self.allocator, lookup_key, simplified);
+                try self.publishOwned(lookup_key, simplified);
                 normalized_owned = false;
                 return simplified;
             }
@@ -235,10 +235,21 @@ pub const ExpressionClasses = struct {
         }
 
         if (deterministic) {
-            try self.expressions.put(self.allocator, makeKey(item, normalized, sequence_number), id);
+            try self.publishOwned(makeKey(item, normalized, sequence_number), id);
             normalized_owned = false;
         }
         return id;
+    }
+
+    /// Consumes the incoming key arguments on success, retaining them on error.
+    /// Nonempty incoming arguments must be independently owned, disjoint from
+    /// existing keys and representative buffers. Hash-map replacement keeps the
+    /// old key by default, so release it and install the incoming owned key.
+    fn publishOwned(self: *ExpressionClasses, key: ExpressionKey, id: Id) std.mem.Allocator.Error!void {
+        const entry = try self.expressions.getOrPut(self.allocator, key);
+        if (entry.found_existing) self.allocator.free(entry.key_ptr.arguments);
+        entry.key_ptr.* = key;
+        entry.value_ptr.* = id;
     }
 
     pub fn findDefault(
@@ -266,7 +277,7 @@ pub const ExpressionClasses = struct {
         var owned = true;
         defer if (owned) self.allocator.free(normalized);
         const key = makeKey(item, normalized, 0);
-        try self.expressions.put(self.allocator, key, id);
+        try self.publishOwned(key, id);
         owned = false;
     }
 
@@ -497,6 +508,33 @@ test "expression classes insertion failure preserves earlier IDs and constant bo
             };
             try std.testing.expectEqual(before + 1, classes.size());
             try std.testing.expectEqual(@as(u256, 7), borrowed.*);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "expression classes insertion consumes replacement keys" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var classes = ExpressionClasses.init(allocator);
+            defer classes.deinit();
+            const x = try classes.newClass(.{});
+            const y = try classes.newClass(.{});
+            const item = AssemblyItem.initInstruction(.SUB, .{});
+            const first_arguments = try allocator.dupe(Id, &.{ x, y });
+            const first = try classes.insertOwned(&item, first_arguments, true, 17);
+            const borrowed = (try classes.representative(first)).arguments;
+
+            // insertOwned consumes its input even when an equivalent cache key
+            // already exists. The representative has a separate owned copy.
+            const replacement_arguments = try allocator.dupe(Id, &.{ x, y });
+            const replacement = try classes.insertOwned(&item, replacement_arguments, true, 17);
+            const key = makeKey(&item, &.{ x, y }, 17);
+            try std.testing.expectEqual(@as(?Id, replacement), classes.expressions.get(key));
+            try std.testing.expectEqual(replacement_arguments.ptr, classes.expressions.getKey(key).?.arguments.ptr);
+            try std.testing.expectEqualSlices(Id, &.{ x, y }, borrowed);
+            try std.testing.expectEqual(borrowed.ptr, (try classes.representative(first)).arguments.ptr);
+            try std.testing.expectEqualSlices(Id, &.{ x, y }, (try classes.representative(replacement)).arguments);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
