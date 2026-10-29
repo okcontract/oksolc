@@ -1,7 +1,7 @@
 THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
 ============================================
 
-This file covers third-party code compiled or linked into solidity-zig and
+This file covers third-party code compiled or linked into oksolc and
 dependencies resolved by its build and benchmark steps. Unless stated
 otherwise, the project's own code is licensed under GPL-3.0; see LICENSE.txt
 and COPYRIGHT.txt.

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4 - Unreleased
+
+Solidity compatibility target: `0.8.36`.
+
+### Fixed
+
+- Point CLI help to the current repository and use the `oksolc` name in project
+  documentation, build errors, and benchmark help and diagnostics
+  ([#42](https://github.com/okcontract/oksolc/issues/42)).
+
 ## 0.2.3 - 2026-10-27
 
 Solidity compatibility target: `0.8.36`.

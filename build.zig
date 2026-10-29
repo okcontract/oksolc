@@ -19,7 +19,7 @@ const required_zig_version: std.SemanticVersion = .{
 comptime {
     if (builtin.zig_version.order(required_zig_version) != .eq) {
         @compileError(
-            "solidity-zig requires Zig 0.17.0; found " ++
+            "oksolc requires Zig 0.17.0; found " ++
                 builtin.zig_version_string,
         );
     }
