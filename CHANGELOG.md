@@ -15,9 +15,9 @@ Solidity compatibility target: `0.8.36`.
   initializer, allowing them to round-trip while preserving explicit zero values.
 - Release partially constructed expressions and case literals when allocation
   fails during Yul AST JSON import.
-- Recheck EVM expression-ID capacity after recursive simplification grows the
-  expression graph, and preserve existing IDs and borrowed constants when
-  insertion fails.
+- Enforce EVM expression-ID capacity at representative insertion as defensive
+  hardening, preserving existing IDs and borrowed constants when insertion
+  fails.
 - Transfer ownership of argument buffers when replacing EVM expression-map
   keys, preventing leaks while keeping representative arguments independently
   owned.
