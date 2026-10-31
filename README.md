@@ -36,6 +36,12 @@ Intentional exceptions:
 - Named custom-error arguments in `require` encode in declaration order.
 - Array bounds retain hexadecimal spelling in IR.
 - Empty dispatch omits unused helpers from unoptimized IR.
+- Conditional tuples of equivalent calldata-array types compile, including
+  assignments such as `(a, b) = chooseA ? (a, b) : (b, a)` and analogous tuple
+  returns. This covers dynamic, fixed-size, and nested arrays where solc 0.8.36
+  raises an internal compiler error in via-IR compilation with or without
+  optimization. Conversion copies the calldata offset and, for dynamic arrays,
+  length; it requires the same element type, array shape, and data location.
 - Hexadecimal subassembly prefixes require a following hex digit.
 - Yul `memoryguard` retains the exclusive `2^32 - 1` size limit.
 - Yul rejects literal names that collide with qualified object or data paths

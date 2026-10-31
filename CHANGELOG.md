@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.2.4 - Unreleased
+
+Solidity compatibility target: `0.8.36`.
+
+### Fixed
+
+- Compare tuple components by semantic type, accepting equivalent separately
+  allocated calldata array types while preserving solc-compatible conversion
+  cleanup in optimized and unoptimized IR.
+- Materialize string and hexadecimal literal inputs to `abi.decode` as bytes
+  in memory, preserving existing calldata and memory reference handling.
+- Omit the JSON `value` member for Yul variable declarations without an
+  initializer, allowing them to round-trip while preserving explicit zero values.
+- Release partially constructed expressions and case literals when allocation
+  fails during Yul AST JSON import.
+- Enforce EVM expression-ID capacity at representative insertion as defensive
+  hardening, preserving existing IDs and borrowed constants when insertion
+  fails.
+- Transfer ownership of argument buffers when replacing EVM expression-map
+  keys, preventing leaks while keeping representative arguments independently
+  owned.
+- Decode assembly JSON data keys before allocating payloads, preventing leaks
+  when key decoding fails.
+- Point CLI help to the current repository and use the `oksolc` name in project
+  documentation, build errors, and benchmark help and diagnostics
+  ([#42](https://github.com/okcontract/oksolc/issues/42)).
+
+### Compatibility
+
+- Conditional tuples of equivalent dynamic, fixed-size, and nested calldata
+  arrays compile where solc 0.8.36 raises an internal compiler error in via-IR
+  compilation, with or without optimization. See the
+  [documented compatibility exceptions](README.md#status-and-compatibility).
+
 ## 0.2.3 - 2026-10-27
 
 Solidity compatibility target: `0.8.36`.

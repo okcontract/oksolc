@@ -19,7 +19,7 @@ const required_zig_version: std.SemanticVersion = .{
 comptime {
     if (builtin.zig_version.order(required_zig_version) != .eq) {
         @compileError(
-            "solidity-zig requires Zig 0.17.0; found " ++
+            "oksolc requires Zig 0.17.0; found " ++
                 builtin.zig_version_string,
         );
     }
@@ -1206,7 +1206,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "cxx_compat", .module = cxx_compat_module },
             },
         }),
-        .filters = &.{ "ownership test inventory", "assembly inliner", "label ID dispenser", "peephole", "assembly CSE", "assembly immutable", "assembly append", "backend scratch", "stack diagnostic", "stack multiplicity", "function grouper", "source locations", "source snippets", "escaped string content", "function specializer", "function analysis cache", "call graph", "optimizer scratch retention", "optimizer debug snapshots", "name simplifier", "IR variable", "IR source", "SSA transform", "SSA value tracker", "SSA reverser", "Yul stack owned printing", "Yul AST generated object", "assembly printing", "contract artifact", "statement remover", "profiler ", "for-loop init rewriter", "structural simplifier", "expression joiner", "expression splitter", "loop-invariant", "block flattener", "full inliner", "inline declarations", "linker ", "append rebases", "expression classes", "nested logical", "printing ", "CFG lowering", "transient optimizer", "unused store", "unused assignment", "unused pruner", "unused parameter", "variable name cleaner", "conditional simplifier" },
+        .filters = &.{ "ownership test inventory", "assembly inliner", "label ID dispenser", "peephole", "assembly CSE", "assembly JSON", "assembly immutable", "assembly append", "backend scratch", "stack diagnostic", "stack multiplicity", "function grouper", "source locations", "source snippets", "escaped string content", "function specializer", "function analysis cache", "call graph", "optimizer scratch retention", "optimizer debug snapshots", "name simplifier", "IR variable", "IR source", "SSA transform", "SSA value tracker", "SSA reverser", "Yul stack owned printing", "Yul AST generated object", "assembly printing", "contract artifact", "statement remover", "profiler ", "for-loop init rewriter", "structural simplifier", "expression joiner", "expression splitter", "loop-invariant", "block flattener", "full inliner", "inline declarations", "linker ", "append rebases", "expression classes", "nested logical", "printing ", "CFG lowering", "transient optimizer", "unused store", "unused assignment", "unused pruner", "unused parameter", "variable name cleaner", "conditional simplifier" },
     });
     ownership_tests.stack_size = 32 * 1024 * 1024;
     check_step.dependOn(&ownership_tests.step);

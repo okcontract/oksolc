@@ -127,6 +127,15 @@ pub const AsmJsonImporter = struct {
         return error.InvalidExpressionNodeType;
     }
 
+    fn createExpressionPointer(self: *AsmJsonImporter, node: JSON.Json) ImportError!*AST.Expression {
+        // Allocate the container before constructing its owned children, so
+        // failure to allocate it cannot strand a fully built expression.
+        const result = try self.allocator.create(AST.Expression);
+        errdefer self.allocator.destroy(result);
+        result.* = try self.createExpression(node);
+        return result;
+    }
+
     fn createBlock(self: *AsmJsonImporter, node: JSON.Json) ImportError!AST.Block {
         var result: AST.Block = .{ .debug_data = try self.createDebugData(node) };
         errdefer result.deinit(self.allocator);
@@ -197,10 +206,7 @@ pub const AsmJsonImporter = struct {
             for (try arrayItems(member(node, "variableNames"))) |variable_node|
                 try result.variable_names.append(self.allocator, try self.createIdentifier(variable_node));
         }
-        result.value = try AST.createExpression(
-            self.allocator,
-            try self.createExpression(member(node, "value")),
-        );
+        result.value = try self.createExpressionPointer(member(node, "value"));
         return result;
     }
 
@@ -249,10 +255,7 @@ pub const AsmJsonImporter = struct {
         // Preserve the C++ importer's `contains` behavior: an explicitly null
         // value is not treated like an absent initializer.
         if (contains(node, "value"))
-            result.value = try AST.createExpression(
-                self.allocator,
-                try self.createExpression(member(node, "value")),
-            );
+            result.value = try self.createExpressionPointer(member(node, "value"));
         return result;
     }
 
@@ -280,10 +283,7 @@ pub const AsmJsonImporter = struct {
     fn createIf(self: *AsmJsonImporter, node: JSON.Json) ImportError!AST.If {
         var result: AST.If = .{ .debug_data = try self.createDebugData(node) };
         errdefer result.deinit(self.allocator);
-        result.condition = try AST.createExpression(
-            self.allocator,
-            try self.createExpression(member(node, "condition")),
-        );
+        result.condition = try self.createExpressionPointer(member(node, "condition"));
         result.body = try self.createBlock(member(node, "body"));
         return result;
     }
@@ -296,7 +296,9 @@ pub const AsmJsonImporter = struct {
             if (!std.mem.eql(u8, try stringValue(value_node), "default"))
                 return error.InvalidDefaultCase;
         } else {
-            result.value = try AST.createLiteral(self.allocator, try self.createLiteral(value_node));
+            var value = try self.createLiteral(value_node);
+            errdefer value.deinit(self.allocator);
+            result.value = try AST.createLiteral(self.allocator, value);
         }
         result.body = try self.createBlock(member(node, "body"));
         return result;
@@ -305,10 +307,7 @@ pub const AsmJsonImporter = struct {
     fn createSwitch(self: *AsmJsonImporter, node: JSON.Json) ImportError!AST.Switch {
         var result: AST.Switch = .{ .debug_data = try self.createDebugData(node) };
         errdefer result.deinit(self.allocator);
-        result.expression = try AST.createExpression(
-            self.allocator,
-            try self.createExpression(member(node, "expression")),
-        );
+        result.expression = try self.createExpressionPointer(member(node, "expression"));
         for (try arrayItems(member(node, "cases"))) |case_node| {
             var case_value = try self.createCase(case_node);
             errdefer case_value.deinit(self.allocator);
@@ -321,10 +320,7 @@ pub const AsmJsonImporter = struct {
         var result: AST.ForLoop = .{ .debug_data = try self.createDebugData(node) };
         errdefer result.deinit(self.allocator);
         result.pre = try self.createBlock(member(node, "pre"));
-        result.condition = try AST.createExpression(
-            self.allocator,
-            try self.createExpression(member(node, "condition")),
-        );
+        result.condition = try self.createExpressionPointer(member(node, "condition"));
         result.post = try self.createBlock(member(node, "post"));
         result.body = try self.createBlock(member(node, "body"));
         return result;
@@ -403,7 +399,7 @@ fn validateLiteralToken(
     }
 }
 
-test "inline assembly JSON round-trips all Yul statement families" {
+test "Yul AST JSON round-trips all statement families" {
     const allocator = std.testing.allocator;
     var reporter = Diagnostics.ErrorReporter.init(allocator);
     defer reporter.deinit();
@@ -441,9 +437,18 @@ test "inline assembly JSON round-trips all Yul statement families" {
         "input.yul",
         imported.root().debug_data.?.native_location.source_name.?,
     );
+    const Helper = struct {
+        fn check(backing: std.mem.Allocator, value: JSON.Json) !void {
+            const names = [_][]const u8{"input.yul"};
+            var reader = AsmJsonImporter.init(backing, .{}, &names);
+            var result = try reader.createAST(value);
+            defer result.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Helper.check, .{json.value});
 }
 
-test "explicit null variable initializer preserves upstream rejection" {
+test "Yul AST explicit null variable initializer preserves upstream rejection" {
     const allocator = std.testing.allocator;
     var parsed = try JSON.jsonParseStrict(allocator,
         \\{"nodeType":"YulBlock","src":"0:1:0","statements":[{"nodeType":"YulVariableDeclaration","src":"0:1:0","variables":[],"value":null}]}

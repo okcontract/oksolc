@@ -585,7 +585,7 @@ test "SSA transform preserves first-phase tuple order and all annotations" {
     const assignments: [32 * assignment_source.len]u8 = @bitCast(@as([32][assignment_source.len]u8, @splat(assignment_source.*)));
     const cases = .{
         .{ "wide", "{ let x, y := pair() " ++ assignments ++ "pop(x) pop(y) function pair() -> a, b { a := 1 b := 2 } }", "85a90ee29f0f905de511c249775c28c3cb4155c230dcf59fb25337bfbaf012e7" },
-        .{ "nested", "{ let x, y := pair() let z let stable := 0 x, y := pair() if x { z := 1 x := 2 } switch y case 0 { y := 3 } default { x := 4 } for { let i := 0 } lt(i, 3) { i := add(i, 1) x := add(x, 1) } { y := add(y, 1) } { let nested := 0 nested := 1 } function pair() -> a, b { a := 1 b := 2 } }", "f08b6f8aa6a72f1f358494c2434523ce3631baaaecc6992783e0fd163efb28fa" },
+        .{ "nested", "{ let x, y := pair() let z let stable := 0 x, y := pair() if x { z := 1 x := 2 } switch y case 0 { y := 3 } default { x := 4 } for { let i := 0 } lt(i, 3) { i := add(i, 1) x := add(x, 1) } { y := add(y, 1) } { let nested := 0 nested := 1 } function pair() -> a, b { a := 1 b := 2 } }", "2b12ee475988d81a6e3996f4220fc11af5850ff18224a2e36d3532f8294c3f95" },
     };
     inline for (cases) |case| {
         var reporter = Diagnostics.ErrorReporter.init(allocator);
