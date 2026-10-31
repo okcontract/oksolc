@@ -27,6 +27,13 @@ Solidity compatibility target: `0.8.36`.
   documentation, build errors, and benchmark help and diagnostics
   ([#42](https://github.com/okcontract/oksolc/issues/42)).
 
+### Compatibility
+
+- Conditional tuples of equivalent dynamic, fixed-size, and nested calldata
+  arrays compile where solc 0.8.36 raises an internal compiler error in via-IR
+  compilation, with or without optimization. See the
+  [documented compatibility exceptions](README.md#status-and-compatibility).
+
 ## 0.2.3 - 2026-10-27
 
 Solidity compatibility target: `0.8.36`.
