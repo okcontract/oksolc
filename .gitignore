@@ -12,6 +12,11 @@
 /benchmarks/
 /reports/
 
+# Optional compiler verification builds and local evidence
+/lean/.lake/
+/lean/artifacts/
+/docs/lean-evidence/
+
 # Python
 __pycache__/
 *.py[cod]
