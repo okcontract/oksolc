@@ -351,6 +351,11 @@ cache-busy-timeout-ms = 250
 
 ## Development
 
+Optional [partial compiler verification](docs/compiler-verification.md) uses
+Lean 4.29.0 to prove selected compiler operations and validate selected actual
+compiler artifacts. Its trust boundary, supported scopes and separate acceptance
+gates are documented there. Lean is not required for ordinary builds.
+
 CI runs unit and ownership tests in Debug and compiler interface and output
 checks in ReleaseFast, in parallel. Debug retains runtime safety checks and
 avoids optimizing every unit-test binary. Run the same checks locally:

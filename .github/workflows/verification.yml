@@ -1,0 +1,109 @@
+name: Compiler verification
+
+on:
+  push:
+    branches: [main]
+    paths: ['lean/**', 'test/lean/**', 'src/**', 'build_support/**', 'build.zig*', 'docs/compiler-verification*', '.github/workflows/verification.yml']
+  pull_request:
+    paths: ['lean/**', 'test/lean/**', 'src/**', 'build_support/**', 'build.zig*', 'docs/compiler-verification*', '.github/workflows/verification.yml']
+  workflow_dispatch:
+    inputs:
+      full_artifacts:
+        description: Run all six artifact acceptance corpora
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verification:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      LEAN_NUM_THREADS: '4'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          use-cache: false
+
+      - name: Configure isolated build and evidence directories
+        run: |
+          verification_root="$RUNNER_TEMP/oksolc-verification"
+          mkdir -p "$verification_root/evidence"
+          printf '%s\n' \
+            "ZIG_LOCAL_CACHE_DIR=$verification_root/zig-local" \
+            "ZIG_GLOBAL_CACHE_DIR=$verification_root/zig-global" \
+            "XDG_CACHE_HOME=$verification_root/xdg-cache" \
+            "XDG_CONFIG_HOME=$verification_root/xdg-config" \
+            "VERIFICATION_EVIDENCE=$verification_root/evidence" >> "$GITHUB_ENV"
+
+      - name: Install pinned Lean
+        run: |
+          verification_tools="$RUNNER_TEMP/oksolc-verification-tools"
+          mkdir -p "$verification_tools/lean"
+          curl -fL --retry 3 \
+            https://github.com/leanprover/lean4/releases/download/v4.29.0/lean-4.29.0-linux.tar.zst \
+            -o "$verification_tools/lean.tar.zst"
+          printf '%s  %s\n' \
+            089f7e513ed3e9436d191f4986330c0b53809c86b5997f5eb7f25550c374fa48 \
+            "$verification_tools/lean.tar.zst" | sha256sum -c -
+          tar --zstd -xf "$verification_tools/lean.tar.zst" \
+            --strip-components=1 -C "$verification_tools/lean"
+          printf '%s\n' "$verification_tools/lean/bin" >> "$GITHUB_PATH"
+
+      - name: Check inventory and Python regressions
+        run: |
+          python3 test/lean/check_verification_map.py --output "$VERIFICATION_EVIDENCE/inventory.json"
+          python3 -m unittest discover -s test/lean -p 'test_*.py'
+
+      - name: Test native proof observations
+        run: |
+          zig build fmt-check test-compiler-rewrites test-compiler-dispatch-trace \
+            test-compiler-graph-export test-compiler-word-export \
+            -Doptimize=Debug -j4 --summary all
+
+      - name: Build all compiler proofs and attachment tests
+        env:
+          LEAN_NUM_THREADS: '2'
+        run: |
+          python3 test/lean/bounded_run.py --output "$VERIFICATION_EVIDENCE/models-process" \
+            --rss-mib 8192 --timeout 3600 -- \
+            bash -c 'cd lean && lake --quiet --rehash build Compiler'
+
+      - name: Certify word artifacts with fresh kernel replay
+        run: |
+          zig build build-compiler-word-export -Doptimize=ReleaseFast -j4
+          python3 test/lean/bounded_run.py --output "$VERIFICATION_EVIDENCE/words-process" \
+            --rss-mib 8192 --timeout 1800 -- \
+            python3 test/lean/check_compiler_words.py --corpus --jobs 4 \
+            --output "$VERIFICATION_EVIDENCE/words"
+
+      - name: Run the remaining artifact acceptance corpora
+        if: github.event_name == 'workflow_dispatch' && inputs.full_artifacts
+        run: |
+          zig build build-cli build-compiler-graph-export -Doptimize=ReleaseFast -j4
+          for profile in graphs graph_failures functions contracts storage; do
+            python3 test/lean/bounded_run.py --output "$VERIFICATION_EVIDENCE/$profile-process" \
+              --rss-mib 8192 --timeout 1800 -- \
+              python3 "test/lean/check_compiler_$profile.py" --corpus --jobs 4 \
+              --output "$VERIFICATION_EVIDENCE/$profile"
+          done
+
+      - name: Retain verification reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compiler-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oksolc-verification/evidence/
+          if-no-files-found: ignore
+          retention-days: 7
