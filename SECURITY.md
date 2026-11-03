@@ -1,6 +1,6 @@
 # Security policy
 
-`solidity-zig` is under active development and is not considered production
+`oksolc` is under active development and is not considered production
 ready for deploying smart contracts. A compiler discrepancy can change
 contract behavior, so treat every generated artifact as untrusted until it has
 been independently verified.

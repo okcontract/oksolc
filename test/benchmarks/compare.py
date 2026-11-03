@@ -3,7 +3,7 @@
 # Copyright (C) 2014-2026 The Solidity Authors.
 # Copyright (C) 2026 OKcontract Pte. Ltd.
 
-"""Benchmark solidity-zig, optionally against a system-installed Solidity compiler."""
+"""Benchmark oksolc, optionally against a system-installed Solidity compiler."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def named_sha256(value: str) -> tuple[str, str]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark solidity-zig with via-IR Standard JSON requests, with an "
+            "Benchmark oksolc with via-IR Standard JSON requests, with an "
             "optional exact comparison against system solc 0.8.36."
         )
     )
@@ -110,12 +110,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--zig-parallel",
         action="store_true",
-        help="Run solidity-zig with its bounded parallel contract backend.",
+        help="Run oksolc with its bounded parallel contract backend.",
     )
     parser.add_argument(
         "--zig-jobs",
         type=positive_int,
-        help="Total solidity-zig compiler jobs; requires --zig-parallel.",
+        help="Total oksolc compiler jobs; requires --zig-parallel.",
     )
     parser.add_argument(
         "--expect-zig-output-sha256",
@@ -146,7 +146,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--zig-only",
         action="store_true",
-        help="Validate and measure only solidity-zig; do not invoke reference solc.",
+        help="Validate and measure only oksolc; do not invoke reference solc.",
     )
     parser.add_argument(
         "--fixture",
@@ -408,12 +408,12 @@ def preflight_case(
             )
         if zig_code != 0:
             raise RuntimeError(
-                f"solidity-zig failed for {request.name} with {zig_code}: "
+                f"oksolc failed for {request.name} with {zig_code}: "
                 f"{zig_stderr.decode(errors='replace').strip()}"
             )
 
         reference_output = parse_output("reference solc", reference_raw)
-        zig_output = parse_output("solidity-zig", zig_raw)
+        zig_output = parse_output("oksolc", zig_raw)
         zig_hash = hashlib.sha256(zig_raw).hexdigest()
         zig_hashes.append(f"{request.name}={zig_hash}")
         if (
@@ -421,7 +421,7 @@ def preflight_case(
             and zig_hash != expected_zig_hashes[request.name]
         ):
             raise RuntimeError(
-                f"{request.name} solidity-zig output SHA256 changed: "
+                f"{request.name} oksolc output SHA256 changed: "
                 f"expected {expected_zig_hashes[request.name]}, got {zig_hash}"
             )
         reference_bytecode = contract_output(reference_output)
@@ -444,7 +444,7 @@ def preflight_case(
             and zig_contract_hash != expected_contract_hash
         ):
             raise RuntimeError(
-                f"{request.name} solidity-zig contract-output SHA256 changed: "
+                f"{request.name} oksolc contract-output SHA256 changed: "
                 f"expected {expected_contract_hash}, got {zig_contract_hash}"
             )
         exact = exact and reference_raw == zig_raw
@@ -514,10 +514,10 @@ def preflight_zig_case(
         zig_code, zig_raw, zig_stderr = run_capture(zig_command, request.content)
         if zig_code != 0:
             raise RuntimeError(
-                f"solidity-zig failed for {request.name} with {zig_code}: "
+                f"oksolc failed for {request.name} with {zig_code}: "
                 f"{zig_stderr.decode(errors='replace').strip()}"
             )
-        zig_output = parse_output("solidity-zig", zig_raw)
+        zig_output = parse_output("oksolc", zig_raw)
         zig_hash = hashlib.sha256(zig_raw).hexdigest()
         zig_hashes.append(f"{request.name}={zig_hash}")
         if (
@@ -525,7 +525,7 @@ def preflight_zig_case(
             and zig_hash != expected_zig_hashes[request.name]
         ):
             raise RuntimeError(
-                f"{request.name} solidity-zig output SHA256 changed: "
+                f"{request.name} oksolc output SHA256 changed: "
                 f"expected {expected_zig_hashes[request.name]}, got {zig_hash}"
             )
         artifacts = contract_output(zig_output)
@@ -534,7 +534,7 @@ def preflight_zig_case(
         expected_contract_hash = expected_contract_hashes[request.name]
         if zig_contract_hash != expected_contract_hash:
             raise RuntimeError(
-                f"{request.name} solidity-zig contract-output SHA256 changed: "
+                f"{request.name} oksolc contract-output SHA256 changed: "
                 f"expected {expected_contract_hash}, got {zig_contract_hash}"
             )
         bytecode_size += contract_output_size(artifacts, "creation")
@@ -767,6 +767,7 @@ def source_provenance() -> dict[str, object]:
 
     untracked_hasher = hashlib.sha256()
     source_hasher = hashlib.sha256()
+    # Preserve the hash format identifier across the project rename.
     source_hasher.update(b"solidity-zig-source-state-v1\0")
     source_hasher.update(revision)
     source_hasher.update(b"\0")
@@ -893,7 +894,7 @@ def main() -> int:
         results: dict[str, Any] = {}
         summary_report: dict[str, Any] = {}
 
-        with tempfile.TemporaryDirectory(prefix="solidity-zig-benchmark-") as temp_name:
+        with tempfile.TemporaryDirectory(prefix="oksolc-benchmark-") as temp_name:
             temp_dir = Path(temp_name)
             for case_index, case in enumerate(cases):
                 preflight = (

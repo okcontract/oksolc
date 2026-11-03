@@ -1,0 +1,24 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "C.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\n// Copyright (C) 2026 OKcontract Pte. Ltd.\npragma solidity ^0.8.36;\ntype Currency is address;\ncontract TupleCleanup {\n    function choose(Currency a, Currency b, bool yes) external pure returns (Currency, Currency) {\n        return yes ? (a, b) : (b, a);\n    }\n    function raw(bool yes) external pure returns (uint256, uint256) {\n        Currency a = Currency.wrap(address(1));\n        Currency b = Currency.wrap(address(2));\n        assembly { a := not(0) b := or(shl(160, 1), 2) }\n        (a, b) = yes ? (a, b) : (b, a);\n        assembly { mstore(0, a) mstore(32, b) return(0, 64) }\n    }\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": false,
+      "runs": 200
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  }
+}

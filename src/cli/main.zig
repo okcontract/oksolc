@@ -2782,7 +2782,7 @@ fn writeOutput(io: std.Io, path: ?[]const u8, bytes: []const u8) !void {
 fn writeMainHelp(io: std.Io) !void {
     try std.Io.File.stdout().writeStreamingAll(io,
         \\oksolc — A Solidity compiler
-        \\project: https://github.com/okcontract/solidity-zig
+        \\project: https://github.com/okcontract/oksolc
         \\
         \\usage:
         \\  oksolc --standard-json [--base-path PATH] [--include-path PATH]... [--allow-paths PATHS] [--no-cache]

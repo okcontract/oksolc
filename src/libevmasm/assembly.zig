@@ -1401,12 +1401,12 @@ fn parseAssemblyJSONNode(
             const value = data_object.getPtr(key).?;
             switch (value.*) {
                 .string => |encoded_data| {
+                    const hash = try assemblyDataKey(allocator, key);
                     const decoded = try CommonData.fromHexAlloc(allocator, encoded_data, .dont_throw);
                     if (encoded_data.len != 0 and decoded.len == 0) {
                         allocator.free(decoded);
                         return error.InvalidAssemblyDataHex;
                     }
-                    const hash = try assemblyDataKey(allocator, key);
                     try putDataEntryOwned(result, hash, decoded);
                 },
                 .object => {
@@ -2132,6 +2132,23 @@ test "assembly JSON data aliases use lexicographic key order" {
         const object = try assembly.assemble();
         try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x03, 0xfe, 0x11 }, object.bytecode.items);
     }
+}
+
+test "assembly JSON data import releases payloads across allocation failures" {
+    const allocator = std.testing.allocator;
+    const lower = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const upper = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const parsed = try std.json.parseFromSlice(JSON.Json, allocator, "{\".code\":[],\".data\":{\"" ++ lower ++ "\":\"11\",\"" ++ upper ++ "\":\"22\"}}", .{});
+    defer parsed.deinit();
+    const Check = struct {
+        fn run(failing: std.mem.Allocator, input: *const JSON.Json) !void {
+            const assembly = try Assembly.fromJSON(failing, input);
+            defer assembly.destroy();
+            try std.testing.expectEqual(@as(usize, 1), assembly.data_entries.items.len);
+            try std.testing.expectEqualSlices(u8, &.{0x11}, assembly.data_entries.items[0].bytes);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.run, .{&parsed.value});
 }
 
 test "assembly printing annotations retain raw snippets and quoted names" {

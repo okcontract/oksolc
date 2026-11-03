@@ -5,6 +5,7 @@
 //! Owned expression-equivalence classes and ordered simplification.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const DebugData = @import("../liblangutil/debug_data.zig").DebugData;
 const AssemblyItemModule = @import("assembly_item.zig");
 const InstructionModule = @import("instruction.zig");
@@ -118,6 +119,9 @@ pub const ExpressionClasses = struct {
     allocator: std.mem.Allocator,
     representatives: std.ArrayList(Expression) = .empty,
     expressions: ExpressionMap = .empty,
+    /// Tests can reach the reserved-ID boundary with a small graph. Production
+    /// always reserves `invalid_id` and stores no configurable limit.
+    test_id_limit: if (builtin.is_test) Id else void = if (builtin.is_test) invalid_id else {},
 
     pub fn init(allocator: std.mem.Allocator) ExpressionClasses {
         return .{ .allocator = allocator };
@@ -134,6 +138,10 @@ pub const ExpressionClasses = struct {
 
     pub fn size(self: *const ExpressionClasses) usize {
         return self.representatives.items.len;
+    }
+
+    fn idLimit(self: *const ExpressionClasses) Id {
+        return if (builtin.is_test) self.test_id_limit else invalid_id;
     }
 
     pub fn representative(self: *const ExpressionClasses, id: Id) ExpressionError!*const Expression {
@@ -155,7 +163,7 @@ pub const ExpressionClasses = struct {
         _: bool,
         sequence_number: u32,
     ) ExpressionError!Id {
-        if (self.representatives.items.len >= std.math.maxInt(Id))
+        if (self.representatives.items.len >= self.idLimit())
             return error.ExpressionCapacity;
 
         var argument_buffer: [2]Id = undefined;
@@ -177,11 +185,31 @@ pub const ExpressionClasses = struct {
                 normalized,
                 item.debug_data,
             )) |simplified| {
-                try self.expressions.put(self.allocator, lookup_key, simplified);
+                try self.publishOwned(lookup_key, simplified);
                 normalized_owned = false;
                 return simplified;
             }
         }
+
+        normalized_owned = false;
+        return self.insertOwned(item, normalized, deterministic, sequence_number);
+    }
+
+    /// Consumes `normalized` on success and failure. Defensively enforce the
+    /// reserved-ID boundary at insertion, independently of find's entry check.
+    /// The map and representative own distinct argument buffers on the
+    /// deterministic path.
+    fn insertOwned(
+        self: *ExpressionClasses,
+        item: *const AssemblyItem,
+        normalized: []Id,
+        deterministic: bool,
+        sequence_number: u32,
+    ) ExpressionError!Id {
+        var normalized_owned = true;
+        defer if (normalized_owned) self.allocator.free(normalized);
+        if (self.representatives.items.len >= self.idLimit())
+            return error.ExpressionCapacity;
 
         const representative_arguments = if (deterministic)
             try self.allocator.dupe(Id, normalized)
@@ -215,10 +243,21 @@ pub const ExpressionClasses = struct {
         }
 
         if (deterministic) {
-            try self.expressions.put(self.allocator, lookup_key, id);
+            try self.publishOwned(makeKey(item, normalized, sequence_number), id);
             normalized_owned = false;
         }
         return id;
+    }
+
+    /// Consumes the incoming key arguments on success, retaining them on error.
+    /// Nonempty incoming arguments must be independently owned, disjoint from
+    /// existing keys and representative buffers. Hash-map replacement keeps the
+    /// old key by default, so release it and install the incoming owned key.
+    fn publishOwned(self: *ExpressionClasses, key: ExpressionKey, id: Id) std.mem.Allocator.Error!void {
+        const entry = try self.expressions.getOrPut(self.allocator, key);
+        if (entry.found_existing) self.allocator.free(entry.key_ptr.arguments);
+        entry.key_ptr.* = key;
+        entry.value_ptr.* = id;
     }
 
     pub fn findDefault(
@@ -246,7 +285,7 @@ pub const ExpressionClasses = struct {
         var owned = true;
         defer if (owned) self.allocator.free(normalized);
         const key = makeKey(item, normalized, 0);
-        try self.expressions.put(self.allocator, key, id);
+        try self.publishOwned(key, id);
         owned = false;
     }
 
@@ -455,6 +494,110 @@ test "expression classes misses retain owned arguments through allocation failur
             try classes.forceEqual(x, &add, &.{ y, x, three }, true);
             try std.testing.expectEqual(x, try classes.findDefault(&add, &.{ three, y, x }));
             try std.testing.expectEqualSlices(Id, &.{ y, x }, (try classes.representative(difference)).arguments);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "expression classes insertion failure preserves earlier IDs and constant borrows" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var classes = ExpressionClasses.init(allocator);
+            defer classes.deinit();
+            const seven = try classes.makeConstant(7, .{});
+            const borrowed = classes.knownConstant(seven).?;
+            const before = classes.size();
+            _ = classes.makeConstant(13, .{}) catch |err| {
+                try std.testing.expectEqual(before, classes.size());
+                try std.testing.expectEqual(@as(u256, 7), borrowed.*);
+                try std.testing.expectEqual(borrowed, classes.knownConstant(seven).?);
+                try std.testing.expectEqual(seven, try classes.makeConstant(7, .{}));
+                return err;
+            };
+            try std.testing.expectEqual(before + 1, classes.size());
+            try std.testing.expectEqual(@as(u256, 7), borrowed.*);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
+test "expression classes capacity boundary consumes operands and preserves earlier IDs" {
+    var tracking = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = tracking.allocator();
+    var classes = ExpressionClasses.init(allocator);
+    defer classes.deinit();
+    try std.testing.expectEqual(invalid_id, classes.idLimit());
+    const limit: Id = 4;
+    classes.test_id_limit = limit;
+
+    const seven = try classes.makeConstant(7, .{});
+    const constant_borrow = classes.knownConstant(seven).?;
+    const x = try classes.newClass(.{});
+    const y = try classes.newClass(.{});
+    const item = AssemblyItem.initInstruction(.SUB, .{});
+    const last = try classes.findDefault(&item, &.{ x, y });
+    try std.testing.expectEqual(limit - 1, last);
+    const operand_borrow = (try classes.representative(last)).arguments;
+    const map_size = classes.expressions.count();
+
+    // Call insertion directly so find's entry check cannot hide a missing
+    // insertion check. Both ownership paths must consume nonempty input.
+    for ([_]bool{ true, false }) |deterministic| {
+        const operands = try allocator.dupe(Id, &.{ y, x });
+        const allocated_before = tracking.allocated_bytes;
+        const freed_before = tracking.freed_bytes;
+        const deallocations_before = tracking.deallocations;
+        try std.testing.expectError(error.ExpressionCapacity, classes.insertOwned(&item, operands, deterministic, 17));
+        try std.testing.expectEqual(allocated_before, tracking.allocated_bytes);
+        try std.testing.expectEqual(freed_before + 2 * @sizeOf(Id), tracking.freed_bytes);
+        try std.testing.expectEqual(deallocations_before + 1, tracking.deallocations);
+        try std.testing.expectEqual(@as(usize, limit), classes.size());
+        try std.testing.expectEqual(map_size, classes.expressions.count());
+        try std.testing.expectEqual(@as(?Id, last), classes.expressions.get(makeKey(&item, &.{ x, y }, 0)));
+        try std.testing.expectEqual(null, classes.expressions.get(makeKey(&item, &.{ y, x }, 17)));
+    }
+
+    try std.testing.expectError(error.ExpressionCapacity, classes.makeConstant(13, .{}));
+    try std.testing.expectError(error.InvalidExpressionId, classes.representative(limit));
+    try std.testing.expectError(error.InvalidExpressionId, classes.representative(invalid_id));
+    for (classes.representatives.items, 0..) |representative_value, index| {
+        try std.testing.expectEqual(@as(Id, @intCast(index)), representative_value.id);
+        try std.testing.expect(representative_value.id < limit and representative_value.id != invalid_id);
+    }
+    try std.testing.expectEqual(@as(u256, 7), constant_borrow.*);
+    try std.testing.expectEqual(constant_borrow, classes.knownConstant(seven).?);
+    try std.testing.expectEqualSlices(Id, &.{ x, y }, operand_borrow);
+    try std.testing.expectEqual(operand_borrow.ptr, (try classes.representative(last)).arguments.ptr);
+
+    // Lifting only the test limit leaves the existing graph usable.
+    classes.test_id_limit = invalid_id;
+    try std.testing.expectEqual(seven, try classes.makeConstant(7, .{}));
+    try std.testing.expectEqual(last, try classes.findDefault(&item, &.{ x, y }));
+    try std.testing.expectEqual(limit, try classes.makeConstant(13, .{}));
+}
+
+test "expression classes insertion consumes replacement keys" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var classes = ExpressionClasses.init(allocator);
+            defer classes.deinit();
+            const x = try classes.newClass(.{});
+            const y = try classes.newClass(.{});
+            const item = AssemblyItem.initInstruction(.SUB, .{});
+            const first_arguments = try allocator.dupe(Id, &.{ x, y });
+            const first = try classes.insertOwned(&item, first_arguments, true, 17);
+            const borrowed = (try classes.representative(first)).arguments;
+
+            // insertOwned consumes its input even when an equivalent cache key
+            // already exists. The representative has a separate owned copy.
+            const replacement_arguments = try allocator.dupe(Id, &.{ x, y });
+            const replacement = try classes.insertOwned(&item, replacement_arguments, true, 17);
+            const key = makeKey(&item, &.{ x, y }, 17);
+            try std.testing.expectEqual(@as(?Id, replacement), classes.expressions.get(key));
+            try std.testing.expectEqual(replacement_arguments.ptr, classes.expressions.getKey(key).?.arguments.ptr);
+            try std.testing.expectEqualSlices(Id, &.{ x, y }, borrowed);
+            try std.testing.expectEqual(borrowed.ptr, (try classes.representative(first)).arguments.ptr);
+            try std.testing.expectEqualSlices(Id, &.{ x, y }, (try classes.representative(replacement)).arguments);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});

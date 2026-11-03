@@ -5,6 +5,8 @@
 test "Yul AST construction test inventory" {
     _ = @import("libyul/ast_builder.zig");
     _ = @import("libyul/ast_encoding.zig");
+    _ = @import("libyul/asm_json_converter.zig");
+    _ = @import("libyul/asm_json_importer.zig");
     _ = @import("libyul/asm_stream.zig");
     _ = @import("libyul/generated_code.zig");
     _ = @import("libyul/generated_object.zig");

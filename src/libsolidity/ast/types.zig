@@ -81,7 +81,7 @@ pub fn equals(left: *const Types.Type, right: *const Types.Type) bool {
         .Enum => |value| value.declaration == right.payload.Enum.declaration,
         .UserDefinedValueType => |value| value.declaration ==
             right.payload.UserDefinedValueType.declaration,
-        .Tuple => |value| optionalTypePointerSlicesEqual(
+        .Tuple => |value| optionalTypeSlicesEqual(
             value.components,
             right.payload.Tuple.components,
         ),
@@ -145,12 +145,15 @@ fn functionEquals(
     return exclude_state_mutability or left.state_mutability == right.state_mutability;
 }
 
-fn optionalTypePointerSlicesEqual(
+fn optionalTypeSlicesEqual(
     left: []const ?*const Types.Type,
     right: []const ?*const Types.Type,
 ) bool {
     if (left.len != right.len) return false;
-    for (left, right) |a, b| if (a != b) return false;
+    // Upstream's tuple comparison relies on canonical component pointers.
+    // This provider also owns separately allocated arrays, structs and tuples;
+    // compare their semantic types as for other composite type constructors.
+    for (left, right) |a, b| if (!optionalTypeEquals(a, b)) return false;
     return true;
 }
 
@@ -5628,6 +5631,36 @@ test "array and tuple formatting retains location and placeholders" {
     );
     defer std.testing.allocator.free(human_tuple);
     try std.testing.expectEqualStrings("tuple(bytes1,,bytes memory)", human_tuple);
+}
+
+test "tuple equality compares separately owned component types structurally" {
+    var provider = try TypeProviderModule.TypeProvider.init(std.testing.allocator);
+    defer provider.deinit();
+    const first = try provider.array(.CallData, provider.uint256());
+    const second = try provider.array(.CallData, provider.uint256());
+    try std.testing.expect(first != second);
+    try std.testing.expect(equals(first, second));
+    const left = try provider.tuple(&.{ first, null, first });
+    const right = try provider.tuple(&.{ second, null, second });
+    try std.testing.expect(equals(left, right) and equals(right, left));
+    const nested_left = try provider.tuple(&.{ left, first });
+    const nested_right = try provider.tuple(&.{ right, second });
+    try std.testing.expect(equals(nested_left, nested_right));
+
+    // Neither reference locations nor element/array shape differences collapse
+    // to equality just because both tuples have the same number of components.
+    for ([_]*const Types.Type{
+        try provider.array(.Memory, provider.uint256()),
+        try provider.array(.Storage, provider.uint256()),
+        try provider.array(.CallData, provider.address()),
+        try provider.arrayWithLength(.CallData, provider.uint256(), 2),
+    }) |other| {
+        const different = try provider.tuple(&.{ other, null, second });
+        try std.testing.expect(!equals(left, different) and !equals(different, left));
+    }
+    try std.testing.expect(!equals(left, try provider.tuple(&.{ null, second, second })));
+    try std.testing.expect(!equals(left, try provider.tuple(&.{ second, null })));
+    try std.testing.expect(!equals(left, second));
 }
 
 test "stack layout recursively preserves named parts and tuple placeholders" {
