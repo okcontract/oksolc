@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.4 - Unreleased
+## 0.2.4 - 2026-11-03
 
 Solidity compatibility target: `0.8.36`.
 
