@@ -1140,6 +1140,15 @@ pub fn build(b: *std.Build) !void {
     }) });
     b.step("test-evm", "Run shared EVM semantics tests").dependOn(&b.addRunArtifact(evm_tests).step);
 
+    const compiler_rewrite_tests = b.addTest(.{
+        .root_module = compiler_module,
+        .filters = &.{ "compiler module inventory", "algebraic ", "Yul simplification", "expression simplifier", "expression classes", "nested logical", "constant EVM arithmetic" },
+    });
+    compiler_rewrite_tests.stack_size = 32 * 1024 * 1024;
+    const run_compiler_rewrite_tests = b.addRunArtifact(compiler_rewrite_tests);
+    dependOnValidation(&run_compiler_rewrite_tests.step, addCompilerBuildIdentityValidation(b, compiler_rewrite_tests, compiler_build_validation_identity));
+    b.step("test-compiler-rewrites", "Test shared compiler rewrite semantics and ownership").dependOn(&run_compiler_rewrite_tests.step);
+
     const constant_tests = b.addTest(.{
         .name = "constant-evaluation",
         .root_module = compiler_module,
