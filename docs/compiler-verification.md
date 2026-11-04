@@ -9,6 +9,8 @@ It includes source, settings, retained creation/runtime bytes, a deliberately
 corrupted output, and one command that requires both acceptance and semantic
 rejection. The [release procedure](compiler-verification-release.md) explains
 how to obtain durable evidence for the exact public commit.
+For changes to the development, follow the
+[verification contributor guide](../lean/CONTRIBUTING.md).
 
 ## What a verification result means
 

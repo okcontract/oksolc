@@ -11,6 +11,8 @@ corrupted artifact that must reject. See the
 the [source-review paper](../docs/lean-verification-review.pdf) for the proof
 architecture, and the [release procedure](../docs/compiler-verification-release.md)
 for evidence tied to a public commit.
+The [contributor guide](CONTRIBUTING.md) explains proof entry points, generated
+files, focused checks, and when complete acceptance is required.
 
 | Result | What it establishes | What it does not establish |
 | --- | --- | --- |

@@ -351,6 +351,8 @@ cache-busy-timeout-ms = 250
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and verification workflows.
+
 Optional [partial compiler verification](docs/compiler-verification.md) uses
 Lean 4.29.0 to prove selected compiler operations and validate selected actual
 compiler artifacts. Its trust boundary, supported scopes and separate acceptance
