@@ -1,0 +1,157 @@
+/-
+// Copyright (C) 2026 OKcontract Pte. Ltd.
+// SPDX-License-Identifier: GPL-3.0
+-/
+import Compiler.ZigAir.BitwiseTests
+import Compiler.ZigAir.ExpTests
+import Compiler.ZigAir.MemoryExpLoopTests
+import Compiler.ZigAir.MemoryExpInvocationTests
+import Compiler.ZigAir.MemoryExpSafetyTests
+import Contract.Check.Declarations
+import Lean.Elab.Command
+
+/-! Complete declaration closure audit; independent kernel replay is required
+by the acceptance harness. This is not a source or native-code certificate. -/
+open Lean Elab Command Contract.Check in
+run_cmd do
+  let roots := #[
+    ``Compiler.ZigAir.Scalar.unsigned_nat_valid,
+    ``Compiler.ZigAir.Scalar.bitAnd_eval,
+    ``Compiler.ZigAir.Scalar.bitAnd_valid,
+    ``Compiler.ZigAir.Scalar.shiftRight_eval,
+    ``Compiler.ZigAir.Scalar.shiftRight_valid,
+    ``Compiler.ZigAir.Scalar.bitAnd_one,
+    ``Compiler.ZigAir.Scalar.shiftRight_one,
+    ``Compiler.ZigAir.Scalar.shiftRight_one_decreases,
+    ``Compiler.ZigAir.Scalar.exponent_decomposition,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.unsigned_high_bit,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.shift_high_bit,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.shift_zero,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.shift_single_bit,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.shift_count_width_rejects,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.shift_zero_width_rejects,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.shift_past_width_is_illegal,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.invalid_count_rejects,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.signed_count_rejects,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.signed_left_rejects,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.and_mismatched_width_rejects,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.and_signed_rejects,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.invalid_left_rejects,
+    ``Compiler.ZigAir.Scalar.BitwiseTests.dead_shift_still_faults,
+    ``Compiler.ZigAir.ExpTests.zero_zero,
+    ``Compiler.ZigAir.ExpTests.zero_one,
+    ``Compiler.ZigAir.ExpTests.power_ten,
+    ``Compiler.ZigAir.ExpTests.highest_bit,
+    ``Compiler.ZigAir.ExpTests.wrapping_power,
+    ``Compiler.ZigAir.ExpTests.wide_identity,
+    ``Compiler.ZigAir.ExpTests.wide_square,
+    ``Compiler.ZigAir.ExpTests.mixed_square,
+    ``Compiler.ZigAir.ExpTests.first_allocation_oom,
+    ``Compiler.ZigAir.ExpTests.second_allocation_oom,
+    ``Compiler.ZigAir.ExpTests.third_allocation_oom,
+    ``Compiler.ZigAir.ExpTests.invalid_argument_no_allocation,
+    ``Compiler.ZigAir.ExpTests.heap_valid,
+    ``Compiler.ZigAir.MemoryExp.number_valid,
+    ``Compiler.ZigAir.MemoryExp.number_typed,
+    ``Compiler.ZigAir.MemoryExp.multiply_eval,
+    ``Compiler.ZigAir.MemoryExp.parity_eval,
+    ``Compiler.ZigAir.MemoryExp.halve_eval,
+    ``Compiler.ZigAir.MemoryExp.nonzero_eval,
+    ``Compiler.ZigAir.MemoryExp.halve_decreases,
+    ``Compiler.ZigAir.MemoryExp.power_step,
+    ``Compiler.ZigAir.MemoryExp.step_select,
+    ``Compiler.ZigAir.MemoryExp.select_reads,
+    ``Compiler.ZigAir.MemoryExp.step_reads,
+    ``Compiler.ZigAir.MemoryExp.generated_head,
+    ``Compiler.ZigAir.MemoryExp.head_shape,
+    ``Compiler.ZigAir.MemoryExp.head_continue,
+    ``Compiler.ZigAir.MemoryExp.head_stop,
+    ``Compiler.ZigAir.MemoryExp.generated_loop_body,
+    ``Compiler.ZigAir.MemoryExp.effects_result,
+    ``Compiler.ZigAir.MemoryExp.loop_effects,
+    ``Compiler.ZigAir.MemoryExp.entry_shape,
+    ``Compiler.ZigAir.MemoryExp.initialized_steps,
+    ``Compiler.ZigAir.MemoryExp.initialized_terminates,
+    ``Compiler.ZigAir.MemoryExp.initialized_result,
+    ``Compiler.ZigAir.MemoryExp.initialized_return,
+    ``Compiler.ZigAir.MemoryExp.initialized_power,
+    ``Compiler.ZigAir.MemoryExp.Tests.nonempty_witness,
+    ``Compiler.ZigAir.MemoryExp.Tests.result_write_fault,
+    ``Compiler.ZigAir.MemoryExp.Tests.base_write_fault_keeps_result,
+    ``Compiler.ZigAir.MemoryExp.Tests.exponent_write_fault_keeps_result_and_base,
+    ``Compiler.ZigAir.MemoryExp.Tests.zero_exponent_needs_no_writes,
+    ``Compiler.ZigAir.MemoryExp.Tests.aliased_slots_change_exponent,
+    ``Compiler.ZigAir.MemoryExp.generated_prologue,
+    ``Compiler.ZigAir.MemoryExp.result_store_steps,
+    ``Compiler.ZigAir.MemoryExp.result_allocate_steps,
+    ``Compiler.ZigAir.MemoryExp.exponent_store_steps,
+    ``Compiler.ZigAir.MemoryExp.exponent_allocate_steps,
+    ``Compiler.ZigAir.MemoryExp.base_store_steps,
+    ``Compiler.ZigAir.MemoryExp.base_allocate_steps,
+    ``Compiler.ZigAir.MemoryExp.exp_body_steps,
+    ``Compiler.ZigAir.MemoryExp.exp_accepts,
+    ``Compiler.ZigAir.MemoryExp.exp_terminates,
+    ``Compiler.ZigAir.MemoryExp.exp_result,
+    ``Compiler.ZigAir.MemoryExp.prepared_finish_power,
+    ``Compiler.ZigAir.MemoryExp.exp_power,
+    ``Compiler.ZigAir.MemoryExp.specification_cleanup,
+    ``Compiler.ZigAir.MemoryExp.exp_rejected,
+    ``Compiler.ZigAir.MemoryExp.InvocationTests.nonempty_witness,
+    ``Compiler.ZigAir.MemoryExp.InvocationTests.full_width_witness,
+    ``Compiler.ZigAir.MemoryExp.InvocationTests.zero_exponent_still_allocates,
+    ``Compiler.ZigAir.MemoryExp.InvocationTests.first_allocation_oom,
+    ``Compiler.ZigAir.MemoryExp.InvocationTests.second_allocation_oom,
+    ``Compiler.ZigAir.MemoryExp.InvocationTests.third_allocation_oom,
+    ``Compiler.ZigAir.MemoryExp.InvocationTests.invalid_heap_rejected,
+    ``Compiler.ZigAir.Memory.valid_lookup,
+    ``Compiler.ZigAir.Memory.store_of_access,
+    ``Compiler.ZigAir.Memory.Heap.older_replace,
+    ``Compiler.ZigAir.Memory.Heap.StackSince.replace,
+    ``Compiler.ZigAir.Memory.cleanup_eq_older,
+    ``Compiler.ZigAir.Memory.valid_initial_frame,
+    ``Compiler.ZigAir.Memory.allocate_frame,
+    ``Compiler.ZigAir.Memory.store_frame,
+    ``Compiler.ZigAir.MemoryExp.writable_fresh,
+    ``Compiler.ZigAir.MemoryExp.writable_allocate,
+    ``Compiler.ZigAir.MemoryExp.writable_store,
+    ``Compiler.ZigAir.MemoryExp.write_total,
+    ``Compiler.ZigAir.MemoryExp.allocate_fault,
+    ``Compiler.ZigAir.MemoryExp.Progress.refl,
+    ``Compiler.ZigAir.MemoryExp.Progress.trans,
+    ``Compiler.ZigAir.MemoryExp.store_progress,
+    ``Compiler.ZigAir.MemoryExp.Capabilities.store,
+    ``Compiler.ZigAir.MemoryExp.halve_total,
+    ``Compiler.ZigAir.MemoryExp.square_total,
+    ``Compiler.ZigAir.MemoryExp.step_total,
+    ``Compiler.ZigAir.MemoryExp.effects_total,
+    ``Compiler.ZigAir.MemoryExp.writable_older,
+    ``Compiler.ZigAir.MemoryExp.initialize_safe,
+    ``Compiler.ZigAir.MemoryExp.prepare_safe,
+    ``Compiler.ZigAir.MemoryExp.Progress.cleanup_heap,
+    ``Compiler.ZigAir.MemoryExp.prepared_safe_result,
+    ``Compiler.ZigAir.MemoryExp.specification_safe,
+    ``Compiler.ZigAir.MemoryExp.exp_safe_terminates,
+    ``Compiler.ZigAir.MemoryExp.exp_safe_result,
+    ``Compiler.ZigAir.MemoryExp.exp_fault_is_oom,
+    ``Compiler.ZigAir.MemoryExp.exp_preserves_caller_heap,
+    ``Compiler.ZigAir.MemoryExp.SafetyTests.invalid_alignment_needs_heap_invariant,
+    ``Compiler.ZigAir.MemoryExp.SafetyTests.readonly_is_not_writable,
+    ``Compiler.ZigAir.MemoryExp.SafetyTests.nonzero_offset_is_not_writable,
+    ``Compiler.ZigAir.MemoryExp.SafetyTests.cleanup_revokes_scratch,
+    ``Compiler.ZigAir.MemoryExp.SafetyTests.older_write_changes_caller,
+    ``Compiler.ZigAir.MemoryExp.SafetyTests.new_nonstack_survives_cleanup]
+  let mut claims := #[]
+  for root in roots do
+    let .ok dependencies := Declarations.closure (← getEnv) #[root]
+      | throwError "invalid dependency closure: {root}"
+    let .ok axioms := Declarations.axioms dependencies
+      | throwError "disallowed axiom: {root}"
+    let some info := (← getEnv).find? root | throwError "missing theorem: {root}"
+    unless info matches .thmInfo _ do throwError "not a theorem: {root}"
+    claims := claims.push <| Json.mkObj [
+      ("theorem", .str root.toString), ("statement", Declarations.expression info.type),
+      ("axioms", toJson axioms), ("dependencies", toJson (dependencies.map (·.name.toString)))]
+  liftIO <| IO.println (Json.mkObj [
+    ("schema", .str "oksolc.exp-air-audit.v1"), ("scope", .str "zigFreshAir"),
+    ("sourceSafetyVerified", .bool false), ("wholeCompilerVerified", .bool false),
+    ("claims", .arr claims)]).compress
