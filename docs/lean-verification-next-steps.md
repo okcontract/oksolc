@@ -14,6 +14,8 @@ This roadmap starts from the proof state included in the public preview.
 The [public example](../examples/verification/README.md) and
 [release evidence procedure](compiler-verification-release.md) provide the
 current reproduction commands.
+The [verification issue backlog](verification-issues/README.md) gives bounded
+native proof tasks and their consuming theorems.
 
 ## Direction
 

@@ -54,7 +54,9 @@ The [verification map](compiler-verification-map.json) records scoped theorems,
 gates and open obligations. Its consistency check does not run those gates or
 certify a current artifact. General frontend/backend preservation and complete
 native recursive-optimizer correspondence remain open; see the
-[preview roadmap](lean-verification-next-steps.md).
+[preview roadmap](lean-verification-next-steps.md). The
+[issue backlog](verification-issues/README.md) identifies concrete consumer
+premises and completion criteria.
 
 ## Project structure
 
