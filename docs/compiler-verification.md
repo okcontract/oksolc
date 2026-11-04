@@ -53,7 +53,8 @@ Lean-kernel, Zig/host, native-memory, language-model and admission assumptions.
 The [verification map](compiler-verification-map.json) records scoped theorems,
 gates and open obligations. Its consistency check does not run those gates or
 certify a current artifact. General frontend/backend preservation and complete
-native recursive-optimizer correspondence remain open; the map identifies their current proof obligations.
+native recursive-optimizer correspondence remain open; see the
+[preview roadmap](lean-verification-next-steps.md).
 
 ## Project structure
 
@@ -99,9 +100,10 @@ Keep Zig's global cache outside the checkout for cache-enabled compiler tests.
 For a focused development check with theorem-dependency auditing:
 
 ```sh
+proof_evidence="$(mktemp -d "${TMPDIR:-/tmp}/oksolc-proof.XXXXXX")"
 python3 lean/prove.py --module Compiler.Algebraic.Proofs \
   --declaration Compiler.Algebraic.production_rules_sound \
-  --jobs 4 --output /private/tmp/oksolc-proof-dev
+  --jobs 4 --output "$proof_evidence/development"
 ```
 
 Development checks explicitly report `developmentOnly`. Add `--fresh` for
@@ -112,10 +114,11 @@ For an actual word-artifact acceptance gate:
 
 ```sh
 zig build build-compiler-word-export -Doptimize=ReleaseFast -j4
-python3 test/lean/bounded_run.py --output /private/tmp/oksolc-word-process \
+word_evidence="$(mktemp -d "${TMPDIR:-/tmp}/oksolc-word.XXXXXX")"
+python3 test/lean/bounded_run.py --output "$word_evidence/process" \
   --rss-mib 8192 --timeout 1800 -- \
   python3 test/lean/check_compiler_words.py --corpus --jobs 4 \
-  --output /private/tmp/oksolc-word-acceptance
+  --output "$word_evidence/acceptance"
 ```
 
 The corresponding `check_compiler_graphs.py`,
