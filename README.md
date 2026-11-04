@@ -355,6 +355,11 @@ Optional [partial compiler verification](docs/compiler-verification.md) uses
 Lean 4.29.0 to prove selected compiler operations and validate selected actual
 compiler artifacts. Its trust boundary, supported scopes and separate acceptance
 gates are documented there. Lean is not required for ordinary builds.
+The [verification preview](examples/verification/README.md) demonstrates a
+complete source/deployment/runtime certificate and a corrupted output that must
+reject. This is partial verification of declared scopes, not a verified-compiler
+claim; the [assurance table](docs/compiler-verification.md#what-a-verification-result-means)
+explains the distinction.
 
 CI runs unit and ownership tests in Debug and compiler interface and output
 checks in ReleaseFast, in parallel. Debug retains runtime safety checks and

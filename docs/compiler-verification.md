@@ -1,8 +1,35 @@
-# Partial compiler verification
+# Partial compiler verification — early preview
 
 The optional Lean project verifies selected compiler operations and provides
 sound validators for selected compiler artifacts. It does not establish
 correctness of the whole Solidity compiler.
+
+Start with the [complete Solidity example](../examples/verification/README.md).
+It includes source, settings, retained creation/runtime bytes, a deliberately
+corrupted output, and one command that requires both acceptance and semantic
+rejection. The [release procedure](compiler-verification-release.md) explains
+how to obtain durable evidence for the exact public commit.
+
+## What a verification result means
+
+| Assurance level | Evidence required | Scope and limits |
+| --- | --- | --- |
+| Model theorem | Lean proof checking of the declared statement | Establishes a property of the model under its hypotheses; not native correspondence |
+| Source-bound implementation proof | Matching source/capture identities, refinement proofs, audits, controls and replay | Selected production operations; unresolved caller and graph premises stay explicit |
+| Compilation certificate | Exact source/settings/output binding, sound validation or generated proof, audit and fresh replay | Only the accepted artifact pair and declared input/semantic domain |
+| Whole-compiler correctness | Complete pipeline composition or a sufficiently broad artifact route | Open; neither proof counts nor a green build imply it |
+
+The available Zig-to-Lean translation is **restricted and partly trusted**.
+`extract_*.py` admits specific source constructs, and `zig_air/` captures and
+decodes selected AIR operations. Neither is a general or verified Zig frontend.
+New AIR captures need the pinned instrumented Zig toolchain; ordinary Zig is
+sufficient for the artifact example. Unsupported source validity, layouts, or
+operations reject rather than acquiring a correctness claim.
+
+The [review paper](lean-verification-review.pdf)
+([LaTeX](lean-verification-review.tex)) introduces the notation, representative
+proof endpoints, and remaining obligations. It records a source-only review at
+its stated baseline, not an independent audit or a fresh acceptance run.
 
 ## Scope and trust
 
@@ -108,8 +135,10 @@ remain usable without making that stronger native-execution claim.
 Keep raw run evidence outside the repository. Use
 `python3 test/lean/triage_evidence.py <explicit-log-or-report-files> --compact`
 to inspect bounded diagnostics, preserving the original files and exit status.
-The verification CI runs inventory, regression, library and word-artifact
-checks; its manual `full_artifacts` option enables the other artifact corpora.
+The verification CI runs inventory, regression and library checks alongside
+separate word-artifact and public-preview jobs. Its manual `full_artifacts`
+option enables all six artifact corpora; published releases require all profiles
+before attaching durable evidence. See the [release procedure](compiler-verification-release.md).
 
 ## Public starting point
 
