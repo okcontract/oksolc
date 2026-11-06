@@ -1,0 +1,24 @@
+{
+  "contracts": {
+    "Function.sol": {
+      "Identity": {
+        "evm": {
+          "bytecode": {
+            "object": "608080604052346013576040908160188239f35b5f80fdfe60808060405260043610156011575f80fd5b5f3560e01c63ac37eebb146023575f80fd5b34603c576020366003190112603c576020906004358152fd5b5f80fd"
+          },
+          "deployedBytecode": {
+            "object": "60808060405260043610156011575f80fd5b5f3560e01c63ac37eebb146023575f80fd5b34603c576020366003190112603c576020906004358152fd5b5f80fd"
+          },
+          "methodIdentifiers": {
+            "identity(uint256)": "ac37eebb"
+          }
+        }
+      }
+    }
+  },
+  "sources": {
+    "Function.sol": {
+      "id": 0
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Function.sol": {
+      "content": "// SPDX-License-Identifier: GPL-3.0\npragma solidity ^0.8.0;\n\ncontract Identity {\n    function identity(uint256 x) external pure returns (uint256) {\n        return x;\n    }\n}\n"
+    }
+  },
+  "settings": {
+    "viaIR": true,
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "evmVersion": "cancun",
+    "metadata": {
+      "appendCBOR": false,
+      "bytecodeHash": "none"
+    },
+    "outputSelection": {
+      "*": {
+        "*": [
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object",
+          "evm.methodIdentifiers"
+        ]
+      }
+    }
+  }
+}
