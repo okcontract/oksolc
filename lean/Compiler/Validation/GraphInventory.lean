@@ -16,7 +16,7 @@ namespace Compiler.Validation.Inventory
 open Contract Contract.Yul
 
 abbrev observe (ctx : Context) (locals : String → Word) : Expression → Word :=
-  Expression.eval (fun _ => 0#256) ctx locals
+  Expression.eval ctx locals
 
 structure Entry where
   key : Node
@@ -68,7 +68,7 @@ theorem results_sound (fuel : Nat) (after before : List Expression) (ids : List 
       | none => simp [results, found] at accepted
       | some actual =>
         simp only [results, found, Bool.and_eq_true] at accepted
-        have same := equivalent_sound fuel value actual accepted.1 (fun _ => 0#256) ctx locals
+        have same := equivalent_sound fuel value actual accepted.1 ctx locals
         have head : (after.map (observe ctx locals))[id]? = some (observe ctx locals value) := by
           simpa [List.getElem?_map, found, observe] using congrArg some same.symm
         simp only [List.map_cons, head, ih ids accepted.2]
@@ -85,9 +85,9 @@ theorem entry_sound (fuel : Nat) (after : List Expression) (binding : Entry)
     | none => simp [entry, key, found] at accepted
     | some actual =>
       have same := equivalent_sound fuel keyValue actual (by simpa [entry, key, found] using accepted)
-        (fun _ => 0#256) ctx locals
+        ctx locals
       refine ⟨observe ctx locals keyValue, ?_, ?_⟩
-      · simpa [observe, key] using binding.key.run_map after (fun _ => 0#256) ctx locals
+      · simpa [observe, key] using binding.key.run_map after ctx locals
       · simpa [List.getElem?_map, found, observe] using congrArg some same.symm
 
 theorem validate_sound (fuel : Nat) (before after : List Node) (ids : List Nat) (cache : List Entry)
@@ -103,8 +103,8 @@ theorem validate_sound (fuel : Nat) (before after : List Node) (ids : List Nat) 
       simp only [validate, left, right, Bool.and_eq_true, List.all_eq_true] at accepted
       refine ⟨source.map (observe ctx locals), target.map (observe ctx locals), ?_, ?_,
         results_sound fuel target source ids accepted.1 ctx locals, ?_⟩
-      · simpa [observe, left] using run_map before [] (fun _ => 0#256) ctx locals
-      · simpa [observe, right] using run_map after [] (fun _ => 0#256) ctx locals
+      · simpa [observe, left] using run_map before [] ctx locals
+      · simpa [observe, right] using run_map after [] ctx locals
       · intro binding member
         exact entry_sound fuel target binding (accepted.2 binding member) ctx locals
 

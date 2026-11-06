@@ -61,10 +61,10 @@ def evaluate (nodes : List Node) (root : Nat) (ctx : Context) (locals : String �
   let values ← run (words ctx locals) nodes []
   values[root]?
 
-theorem Node.run_map (node : Node) (values : List Expression) (storage : Word → Word)
+theorem Node.run_map (node : Node) (values : List Expression)
     (ctx : Context) (locals : String → Word) :
-    node.run (words ctx locals) (values.map (Expression.eval storage ctx locals)) =
-      (node.run expressions values).map (Expression.eval storage ctx locals) := by
+    node.run (words ctx locals) (values.map (Expression.eval ctx locals)) =
+      (node.run expressions values).map (Expression.eval ctx locals) := by
   cases node with
   | literal => rfl
   | input => rfl
@@ -78,10 +78,10 @@ theorem Node.run_map (node : Node) (values : List Expression) (storage : Word �
     cases h : values[first]? <;> cases k : values[second]? <;> cases m : values[third]? <;>
       simp [Node.run, List.getElem?_map, h, k, m, expressions, words, Expression.eval]
 
-theorem run_map (nodes : List Node) (values : List Expression) (storage : Word → Word)
+theorem run_map (nodes : List Node) (values : List Expression)
     (ctx : Context) (locals : String → Word) :
-    run (words ctx locals) nodes (values.map (Expression.eval storage ctx locals)) =
-      (run expressions nodes values).map (List.map (Expression.eval storage ctx locals)) := by
+    run (words ctx locals) nodes (values.map (Expression.eval ctx locals)) =
+      (run expressions nodes values).map (List.map (Expression.eval ctx locals)) := by
   induction nodes generalizing values with
   | nil => rfl
   | cons node rest ih =>
@@ -90,10 +90,10 @@ theorem run_map (nodes : List Node) (values : List Expression) (storage : Word �
     | none => simp
     | some value => simpa [step, List.map_append] using ih (values ++ [value])
 
-theorem evaluate_expand (nodes : List Node) (root : Nat) (storage : Word → Word)
+theorem evaluate_expand (nodes : List Node) (root : Nat)
     (ctx : Context) (locals : String → Word) :
-    evaluate nodes root ctx locals = (expand nodes root).map (Expression.eval storage ctx locals) := by
-  have mapped := run_map nodes [] storage ctx locals
+    evaluate nodes root ctx locals = (expand nodes root).map (Expression.eval ctx locals) := by
+  have mapped := run_map nodes [] ctx locals
   simp only [List.map_nil] at mapped
   simp only [evaluate, expand, mapped]
   cases run expressions nodes [] <;> simp [List.getElem?_map]
@@ -117,11 +117,10 @@ theorem validate_sound (fuel : Nat) (before after : List Node) (beforeRoot after
     | none => simp [validate, left, right] at accepted
     | some b =>
       simp only [validate, left, right] at accepted
-      let storage : Word → Word := fun _ => 0#256
-      have equal := equivalent_sound fuel a b accepted storage ctx locals
-      rw [evaluate_expand before beforeRoot storage ctx locals,
-        evaluate_expand after afterRoot storage ctx locals, left, right]
-      exact ⟨a.eval storage ctx locals, rfl, congrArg some equal.symm⟩
+      have equal := equivalent_sound fuel a b accepted ctx locals
+      rw [evaluate_expand before beforeRoot ctx locals,
+        evaluate_expand after afterRoot ctx locals, left, right]
+      exact ⟨a.eval ctx locals, rfl, congrArg some equal.symm⟩
 
 #audit_contract_proof Compiler.Validation.validate_sound
 

@@ -29,7 +29,9 @@ namespace Compiler.Validation.Audit
 #audit_contract_proof Compiler.Validation.Failure.attempt_sound
 #audit_contract_proof Compiler.Validation.Failure.certifySweep
 
+#audit_contract_proof Compiler.Validation.WordBlock.lowerSourceNodes_sound
 #audit_contract_proof Compiler.Validation.WordBlock.validate_sound
+#audit_contract_proof Compiler.Validation.WordBlock.validateSource_sound
 
 #audit_contract_proof Compiler.Validation.Bytecode.previewSource_parsed_selector
 #audit_contract_proof Compiler.Validation.Bytecode.previewCreation_run_exact

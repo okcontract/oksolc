@@ -17,6 +17,9 @@ namespace Compiler.Algebraic.Audit
 #audit_contract_proof Compiler.Algebraic.production_rules_sound
 #audit_contract_proof Compiler.Algebraic.production_selection_sound
 #audit_contract_proof Compiler.Algebraic.production_expression_sound
+#audit_contract_proof Compiler.Algebraic.production_binary_opcode_sound
+#audit_contract_proof Compiler.Algebraic.production_ternary_opcode_sound
+#audit_contract_proof Compiler.Algebraic.production_nullary_opcode_sound
 
 #audit_contract_proof Compiler.Algebraic.RuleList.and_byte_mask
 #audit_contract_proof Compiler.Algebraic.RuleList.byte_31_eq_and

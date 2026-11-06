@@ -12,6 +12,9 @@ abbrev Word := BitVec 256
 abbrev Address := BitVec 160
 abbrev Memory := Nat → UInt8
 
+def maxWord : Word := BitVec.allOnes 256
+def addressMask : Word := (1#256 <<< 160) - 1#256
+
 structure Context where
   caller : Address := 0
   self : Address := 0
@@ -22,8 +25,8 @@ structure Context where
 def Address.toWord (a : Address) : Word := a.zeroExtend 256
 
 theorem Address.toWord_and_mask (a : Address) :
-    a.toWord &&& ((1#256 <<< 160) - 1#256) = a.toWord := by
-  unfold Address.toWord
+    a.toWord &&& addressMask = a.toWord := by
+  unfold Address.toWord addressMask
   apply BitVec.eq_of_toNat_eq
   have hm : (((1#256 <<< 160) - 1#256) : Word).toNat = 2 ^ 160 - 1 := rfl
   have hz : (a.zeroExtend 256).toNat = a.toNat := BitVec.toNat_setWidth_of_le (by omega)

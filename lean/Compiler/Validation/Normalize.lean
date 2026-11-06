@@ -16,16 +16,13 @@ open Contract Contract.Yul Compiler.Algebraic
 
 deriving instance DecidableEq for Expression
 
-def maxWord : Word := BitVec.allOnes 256
-def addressMask : Word := (1#256 <<< 160) - 1#256
-
 def constant : Expression → Option Word
   | .literal value => some (BitVec.ofNat 256 value)
   | _ => none
 
 theorem constant_sound (e : Expression) (value : Word) (known : constant e = some value)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    e.eval storage ctx locals = value := by
+    (ctx : Context) (locals : String → Word) :
+    e.eval ctx locals = value := by
   cases e <;> simp only [constant, Option.some.injEq, reduceCtorEq] at known
   subst value
   rfl
@@ -34,12 +31,12 @@ def facts (a b : Expression) : Facts := {
   left := constant a, right := constant b, equal := decide (a = b)
 }
 
-theorem facts_reliable (a b : Expression) (storage : Word → Word)
+theorem facts_reliable (a b : Expression)
     (ctx : Context) (locals : String → Word) :
-    (facts a b).Reliable (a.eval storage ctx locals) (b.eval storage ctx locals) := by
+    (facts a b).Reliable (a.eval ctx locals) (b.eval ctx locals) := by
   constructor
-  · exact fun value known => constant_sound a value known storage ctx locals
-  · exact fun value known => constant_sound b value known storage ctx locals
+  · exact fun value known => constant_sound a value known ctx locals
+  · exact fun value known => constant_sound b value known ctx locals
   · intro equal
     simp only [facts, decide_eq_true_eq] at equal
     subst b
@@ -56,24 +53,24 @@ def rewrite (op : Binary) (a b : Expression) : Expression :=
       | some replacement => replacement.expression a b
       | none => .binary op a b
 
-theorem rewrite_sound (op : Binary) (a b : Expression) (storage : Word → Word)
+theorem rewrite_sound (op : Binary) (a b : Expression)
     (ctx : Context) (locals : String → Word) :
-    (rewrite op a b).eval storage ctx locals = (Expression.binary op a b).eval storage ctx locals := by
+    (rewrite op a b).eval ctx locals = (Expression.binary op a b).eval ctx locals := by
   unfold rewrite
   split
   next x y hx hy =>
     simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq]
-    rw [constant_sound a x hx storage ctx locals, constant_sound b y hy storage ctx locals]
+    rw [constant_sound a x hx ctx locals, constant_sound b y hy ctx locals]
   all_goals
     split
     next replacement selected =>
-      exact (production_expression_sound op .constants (facts a b) a b storage ctx locals
-        (facts_reliable a b storage ctx locals) replacement selected).symm
+      exact (production_expression_sound op .constants (facts a b) a b ctx locals
+        (facts_reliable a b ctx locals) replacement selected).symm
     next =>
       split
       next replacement selected =>
-        exact (production_expression_sound op .equal (facts a b) a b storage ctx locals
-          (facts_reliable a b storage ctx locals) replacement selected).symm
+        exact (production_expression_sound op .equal (facts a b) a b ctx locals
+          (facts_reliable a b ctx locals) replacement selected).symm
       next => rfl
 
 /-- Commutative orientation heuristic for canonical form. -/
@@ -94,16 +91,16 @@ theorem commute_sound (op : Binary) (admitted : commute op = true) (a b : Word) 
 def ordered (op : Binary) (a b : Expression) : Expression :=
   if commute op && (compare a.render b.render == .gt) then rewrite op b a else rewrite op a b
 
-theorem ordered_sound (op : Binary) (a b : Expression) (storage : Word → Word)
+theorem ordered_sound (op : Binary) (a b : Expression)
     (ctx : Context) (locals : String → Word) :
-    (ordered op a b).eval storage ctx locals = (Expression.binary op a b).eval storage ctx locals := by
+    (ordered op a b).eval ctx locals = (Expression.binary op a b).eval ctx locals := by
   unfold ordered
   split
   next swapped =>
     rw [rewrite_sound]
     simp only [Bool.and_eq_true] at swapped
     exact commute_sound op swapped.1 _ _
-  next => exact rewrite_sound op a b storage ctx locals
+  next => exact rewrite_sound op a b ctx locals
 
 /-- Associative + commutative word operations normalized by constant regrouping. -/
 def regroupable : Binary → Bool
@@ -134,8 +131,8 @@ def constantParts (op : Binary) : Expression → Option (Word × Expression)
 
 theorem constantParts_sound (op : Binary) (admitted : regroupable op = true)
     (e rest : Expression) (value : Word) (found : constantParts op e = some (value, rest))
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    e.eval storage ctx locals = op.eval value (rest.eval storage ctx locals) := by
+    (ctx : Context) (locals : String → Word) :
+    e.eval ctx locals = op.eval value (rest.eval ctx locals) := by
   cases e <;> simp only [constantParts, reduceCtorEq] at found
   rename_i nested a b
   split at found
@@ -144,10 +141,10 @@ theorem constantParts_sound (op : Binary) (admitted : regroupable op = true)
     split at found
     next x hx =>
       cases found
-      exact congrArg (fun y => op.eval y (rest.eval storage ctx locals)) (constant_sound a value hx storage ctx locals)
+      exact congrArg (fun y => op.eval y (rest.eval ctx locals)) (constant_sound a value hx ctx locals)
     next x hx _ =>
       cases found
-      rw [Expression.eval, constant_sound b value hx storage ctx locals]
+      rw [Expression.eval, constant_sound b value hx ctx locals]
       exact commute_sound op (regroupable_commutes op admitted) _ _
     next => contradiction
   next => contradiction
@@ -159,15 +156,15 @@ def mergeConstant (op : Binary) (value : Word) (rest other : Expression) : Expre
 
 theorem mergeConstant_sound (op : Binary) (admitted : regroupable op = true)
     (value : Word) (rest other : Expression)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    (mergeConstant op value rest other).eval storage ctx locals =
-      op.eval (op.eval value (rest.eval storage ctx locals)) (other.eval storage ctx locals) := by
+    (ctx : Context) (locals : String → Word) :
+    (mergeConstant op value rest other).eval ctx locals =
+      op.eval (op.eval value (rest.eval ctx locals)) (other.eval ctx locals) := by
   unfold mergeConstant
   split
   next outer known =>
     simp only [ordered_sound, Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq]
-    rw [constant_sound other outer known storage ctx locals, regroupable_assoc op admitted,
-      commute_sound op (regroupable_commutes op admitted) outer (rest.eval storage ctx locals),
+    rw [constant_sound other outer known ctx locals, regroupable_assoc op admitted,
+      commute_sound op (regroupable_commutes op admitted) outer (rest.eval ctx locals),
       ← regroupable_assoc op admitted]
   next =>
     simp only [ordered_sound, Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq]
@@ -183,24 +180,24 @@ def regroup (op : Binary) (a b : Expression) : Expression :=
       | none => ordered op a b
   else ordered op a b
 
-theorem regroup_sound (op : Binary) (a b : Expression) (storage : Word → Word)
+theorem regroup_sound (op : Binary) (a b : Expression)
     (ctx : Context) (locals : String → Word) :
-    (regroup op a b).eval storage ctx locals = (Expression.binary op a b).eval storage ctx locals := by
+    (regroup op a b).eval ctx locals = (Expression.binary op a b).eval ctx locals := by
   unfold regroup
   split
   next admitted =>
     split
     next value rest found =>
       rw [mergeConstant_sound op admitted, Expression.eval,
-        constantParts_sound op admitted a rest value found storage ctx locals]
+        constantParts_sound op admitted a rest value found ctx locals]
     next =>
       split
       next value rest found =>
         rw [mergeConstant_sound op admitted, Expression.eval,
-          constantParts_sound op admitted b rest value found storage ctx locals]
+          constantParts_sound op admitted b rest value found ctx locals]
         exact commute_sound op (regroupable_commutes op admitted) _ _
-      next => exact ordered_sound op a b storage ctx locals
-  next => exact ordered_sound op a b storage ctx locals
+      next => exact ordered_sound op a b ctx locals
+  next => exact ordered_sound op a b ctx locals
 
 /-- Find `k < 256` such that `w = 1 <<< k` when `w` is an exact power of two. -/
 private def log2Loop : Nat → Word → Option Nat
@@ -237,8 +234,8 @@ def isAddressExpr : Expression → Bool
   | _ => false
 
 theorem isAddressExpr_mask (e : Expression) (h : isAddressExpr e = true)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    Binary.and.eval addressMask (e.eval storage ctx locals) = e.eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    Binary.and.eval addressMask (e.eval ctx locals) = e.eval ctx locals := by
   cases e with
   | nullary op =>
     simp only [Expression.eval, addressMask]
@@ -260,8 +257,8 @@ def reduceUnary : Unary → Expression → Expression
   | op, arg => .unary op arg
 
 theorem reduceUnary_sound (op : Unary) (arg : Expression)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    (reduceUnary op arg).eval storage ctx locals = (Expression.unary op arg).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    (reduceUnary op arg).eval ctx locals = (Expression.unary op arg).eval ctx locals := by
   unfold reduceUnary
   split
   · simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq]
@@ -293,9 +290,9 @@ def reduceTernary (op : Ternary) (a b c : Expression) : Expression :=
     | _, _ => .ternary op a b c
 
 theorem reduceTernary_sound (op : Ternary) (a b c : Expression)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    (reduceTernary op a b c).eval storage ctx locals =
-      (Expression.ternary op a b c).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    (reduceTernary op a b c).eval ctx locals =
+      (Expression.ternary op a b c).eval ctx locals := by
   unfold reduceTernary
   cases hca : constant a with
   | some av =>
@@ -304,9 +301,9 @@ theorem reduceTernary_sound (op : Ternary) (a b c : Expression)
       cases hcc : constant c with
       | some cv =>
         simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-          constant_sound a av hca storage ctx locals,
-          constant_sound b bv hcb storage ctx locals,
-          constant_sound c cv hcc storage ctx locals]
+          constant_sound a av hca ctx locals,
+          constant_sound b bv hcb ctx locals,
+          constant_sound c cv hcc ctx locals]
       | none =>
         cases op <;> simp
     | none =>
@@ -316,7 +313,7 @@ theorem reduceTernary_sound (op : Ternary) (a b c : Expression)
         | none => rfl
         | some k =>
           obtain ⟨hlt, heq⟩ := exactLog2_sound mv k hk
-          simp only [Expression.eval, constant_sound c mv hcc storage ctx locals, heq,
+          simp only [Expression.eval, constant_sound c mv hcc ctx locals, heq,
             BitVec.ofNat_toNat, BitVec.setWidth_eq]
           rw [← RuleList.mod_pow2_eq_and _ k hlt]
           exact RuleList.add_mod_pow2_eq_addmod _ _ k hlt
@@ -325,7 +322,7 @@ theorem reduceTernary_sound (op : Ternary) (a b c : Expression)
         | none => rfl
         | some k =>
           obtain ⟨hlt, heq⟩ := exactLog2_sound mv k hk
-          simp only [Expression.eval, constant_sound c mv hcc storage ctx locals, heq,
+          simp only [Expression.eval, constant_sound c mv hcc ctx locals, heq,
             BitVec.ofNat_toNat, BitVec.setWidth_eq]
           rw [← RuleList.mod_pow2_eq_and _ k hlt]
           exact RuleList.mul_mod_pow2_eq_mulmod _ _ k hlt
@@ -336,7 +333,7 @@ theorem reduceTernary_sound (op : Ternary) (a b c : Expression)
       | none => rfl
       | some k =>
         obtain ⟨hlt, heq⟩ := exactLog2_sound mv k hk
-        simp only [Expression.eval, constant_sound c mv hcc storage ctx locals, heq,
+        simp only [Expression.eval, constant_sound c mv hcc ctx locals, heq,
           BitVec.ofNat_toNat, BitVec.setWidth_eq]
         rw [← RuleList.mod_pow2_eq_and _ k hlt]
         exact RuleList.add_mod_pow2_eq_addmod _ _ k hlt
@@ -345,7 +342,7 @@ theorem reduceTernary_sound (op : Ternary) (a b c : Expression)
       | none => rfl
       | some k =>
         obtain ⟨hlt, heq⟩ := exactLog2_sound mv k hk
-        simp only [Expression.eval, constant_sound c mv hcc storage ctx locals, heq,
+        simp only [Expression.eval, constant_sound c mv hcc ctx locals, heq,
           BitVec.ofNat_toNat, BitVec.setWidth_eq]
         rw [← RuleList.mod_pow2_eq_and _ k hlt]
         exact RuleList.mul_mod_pow2_eq_mulmod _ _ k hlt
@@ -376,14 +373,14 @@ def reduceByte (a x : Expression) : Option Expression :=
       | _ => none
 
 theorem reduceByte_sound (a x out : Expression) (h : reduceByte a x = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .byte a x).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .byte a x).eval ctx locals := by
   unfold reduceByte at h
   cases hca : constant a with
   | none => simp [hca] at h
   | some nw =>
     simp only [hca] at h
-    have haw := constant_sound a nw hca storage ctx locals
+    have haw := constant_sound a nw hca ctx locals
     split at h
     · next h31 =>
       cases h
@@ -406,7 +403,7 @@ theorem reduceByte_sound (a x out : Expression) (h : reduceByte a x = some out)
               next cond =>
                 rcases cond with ⟨hmod, hnle, hsle⟩
                 subst out
-                simp only [Expression.eval, haw, constant_sound s sw hcs storage ctx locals]
+                simp only [Expression.eval, haw, constant_sound s sw hcs ctx locals]
                 exact (RuleList.byte_shl nw sw _ hmod hnle hsle).symm
           | shr =>
             cases hcs : constant s with
@@ -416,14 +413,14 @@ theorem reduceByte_sound (a x out : Expression) (h : reduceByte a x = some out)
               split at h
               · next hlt =>
                 cases h
-                simp only [Expression.eval, haw, constant_sound s sw hcs storage ctx locals]
+                simp only [Expression.eval, haw, constant_sound s sw hcs ctx locals]
                 exact (RuleList.byte_shr_zero nw sw _ hlt).symm
               · next hnlt =>
                 split at h <;> simp at h
                 next cond =>
                   rcases cond with ⟨hmod, hnlt32, hsle⟩
                   subst out
-                  simp only [Expression.eval, haw, constant_sound s sw hcs storage ctx locals]
+                  simp only [Expression.eval, haw, constant_sound s sw hcs ctx locals]
                   exact (RuleList.byte_shr nw sw _ hmod hnlt32 hsle (Nat.le_of_not_lt hnlt)).symm
           | _ => simp at h
         | _ => simp at h
@@ -470,14 +467,14 @@ def reduceShl (a x : Expression) : Option Expression :=
       | _ => none
 
 theorem reduceShl_sound (a x out : Expression) (h : reduceShl a x = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .shl a x).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .shl a x).eval ctx locals := by
   unfold reduceShl at h
   cases hca : constant a with
   | none => simp [hca] at h
   | some nw =>
     simp only [hca] at h
-    have haw := constant_sound a nw hca storage ctx locals
+    have haw := constant_sound a nw hca ctx locals
     split at h
     · next hge256 =>
       cases h
@@ -493,8 +490,8 @@ theorem reduceShl_sound (a x out : Expression) (h : reduceShl a x = some out)
           | none => simp [hcb] at h
           | some bw =>
             simp only [hcb] at h
-            have hbw := constant_sound b bw hcb storage ctx locals
-            have hshl := RuleList.shl_nested nw bw (inner.eval storage ctx locals)
+            have hbw := constant_sound b bw hcb ctx locals
+            have hshl := RuleList.shl_nested nw bw (inner.eval ctx locals)
             split at h
             · next hover =>
               cases h
@@ -509,7 +506,7 @@ theorem reduceShl_sound (a x out : Expression) (h : reduceShl a x = some out)
           | none => simp [hcb] at h
           | some bw =>
             simp only [hcb] at h
-            have hbw := constant_sound b bw hcb storage ctx locals
+            have hbw := constant_sound b bw hcb ctx locals
             split at h
             · next hbge =>
               cases h
@@ -519,7 +516,7 @@ theorem reduceShl_sound (a x out : Expression) (h : reduceShl a x = some out)
             · next hbnge =>
               cases h
               have hblt : bw.toNat < 256 := Nat.lt_of_not_ge hbnge
-              have hcomb := RuleList.shl_of_shr_combine nw bw (inner.eval storage ctx locals) hnlt hblt
+              have hcomb := RuleList.shl_of_shr_combine nw bw (inner.eval ctx locals) hnlt hblt
               simp only [Expression.eval, haw, hbw, maxWord, BitVec.ofNat_toNat, BitVec.setWidth_eq]
               split
               · next hlt => simpa [hlt] using hcomb.symm
@@ -536,7 +533,7 @@ theorem reduceShl_sound (a x out : Expression) (h : reduceShl a x = some out)
             next cond =>
               rcases cond with ⟨hmod, hdle⟩
               subst out
-              simp only [Expression.eval, haw, constant_sound b dw hcd storage ctx locals,
+              simp only [Expression.eval, haw, constant_sound b dw hcd ctx locals,
                 BitVec.ofNat_toNat, BitVec.setWidth_eq]
               exact (RuleList.shl_signextend nw dw _ hmod (Nat.le_of_lt hnlt) hdle).symm
         | «and» =>
@@ -545,9 +542,9 @@ theorem reduceShl_sound (a x out : Expression) (h : reduceShl a x = some out)
           | some mask =>
             simp only [hcb, Option.some.injEq] at h; subst out
             simp only [Expression.eval, haw, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-              constant_sound b mask hcb storage ctx locals]
-            have hc : Binary.and.eval mask (inner.eval storage ctx locals) =
-                Binary.and.eval (inner.eval storage ctx locals) mask := BitVec.and_comm _ _
+              constant_sound b mask hcb ctx locals]
+            have hc : Binary.and.eval mask (inner.eval ctx locals) =
+                Binary.and.eval (inner.eval ctx locals) mask := BitVec.and_comm _ _
             rw [hc]
             exact (RuleList.shl_and_const nw _ mask hnlt).symm
           | none =>
@@ -555,7 +552,7 @@ theorem reduceShl_sound (a x out : Expression) (h : reduceShl a x = some out)
             | some mask =>
               simp only [hcb, hci, Option.some.injEq] at h; subst out
               simp only [Expression.eval, haw, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-                constant_sound inner mask hci storage ctx locals]
+                constant_sound inner mask hci ctx locals]
               exact (RuleList.shl_and_const nw _ mask hnlt).symm
             | none => simp [hcb, hci] at h
         | _ => simp at h
@@ -595,14 +592,14 @@ def reduceShr (a x : Expression) : Option Expression :=
       | _ => none
 
 theorem reduceShr_sound (a x out : Expression) (h : reduceShr a x = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .shr a x).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .shr a x).eval ctx locals := by
   unfold reduceShr at h
   cases hca : constant a with
   | none => simp [hca] at h
   | some nw =>
     simp only [hca] at h
-    have haw := constant_sound a nw hca storage ctx locals
+    have haw := constant_sound a nw hca ctx locals
     split at h
     · next hge256 =>
       cases h
@@ -618,8 +615,8 @@ theorem reduceShr_sound (a x out : Expression) (h : reduceShr a x = some out)
           | none => simp [hcb] at h
           | some bw =>
             simp only [hcb] at h
-            have hbw := constant_sound b bw hcb storage ctx locals
-            have hshr := RuleList.shr_nested nw bw (inner.eval storage ctx locals)
+            have hbw := constant_sound b bw hcb ctx locals
+            have hshr := RuleList.shr_nested nw bw (inner.eval ctx locals)
             split at h
             · next hover =>
               cases h
@@ -634,7 +631,7 @@ theorem reduceShr_sound (a x out : Expression) (h : reduceShr a x = some out)
           | none => simp [hcb] at h
           | some bw =>
             simp only [hcb] at h
-            have hbw := constant_sound b bw hcb storage ctx locals
+            have hbw := constant_sound b bw hcb ctx locals
             split at h
             · next hbge =>
               cases h
@@ -644,7 +641,7 @@ theorem reduceShr_sound (a x out : Expression) (h : reduceShr a x = some out)
             · next hbnge =>
               cases h
               have hblt : bw.toNat < 256 := Nat.lt_of_not_ge hbnge
-              have hcomb := RuleList.shr_of_shl_combine nw bw (inner.eval storage ctx locals) hnlt hblt
+              have hcomb := RuleList.shr_of_shl_combine nw bw (inner.eval ctx locals) hnlt hblt
               simp only [Expression.eval, haw, hbw, maxWord, BitVec.ofNat_toNat, BitVec.setWidth_eq]
               split
               · next hlt => simpa [hlt] using hcomb.symm
@@ -658,9 +655,9 @@ theorem reduceShr_sound (a x out : Expression) (h : reduceShr a x = some out)
           | some mask =>
             simp only [hcb, Option.some.injEq] at h; subst out
             simp only [Expression.eval, haw, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-              constant_sound b mask hcb storage ctx locals]
-            have hc : Binary.and.eval mask (inner.eval storage ctx locals) =
-                Binary.and.eval (inner.eval storage ctx locals) mask := BitVec.and_comm _ _
+              constant_sound b mask hcb ctx locals]
+            have hc : Binary.and.eval mask (inner.eval ctx locals) =
+                Binary.and.eval (inner.eval ctx locals) mask := BitVec.and_comm _ _
             rw [hc]
             exact (RuleList.shr_and_const nw _ mask hnlt).symm
           | none =>
@@ -668,7 +665,7 @@ theorem reduceShr_sound (a x out : Expression) (h : reduceShr a x = some out)
             | some mask =>
               simp only [hcb, hci, Option.some.injEq] at h; subst out
               simp only [Expression.eval, haw, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-                constant_sound inner mask hci storage ctx locals]
+                constant_sound inner mask hci ctx locals]
               exact (RuleList.shr_and_const nw _ mask hnlt).symm
             | none => simp [hcb, hci] at h
         | _ => simp at h
@@ -699,13 +696,13 @@ def reduceSignextend (b x : Expression) : Option Expression :=
     | _ => none
 
 theorem reduceSignextend_sound (b x out : Expression) (h : reduceSignextend b x = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .signextend b x).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .signextend b x).eval ctx locals := by
   unfold reduceSignextend at h
   cases hcb : constant b with
   | some bw =>
     simp only [hcb] at h
-    have hbw := constant_sound b bw hcb storage ctx locals
+    have hbw := constant_sound b bw hcb ctx locals
     split at h
     · next hge31 =>
       cases h
@@ -725,7 +722,7 @@ theorem reduceSignextend_sound (b x out : Expression) (h : reduceSignextend b x 
             next cond =>
               rcases cond with ⟨hmod, hsle, hrel⟩
               subst out
-              simp only [Expression.eval, hbw, constant_sound s sw hcs storage ctx locals,
+              simp only [Expression.eval, hbw, constant_sound s sw hcs ctx locals,
                 BitVec.ofNat_toNat, BitVec.setWidth_eq]
               exact (RuleList.signextend_shr_eq_sar bw sw _ hmod hsle (by omega) hrel).symm
         | signextend =>
@@ -734,8 +731,8 @@ theorem reduceSignextend_sound (b x out : Expression) (h : reduceSignextend b x 
           | some aw =>
             simp only [hca, Option.some.injEq] at h
             subst out
-            have haw := constant_sound s aw hca storage ctx locals
-            have hmin := RuleList.signextend_nested_min bw aw (inner.eval storage ctx locals)
+            have haw := constant_sound s aw hca ctx locals
+            have hmin := RuleList.signextend_nested_min bw aw (inner.eval ctx locals)
             simp only [Expression.eval, hbw, haw]
             split
             · next hle =>
@@ -767,14 +764,14 @@ def reduceExp (a x : Expression) : Option Expression :=
     else none
 
 theorem reduceExp_sound (a x out : Expression) (h : reduceExp a x = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .exp a x).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .exp a x).eval ctx locals := by
   unfold reduceExp at h
   cases hca : constant a with
   | none => simp [hca] at h
   | some bw =>
     simp only [hca] at h
-    have haw := constant_sound a bw hca storage ctx locals
+    have haw := constant_sound a bw hca ctx locals
     split at h
     · next h0 =>
       cases h; simp only [Expression.eval, haw, h0]
@@ -797,8 +794,8 @@ private def isShlOne : Expression → Option Expression
   | _ => none
 
 private theorem isShlOne_sound (e y : Expression) (h : isShlOne e = some y)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    e.eval storage ctx locals = Binary.shl.eval (y.eval storage ctx locals) 1#256 := by
+    (ctx : Context) (locals : String → Word) :
+    e.eval ctx locals = Binary.shl.eval (y.eval ctx locals) 1#256 := by
   unfold isShlOne at h
   cases e with
   | binary bop sh oneExpr =>
@@ -808,7 +805,7 @@ private theorem isShlOne_sound (e y : Expression) (h : isShlOne e = some y)
       by_cases hone : constant oneExpr = some 1#256
       · simp only [hone, ↓reduceIte, Option.some.injEq] at h
         subst y
-        simp only [Expression.eval, constant_sound oneExpr _ hone storage ctx locals]
+        simp only [Expression.eval, constant_sound oneExpr _ hone ctx locals]
       · simp [hone] at h
     | _ => simp at h
   | _ => simp at h
@@ -855,8 +852,8 @@ def reduceMulDivMod (op : Binary) (a b : Expression) : Option Expression :=
 
 theorem reduceMulDivMod_sound (op : Binary) (a b out : Expression)
     (h : reduceMulDivMod op a b = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary op a b).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary op a b).eval ctx locals := by
   cases op <;> simp only [reduceMulDivMod] at h
   case mul =>
     cases hca : constant a with
@@ -865,7 +862,7 @@ theorem reduceMulDivMod_sound (op : Binary) (a b out : Expression)
       cases hk : exactLog2 cv <;> simp [hk] at h
       rename_i k; subst out
       obtain ⟨hlt, heq⟩ := exactLog2_sound cv k hk
-      simp only [Expression.eval, constant_sound a cv hca storage ctx locals, heq]
+      simp only [Expression.eval, constant_sound a cv hca ctx locals, heq]
       exact ((RuleList.mul_pow2_eq_shl _ k hlt).2).symm
     | none =>
       simp only [hca] at h
@@ -875,21 +872,21 @@ theorem reduceMulDivMod_sound (op : Binary) (a b out : Expression)
         cases hk : exactLog2 cv <;> simp [hk] at h
         rename_i k; subst out
         obtain ⟨hlt, heq⟩ := exactLog2_sound cv k hk
-        simp only [Expression.eval, constant_sound b cv hcb storage ctx locals, heq]
+        simp only [Expression.eval, constant_sound b cv hcb ctx locals, heq]
         exact ((RuleList.mul_pow2_eq_shl _ k hlt).1).symm
       | none =>
         simp only [hcb] at h
         cases hsb : isShlOne b with
         | some y =>
           simp only [hsb, Option.some.injEq] at h; subst out
-          simp only [Expression.eval, isShlOne_sound b y hsb storage ctx locals]
+          simp only [Expression.eval, isShlOne_sound b y hsb ctx locals]
           exact ((RuleList.mul_shl_one_eq_shl _ _).1).symm
         | none =>
           simp only [hsb] at h
           cases hsa : isShlOne a with
           | some y2 =>
             simp only [hsa, Option.some.injEq] at h; subst out
-            simp only [Expression.eval, isShlOne_sound a y2 hsa storage ctx locals]
+            simp only [Expression.eval, isShlOne_sound a y2 hsa ctx locals]
             exact ((RuleList.mul_shl_one_eq_shl _ _).2).symm
           | none => simp [hsa] at h
   case div =>
@@ -899,14 +896,14 @@ theorem reduceMulDivMod_sound (op : Binary) (a b out : Expression)
       cases hk : exactLog2 cv <;> simp [hk] at h
       rename_i k; subst out
       obtain ⟨hlt, heq⟩ := exactLog2_sound cv k hk
-      simp only [Expression.eval, constant_sound b cv hcb storage ctx locals, heq]
+      simp only [Expression.eval, constant_sound b cv hcb ctx locals, heq]
       exact (RuleList.div_pow2_eq_shr _ k hlt).symm
     | none =>
       simp only [hcb] at h
       cases hsb : isShlOne b with
       | some y =>
         simp only [hsb, Option.some.injEq] at h; subst out
-        simp only [Expression.eval, isShlOne_sound b y hsb storage ctx locals]
+        simp only [Expression.eval, isShlOne_sound b y hsb ctx locals]
         exact (RuleList.div_shl_one_eq_shr _ _).symm
       | none => simp [hsb] at h
   case mod =>
@@ -919,14 +916,14 @@ theorem reduceMulDivMod_sound (op : Binary) (a b out : Expression)
         simp only [hk, Option.some.injEq] at h; subst out
         obtain ⟨hlt, heq⟩ := exactLog2_sound cv k hk
         simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-          constant_sound b cv hcb storage ctx locals, heq]
+          constant_sound b cv hcb ctx locals, heq]
         exact (RuleList.mod_pow2_eq_and _ k hlt).symm
     | none => simp [hcb] at h
   all_goals simp at h
 
-private theorem literal_neg_eval (w : Word) (storage : Word → Word)
+private theorem literal_neg_eval (w : Word)
     (ctx : Context) (locals : String → Word) :
-    (Expression.literal ((0#256 - w).toNat)).eval storage ctx locals = 0#256 - w := by
+    (Expression.literal ((0#256 - w).toNat)).eval ctx locals = 0#256 - w := by
   simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq]
 
 private def reduceSubRhs (lhs rhs : Expression) : Option Expression :=
@@ -948,8 +945,8 @@ private def reduceSubRhs (lhs rhs : Expression) : Option Expression :=
 
 private theorem reduceSubRhs_sound (lhs rhs out : Expression)
     (h : reduceSubRhs lhs rhs = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .sub lhs rhs).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .sub lhs rhs).eval ctx locals := by
   unfold reduceSubRhs at h
   cases rhs with
   | binary rop ra rb =>
@@ -969,24 +966,24 @@ private theorem reduceSubRhs_sound (lhs rhs out : Expression)
           cases hcra : constant ra with
           | some rav =>
             simp only [hcra, Option.some.injEq] at h; subst out
-            change Binary.add.eval (Binary.sub.eval (lhs.eval storage ctx locals) (rb.eval storage ctx locals))
-              ((Expression.literal ((0#256 - rav).toNat)).eval storage ctx locals) =
-              Binary.sub.eval (lhs.eval storage ctx locals)
-                (Binary.add.eval (ra.eval storage ctx locals) (rb.eval storage ctx locals))
-            rw [literal_neg_eval, constant_sound ra rav hcra storage ctx locals]
-            have hc : Binary.add.eval rav (rb.eval storage ctx locals) =
-                Binary.add.eval (rb.eval storage ctx locals) rav := BitVec.add_comm _ _
+            change Binary.add.eval (Binary.sub.eval (lhs.eval ctx locals) (rb.eval ctx locals))
+              ((Expression.literal ((0#256 - rav).toNat)).eval ctx locals) =
+              Binary.sub.eval (lhs.eval ctx locals)
+                (Binary.add.eval (ra.eval ctx locals) (rb.eval ctx locals))
+            rw [literal_neg_eval, constant_sound ra rav hcra ctx locals]
+            have hc : Binary.add.eval rav (rb.eval ctx locals) =
+                Binary.add.eval (rb.eval ctx locals) rav := BitVec.add_comm _ _
             rw [hc]
             exact ((RuleList.sub_nested_reassociate _ _ rav).2.1).symm
           | none =>
             cases hcrb : constant rb with
             | some rbv =>
               simp only [hcra, hcrb, Option.some.injEq] at h; subst out
-              change Binary.add.eval (Binary.sub.eval (lhs.eval storage ctx locals) (ra.eval storage ctx locals))
-                ((Expression.literal ((0#256 - rbv).toNat)).eval storage ctx locals) =
-                Binary.sub.eval (lhs.eval storage ctx locals)
-                  (Binary.add.eval (ra.eval storage ctx locals) (rb.eval storage ctx locals))
-              rw [literal_neg_eval, constant_sound rb rbv hcrb storage ctx locals]
+              change Binary.add.eval (Binary.sub.eval (lhs.eval ctx locals) (ra.eval ctx locals))
+                ((Expression.literal ((0#256 - rbv).toNat)).eval ctx locals) =
+                Binary.sub.eval (lhs.eval ctx locals)
+                  (Binary.add.eval (ra.eval ctx locals) (rb.eval ctx locals))
+              rw [literal_neg_eval, constant_sound rb rbv hcrb ctx locals]
               exact ((RuleList.sub_nested_reassociate _ _ rbv).2.1).symm
             | none => simp [hcra, hcrb] at h
     | sub =>
@@ -1001,17 +998,17 @@ private theorem reduceSubRhs_sound (lhs rhs out : Expression)
           cases hcra : constant ra <;> simp only [hcra, hcrb, Option.some.injEq] at h <;> subst out
           all_goals
             simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-              constant_sound rb rbv hcrb storage ctx locals]
+              constant_sound rb rbv hcrb ctx locals]
             exact ((RuleList.sub_nested_reassociate _ _ rbv).2.2.2.2.1).symm
         | none =>
           cases hcra : constant ra with
           | some rav =>
             simp only [hcra, hcrb, Option.some.injEq] at h; subst out
-            change Binary.add.eval (Binary.add.eval (lhs.eval storage ctx locals) (rb.eval storage ctx locals))
-              ((Expression.literal ((0#256 - rav).toNat)).eval storage ctx locals) =
-              Binary.sub.eval (lhs.eval storage ctx locals)
-                (Binary.sub.eval (ra.eval storage ctx locals) (rb.eval storage ctx locals))
-            rw [literal_neg_eval, constant_sound ra rav hcra storage ctx locals]
+            change Binary.add.eval (Binary.add.eval (lhs.eval ctx locals) (rb.eval ctx locals))
+              ((Expression.literal ((0#256 - rav).toNat)).eval ctx locals) =
+              Binary.sub.eval (lhs.eval ctx locals)
+                (Binary.sub.eval (ra.eval ctx locals) (rb.eval ctx locals))
+            rw [literal_neg_eval, constant_sound ra rav hcra ctx locals]
             exact ((RuleList.sub_nested_reassociate _ _ rav).2.2.2.2.2).symm
           | none => simp [hcra, hcrb] at h
     | _ => simp at h
@@ -1038,16 +1035,16 @@ def reduceSubClean (lhs rhs : Expression) : Option Expression :=
 
 theorem reduceSubClean_sound (lhs rhs out : Expression)
     (h : reduceSubClean lhs rhs = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .sub lhs rhs).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .sub lhs rhs).eval ctx locals := by
   unfold reduceSubClean at h
   cases hcr : constant rhs with
   | some cv =>
     simp only [hcr, Option.some.injEq] at h; subst out
-    change Binary.add.eval (lhs.eval storage ctx locals)
-      ((Expression.literal ((0#256 - cv).toNat)).eval storage ctx locals) =
-      Binary.sub.eval (lhs.eval storage ctx locals) (rhs.eval storage ctx locals)
-    rw [literal_neg_eval, constant_sound rhs cv hcr storage ctx locals]
+    change Binary.add.eval (lhs.eval ctx locals)
+      ((Expression.literal ((0#256 - cv).toNat)).eval ctx locals) =
+      Binary.sub.eval (lhs.eval ctx locals) (rhs.eval ctx locals)
+    rw [literal_neg_eval, constant_sound rhs cv hcr ctx locals]
     exact (RuleList.sub_const_eq_add_neg _ cv).symm
   | none =>
     simp only [hcr] at h
@@ -1070,9 +1067,9 @@ theorem reduceSubClean_sound (lhs rhs out : Expression)
             | some av =>
               simp only [hca, Option.some.injEq] at h; subst out
               simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-                constant_sound a av hca storage ctx locals]
-              have hc : Binary.add.eval av (b.eval storage ctx locals) =
-                  Binary.add.eval (b.eval storage ctx locals) av := BitVec.add_comm _ _
+                constant_sound a av hca ctx locals]
+              have hc : Binary.add.eval av (b.eval ctx locals) =
+                  Binary.add.eval (b.eval ctx locals) av := BitVec.add_comm _ _
               rw [hc]
               exact ((RuleList.sub_nested_reassociate _ _ av).1).symm
             | none =>
@@ -1080,11 +1077,11 @@ theorem reduceSubClean_sound (lhs rhs out : Expression)
               | some bv =>
                 simp only [hca, hcb, Option.some.injEq] at h; subst out
                 simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-                  constant_sound b bv hcb storage ctx locals]
+                  constant_sound b bv hcb ctx locals]
                 exact ((RuleList.sub_nested_reassociate _ _ bv).1).symm
               | none =>
                 simp only [hca, hcb] at h
-                exact reduceSubRhs_sound (.binary .add a b) rhs out h storage ctx locals
+                exact reduceSubRhs_sound (.binary .add a b) rhs out h ctx locals
       | sub =>
         simp only [] at h
         cases hcb : constant b with
@@ -1092,20 +1089,20 @@ theorem reduceSubClean_sound (lhs rhs out : Expression)
           cases hca : constant a <;> simp only [hca, hcb, Option.some.injEq] at h <;> subst out
           all_goals
             simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-              constant_sound b bv hcb storage ctx locals]
+              constant_sound b bv hcb ctx locals]
             exact ((RuleList.sub_nested_reassociate _ _ bv).2.2.1).symm
         | none =>
           cases hca : constant a with
           | some av =>
             simp only [hca, hcb, Option.some.injEq] at h; subst out
             simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-              constant_sound a av hca storage ctx locals]
+              constant_sound a av hca ctx locals]
             exact ((RuleList.sub_nested_reassociate _ _ av).2.2.2.1).symm
           | none =>
             simp only [hca, hcb] at h
-            exact reduceSubRhs_sound (.binary .sub a b) rhs out h storage ctx locals
-      | _ => exact reduceSubRhs_sound _ rhs out h storage ctx locals
-    | _ => exact reduceSubRhs_sound _ rhs out h storage ctx locals
+            exact reduceSubRhs_sound (.binary .sub a b) rhs out h ctx locals
+      | _ => exact reduceSubRhs_sound _ rhs out h ctx locals
+    | _ => exact reduceSubRhs_sound _ rhs out h ctx locals
 
 def reduceRuleListBinary (op : Binary) (a b : Expression) : Option Expression :=
   match op with
@@ -1120,18 +1117,18 @@ def reduceRuleListBinary (op : Binary) (a b : Expression) : Option Expression :=
 
 theorem reduceRuleListBinary_sound (op : Binary) (a b out : Expression)
     (h : reduceRuleListBinary op a b = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary op a b).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary op a b).eval ctx locals := by
   cases op <;> simp only [reduceRuleListBinary] at h
-  case byte => exact reduceByte_sound a b out h storage ctx locals
-  case shl => exact reduceShl_sound a b out h storage ctx locals
-  case shr => exact reduceShr_sound a b out h storage ctx locals
-  case signextend => exact reduceSignextend_sound a b out h storage ctx locals
-  case exp => exact reduceExp_sound a b out h storage ctx locals
-  case mul => exact reduceMulDivMod_sound .mul a b out h storage ctx locals
-  case div => exact reduceMulDivMod_sound .div a b out h storage ctx locals
-  case mod => exact reduceMulDivMod_sound .mod a b out h storage ctx locals
-  case sub => exact reduceSubClean_sound a b out h storage ctx locals
+  case byte => exact reduceByte_sound a b out h ctx locals
+  case shl => exact reduceShl_sound a b out h ctx locals
+  case shr => exact reduceShr_sound a b out h ctx locals
+  case signextend => exact reduceSignextend_sound a b out h ctx locals
+  case exp => exact reduceExp_sound a b out h ctx locals
+  case mul => exact reduceMulDivMod_sound .mul a b out h ctx locals
+  case div => exact reduceMulDivMod_sound .div a b out h ctx locals
+  case mod => exact reduceMulDivMod_sound .mod a b out h ctx locals
+  case sub => exact reduceSubClean_sound a b out h ctx locals
   all_goals simp at h
 
 /-- Alternating mask distribution `(inner & innerMask | alt) & outerMask` for `AND`. -/
@@ -1152,9 +1149,9 @@ def reduceAlternatingBranch (cand alt : Expression) (outerMask : Word) : Option 
 
 theorem reduceAlternatingBranch_sound (cand alt out : Expression) (outerMask : Word)
     (h : reduceAlternatingBranch cand alt outerMask = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals =
-      Binary.and.eval outerMask (Binary.or.eval (cand.eval storage ctx locals) (alt.eval storage ctx locals)) := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals =
+      Binary.and.eval outerMask (Binary.or.eval (cand.eval ctx locals) (alt.eval ctx locals)) := by
   unfold reduceAlternatingBranch at h
   cases cand with
   | binary cop ia ib =>
@@ -1165,13 +1162,13 @@ theorem reduceAlternatingBranch_sound (cand alt out : Expression) (outerMask : W
       | some innerMask =>
         simp only [hcia, Option.some.injEq] at h; subst out
         simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-          constant_sound ia innerMask hcia storage ctx locals]
-        have hc1 : Binary.and.eval innerMask (ib.eval storage ctx locals) =
-            Binary.and.eval (ib.eval storage ctx locals) innerMask := BitVec.and_comm _ _
+          constant_sound ia innerMask hcia ctx locals]
+        have hc1 : Binary.and.eval innerMask (ib.eval ctx locals) =
+            Binary.and.eval (ib.eval ctx locals) innerMask := BitVec.and_comm _ _
         have hc2 : Binary.and.eval outerMask
-              (Binary.or.eval (Binary.and.eval (ib.eval storage ctx locals) innerMask) (alt.eval storage ctx locals)) =
+              (Binary.or.eval (Binary.and.eval (ib.eval ctx locals) innerMask) (alt.eval ctx locals)) =
             Binary.and.eval
-              (Binary.or.eval (Binary.and.eval (ib.eval storage ctx locals) innerMask) (alt.eval storage ctx locals))
+              (Binary.or.eval (Binary.and.eval (ib.eval ctx locals) innerMask) (alt.eval ctx locals))
               outerMask := BitVec.and_comm _ _
         rw [hc1, hc2]
         exact (RuleList.distribute_alternating_mask _ _ innerMask outerMask).symm
@@ -1180,11 +1177,11 @@ theorem reduceAlternatingBranch_sound (cand alt out : Expression) (outerMask : W
         | some innerMask =>
           simp only [hcia, hcib, Option.some.injEq] at h; subst out
           simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-            constant_sound ib innerMask hcib storage ctx locals]
+            constant_sound ib innerMask hcib ctx locals]
           have hc2 : Binary.and.eval outerMask
-                (Binary.or.eval (Binary.and.eval (ia.eval storage ctx locals) innerMask) (alt.eval storage ctx locals)) =
+                (Binary.or.eval (Binary.and.eval (ia.eval ctx locals) innerMask) (alt.eval ctx locals)) =
               Binary.and.eval
-                (Binary.or.eval (Binary.and.eval (ia.eval storage ctx locals) innerMask) (alt.eval storage ctx locals))
+                (Binary.or.eval (Binary.and.eval (ia.eval ctx locals) innerMask) (alt.eval ctx locals))
                 outerMask := BitVec.and_comm _ _
           rw [hc2]
           exact (RuleList.distribute_alternating_mask _ _ innerMask outerMask).symm
@@ -1254,8 +1251,8 @@ def reduceAndPair (x y : Expression) : Option Expression :=
     | _ => none
 
 theorem reduceAndPair_sound (x y out : Expression) (h : reduceAndPair x y = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .and x y).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .and x y).eval ctx locals := by
   unfold reduceAndPair at h
   by_cases h0xff : constant x = some 0xff#256
   · simp only [h0xff, ↓reduceIte] at h
@@ -1263,9 +1260,9 @@ theorem reduceAndPair_sound (x y out : Expression) (h : reduceAndPair x y = some
     | binary bop bi bv =>
       cases bop <;> simp at h
       rcases h with ⟨_, rfl⟩
-      simp only [Expression.eval, constant_sound x _ h0xff storage ctx locals]
-      have hc : Binary.and.eval 0xff#256 (Binary.byte.eval (bi.eval storage ctx locals) (bv.eval storage ctx locals)) =
-          Binary.and.eval (Binary.byte.eval (bi.eval storage ctx locals) (bv.eval storage ctx locals)) 0xff#256 :=
+      simp only [Expression.eval, constant_sound x _ h0xff ctx locals]
+      have hc : Binary.and.eval 0xff#256 (Binary.byte.eval (bi.eval ctx locals) (bv.eval ctx locals)) =
+          Binary.and.eval (Binary.byte.eval (bi.eval ctx locals) (bv.eval ctx locals)) 0xff#256 :=
         BitVec.and_comm _ _
       rw [hc]
       exact (RuleList.and_byte_mask _ _).symm
@@ -1274,8 +1271,8 @@ theorem reduceAndPair_sound (x y out : Expression) (h : reduceAndPair x y = some
     by_cases haddr : constant x = some addressMask ∧ isAddressExpr y = true
     · simp only [haddr, and_self, ↓reduceIte, Option.some.injEq] at h
       subst out
-      simp only [Expression.eval, constant_sound x _ haddr.1 storage ctx locals]
-      exact (isAddressExpr_mask y haddr.2 storage ctx locals).symm
+      simp only [Expression.eval, constant_sound x _ haddr.1 ctx locals]
+      exact (isAddressExpr_mask y haddr.2 ctx locals).symm
     · simp only [haddr, ↓reduceIte] at h
       cases y with
       | unary uop nx =>
@@ -1306,16 +1303,16 @@ theorem reduceAndPair_sound (x y out : Expression) (h : reduceAndPair x y = some
             | none => simp [hcx] at h
             | some outerMask =>
               simp only [hcx] at h
-              have hx := constant_sound x outerMask hcx storage ctx locals
+              have hx := constant_sound x outerMask hcx ctx locals
               cases ha : reduceAlternatingBranch a b outerMask with
               | some res =>
                 simp only [ha, Option.some.injEq] at h; subst out
                 simp only [Expression.eval, hx]
-                exact reduceAlternatingBranch_sound a b res outerMask ha storage ctx locals
+                exact reduceAlternatingBranch_sound a b res outerMask ha ctx locals
               | none =>
                 simp only [ha] at h
                 simp only [Expression.eval, hx]
-                rw [reduceAlternatingBranch_sound b a out outerMask h storage ctx locals]
+                rw [reduceAlternatingBranch_sound b a out outerMask h ctx locals]
                 exact congrArg (Binary.and.eval outerMask) (BitVec.or_comm _ _)
         | «and» =>
           simp only [] at h
@@ -1324,16 +1321,16 @@ theorem reduceAndPair_sound (x y out : Expression) (h : reduceAndPair x y = some
             subst out
             simp only [Expression.eval]
             rcases hab with rfl | rfl
-            · have hc : Binary.and.eval (x.eval storage ctx locals)
-                  (Binary.and.eval (x.eval storage ctx locals) (b.eval storage ctx locals)) =
-                Binary.and.eval (Binary.and.eval (x.eval storage ctx locals) (b.eval storage ctx locals))
-                  (x.eval storage ctx locals) := BitVec.and_comm _ _
+            · have hc : Binary.and.eval (x.eval ctx locals)
+                  (Binary.and.eval (x.eval ctx locals) (b.eval ctx locals)) =
+                Binary.and.eval (Binary.and.eval (x.eval ctx locals) (b.eval ctx locals))
+                  (x.eval ctx locals) := BitVec.and_comm _ _
               rw [hc]
               exact (RuleList.and_drop_repeated_left _ _).symm
-            · have hc : Binary.and.eval (x.eval storage ctx locals)
-                  (Binary.and.eval (a.eval storage ctx locals) (x.eval storage ctx locals)) =
-                Binary.and.eval (Binary.and.eval (a.eval storage ctx locals) (x.eval storage ctx locals))
-                  (x.eval storage ctx locals) := BitVec.and_comm _ _
+            · have hc : Binary.and.eval (x.eval ctx locals)
+                  (Binary.and.eval (a.eval ctx locals) (x.eval ctx locals)) =
+                Binary.and.eval (Binary.and.eval (a.eval ctx locals) (x.eval ctx locals))
+                  (x.eval ctx locals) := BitVec.and_comm _ _
               rw [hc]
               exact (RuleList.and_drop_repeated_right _ _).symm
           · simp [hab] at h
@@ -1350,8 +1347,8 @@ theorem reduceAndPair_sound (x y out : Expression) (h : reduceAndPair x y = some
               next hawle =>
                 rcases h with ⟨hcov, rfl⟩
                 simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-                  constant_sound x mask hcx storage ctx locals,
-                  constant_sound a aw hca storage ctx locals]
+                  constant_sound x mask hcx ctx locals,
+                  constant_sound a aw hca ctx locals]
                 exact (RuleList.remove_covered_shr_mask mask aw _ hawle hcov).symm
         | shl =>
           simp only [] at h
@@ -1366,8 +1363,8 @@ theorem reduceAndPair_sound (x y out : Expression) (h : reduceAndPair x y = some
               next hawle =>
                 rcases h with ⟨hcov, rfl⟩
                 simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-                  constant_sound x mask hcx storage ctx locals,
-                  constant_sound a aw hca storage ctx locals]
+                  constant_sound x mask hcx ctx locals,
+                  constant_sound a aw hca ctx locals]
                 exact (RuleList.remove_covered_shl_mask mask aw _ hawle hcov).symm
           | none =>
             simp only [hcx] at h
@@ -1390,8 +1387,8 @@ theorem reduceAndPair_sound (x y out : Expression) (h : reduceAndPair x y = some
               next hblt =>
                 rcases h with ⟨hmask, rfl⟩
                 simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq,
-                  constant_sound x mask hcx storage ctx locals,
-                  constant_sound a bw hca storage ctx locals]
+                  constant_sound x mask hcx ctx locals,
+                  constant_sound a bw hca ctx locals]
                 exact (RuleList.strip_signextend_low_mask mask bw _ hblt hmask).symm
         | _ => simp at h
       | _ => simp at h
@@ -1410,8 +1407,8 @@ def reduceOrPair (x y : Expression) : Option Expression :=
   | _ => none
 
 theorem reduceOrPair_sound (x y out : Expression) (h : reduceOrPair x y = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary .or x y).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary .or x y).eval ctx locals := by
   unfold reduceOrPair at h
   cases y with
   | unary uop nx =>
@@ -1446,16 +1443,16 @@ theorem reduceOrPair_sound (x y out : Expression) (h : reduceOrPair x y = some o
         subst out
         simp only [Expression.eval]
         rcases hab with rfl | rfl
-        · have hc : Binary.or.eval (x.eval storage ctx locals)
-              (Binary.or.eval (x.eval storage ctx locals) (b.eval storage ctx locals)) =
-            Binary.or.eval (Binary.or.eval (x.eval storage ctx locals) (b.eval storage ctx locals))
-              (x.eval storage ctx locals) := BitVec.or_comm _ _
+        · have hc : Binary.or.eval (x.eval ctx locals)
+              (Binary.or.eval (x.eval ctx locals) (b.eval ctx locals)) =
+            Binary.or.eval (Binary.or.eval (x.eval ctx locals) (b.eval ctx locals))
+              (x.eval ctx locals) := BitVec.or_comm _ _
           rw [hc]
           exact (RuleList.or_drop_repeated_left _ _).symm
-        · have hc : Binary.or.eval (x.eval storage ctx locals)
-              (Binary.or.eval (a.eval storage ctx locals) (x.eval storage ctx locals)) =
-            Binary.or.eval (Binary.or.eval (a.eval storage ctx locals) (x.eval storage ctx locals))
-              (x.eval storage ctx locals) := BitVec.or_comm _ _
+        · have hc : Binary.or.eval (x.eval ctx locals)
+              (Binary.or.eval (a.eval ctx locals) (x.eval ctx locals)) =
+            Binary.or.eval (Binary.or.eval (a.eval ctx locals) (x.eval ctx locals))
+              (x.eval ctx locals) := BitVec.or_comm _ _
           rw [hc]
           exact (RuleList.or_drop_repeated_right _ _).symm
       · simp [hab] at h
@@ -1489,8 +1486,8 @@ theorem reduceSymmetricPair_commutes (op : Binary) (x y out : Expression)
 
 theorem reduceSymmetricPair_sound (op : Binary) (x y out : Expression)
     (h : reduceSymmetricPair op x y = some out)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    out.eval storage ctx locals = (Expression.binary op x y).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    out.eval ctx locals = (Expression.binary op x y).eval ctx locals := by
   cases op <;> simp only [reduceSymmetricPair] at h
   case add =>
     by_cases hx1 : constant x = some 1#256
@@ -1499,7 +1496,7 @@ theorem reduceSymmetricPair_sound (op : Binary) (x y out : Expression)
       | unary uop a =>
         cases uop <;> simp at h
         subst out
-        simp only [Expression.eval, constant_sound x _ hx1 storage ctx locals]
+        simp only [Expression.eval, constant_sound x _ hx1 ctx locals]
         exact ((RuleList.not_add_one_eq_neg _).2).symm
       | binary bop a b =>
         cases bop <;> simp at h
@@ -1513,8 +1510,8 @@ theorem reduceSymmetricPair_sound (op : Binary) (x y out : Expression)
         rcases h with ⟨rfl, rfl⟩
         exact (RuleList.sub_add_cancel_right _ _).symm
       | _ => simp at h
-  case «and» => exact reduceAndPair_sound x y out h storage ctx locals
-  case «or» => exact reduceOrPair_sound x y out h storage ctx locals
+  case «and» => exact reduceAndPair_sound x y out h ctx locals
+  case «or» => exact reduceOrPair_sound x y out h ctx locals
   case xor =>
     cases y with
     | binary bop a b =>
@@ -1547,26 +1544,26 @@ def reduceBinary (op : Binary) (a b : Expression) : Expression :=
         | none => regroup op a b
 
 theorem reduceBinary_sound (op : Binary) (a b : Expression)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    (reduceBinary op a b).eval storage ctx locals =
-      (Expression.binary op a b).eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    (reduceBinary op a b).eval ctx locals =
+      (Expression.binary op a b).eval ctx locals := by
   unfold reduceBinary
   split
   next x y hx hy =>
     simp only [Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq]
-    rw [constant_sound a x hx storage ctx locals, constant_sound b y hy storage ctx locals]
+    rw [constant_sound a x hx ctx locals, constant_sound b y hy ctx locals]
   all_goals
     split
-    next out hout => exact reduceRuleListBinary_sound op a b out hout storage ctx locals
+    next out hout => exact reduceRuleListBinary_sound op a b out hout ctx locals
     next =>
       split
-      next out hout => exact reduceSymmetricPair_sound op a b out hout storage ctx locals
+      next out hout => exact reduceSymmetricPair_sound op a b out hout ctx locals
       next =>
         split
         next out hout =>
-          rw [reduceSymmetricPair_sound op b a out hout storage ctx locals]
+          rw [reduceSymmetricPair_sound op b a out hout ctx locals]
           exact commute_sound op (reduceSymmetricPair_commutes op b a out hout) _ _
-        next => exact regroup_sound op a b storage ctx locals
+        next => exact regroup_sound op a b ctx locals
 
 def reduce : Expression → Expression
   | .literal value => .literal (BitVec.ofNat 256 value).toNat
@@ -1575,14 +1572,14 @@ def reduce : Expression → Expression
   | .ternary op a b c => reduceTernary op a b c
   | e => e
 
-theorem reduce_sound (e : Expression) (storage : Word → Word)
+theorem reduce_sound (e : Expression)
     (ctx : Context) (locals : String → Word) :
-    (reduce e).eval storage ctx locals = e.eval storage ctx locals := by
+    (reduce e).eval ctx locals = e.eval ctx locals := by
   cases e with
   | literal value => simp only [reduce, Expression.eval, BitVec.ofNat_toNat, BitVec.setWidth_eq]
-  | unary op arg => exact reduceUnary_sound op arg storage ctx locals
-  | binary op a b => exact reduceBinary_sound op a b storage ctx locals
-  | ternary op a b c => exact reduceTernary_sound op a b c storage ctx locals
+  | unary op arg => exact reduceUnary_sound op arg ctx locals
+  | binary op a b => exact reduceBinary_sound op a b ctx locals
+  | ternary op a b c => exact reduceTernary_sound op a b c ctx locals
   | _ => rfl
 
 def normalize : Nat → Expression → Expression
@@ -1596,9 +1593,9 @@ def normalize : Nat → Expression → Expression
     let changed := reduce children
     if changed = children then children else normalize fuel changed
 
-theorem normalize_sound (fuel : Nat) (e : Expression) (storage : Word → Word)
+theorem normalize_sound (fuel : Nat) (e : Expression)
     (ctx : Context) (locals : String → Word) :
-    (normalize fuel e).eval storage ctx locals = e.eval storage ctx locals := by
+    (normalize fuel e).eval ctx locals = e.eval ctx locals := by
   induction fuel generalizing e with
   | zero => rfl
   | succ fuel ih =>
@@ -1608,8 +1605,8 @@ theorem normalize_sound (fuel : Nat) (e : Expression) (storage : Word → Word)
 def equivalent (fuel : Nat) (a b : Expression) : Bool := decide (normalize fuel a = normalize fuel b)
 
 theorem equivalent_sound (fuel : Nat) (a b : Expression) (accepted : equivalent fuel a b = true)
-    (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    a.eval storage ctx locals = b.eval storage ctx locals := by
+    (ctx : Context) (locals : String → Word) :
+    a.eval ctx locals = b.eval ctx locals := by
   simp only [equivalent, decide_eq_true_eq] at accepted
   rw [← normalize_sound fuel a, ← normalize_sound fuel b, accepted]
 

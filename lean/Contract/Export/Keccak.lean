@@ -3,6 +3,7 @@
 // Copyright (C) 2026 OKcontract Pte. Ltd.
 -/
 import Contract.Check.Axioms
+import Contract.Hex
 
 /-! Ethereum Keccak-256 (136-byte sponge rate, 24-round Keccak-f[1600]
 permutation, legacy `0x01` domain separator rather than FIPS-202 SHA-3 `0x06`).
@@ -176,15 +177,7 @@ def hashBytes (input : List UInt8) : List UInt8 :=
 
 def hash (input : ByteArray) : ByteArray := ⟨(hashBytes input.toList).toArray⟩
 
-private def hexDigit (n : UInt8) : Char :=
-  if n == 0 then '0' else if n == 1 then '1' else if n == 2 then '2' else if n == 3 then '3'
-  else if n == 4 then '4' else if n == 5 then '5' else if n == 6 then '6' else if n == 7 then '7'
-  else if n == 8 then '8' else if n == 9 then '9' else if n == 10 then 'a' else if n == 11 then 'b'
-  else if n == 12 then 'c' else if n == 13 then 'd' else if n == 14 then 'e' else 'f'
-
-def hexBytes (bytes : List UInt8) : String :=
-  String.ofList <| bytes.foldr (fun b acc =>
-    hexDigit (b >>> (4 : UInt8)) :: hexDigit (b &&& (0x0f : UInt8)) :: acc) []
+def hexBytes (bytes : List UInt8) : String := Contract.Hex.encodeBytes bytes
 
 def hex (bytes : ByteArray) : String := hexBytes bytes.toList
 

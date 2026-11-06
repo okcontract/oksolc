@@ -17,3 +17,4 @@ import Compiler.Validation.Solidity
 import Compiler.Validation.Bytecode
 import Compiler.Validation.Audit
 import Compiler.Validation.Main
+import Compiler.MetaSpecs

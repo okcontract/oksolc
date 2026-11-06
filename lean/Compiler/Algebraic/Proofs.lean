@@ -3,6 +3,7 @@
 // Copyright (C) 2026 OKcontract Pte. Ltd.
 -/
 import Compiler.Algebraic.Rules
+import Contract.Evm.Machine
 
 /-! Kernel-checked soundness proofs for all 50 ordered rules exported from
 `src/libevmasm/algebraic_rules.zig`, including `SDIV`, `SLT`, and `SGT`
@@ -73,9 +74,9 @@ theorem production_rules_sound (rule : Rule) (member : rule ∈ productionRules)
     rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
   all_goals
     intro a b condition
-    simp only [Guard.Holds] at condition
+    simp only [Guard.Holds, maxWord] at condition
     subst_vars
-    simp only [Replacement.eval, Binary.eval, Contract.evmDiv, Contract.evmMod,
+    simp only [Replacement.eval, maxWord, Binary.eval, Contract.evmDiv, Contract.evmMod,
       Contract.evmShl_eq_shiftLeft, Contract.evmShr_eq_ushiftRight,
       sdiv_zero_right, sdiv_zero_left, sdiv_one_right, slt_irrefl,
       max_sub, mul_max, max_mul, positive_bool,
@@ -92,13 +93,30 @@ theorem production_selection_sound (op : Binary) (stage : Stage) (facts : Facts)
   select_sound productionRules production_rules_sound op stage facts a b reliable replacement selected
 
 theorem production_expression_sound (op : Binary) (stage : Stage) (facts : Facts)
-    (a b : Expression) (storage : Word → Word) (ctx : Contract.Context) (locals : String → Word)
-    (reliable : facts.Reliable (a.eval storage ctx locals) (b.eval storage ctx locals))
+    (a b : Expression) (ctx : Contract.Context) (locals : String → Word)
+    (reliable : facts.Reliable (a.eval ctx locals) (b.eval ctx locals))
     (replacement : Replacement)
     (selected : select productionRules op stage facts = some replacement) :
-    (Expression.binary op a b).eval storage ctx locals =
-      (replacement.expression a b).eval storage ctx locals := by
+    (Expression.binary op a b).eval ctx locals =
+      (replacement.expression a b).eval ctx locals := by
   rw [replacement_eval]
   exact production_selection_sound op stage facts _ _ reliable replacement selected
+
+/-- Production Zig `Instruction` backing bytes exported in `Rules.lean` decode to
+their exact canonical `Contract.Evm.WordOp` counterparts in `Contract.Evm.Machine`. -/
+theorem production_binary_opcode_sound (op : Binary) :
+    Contract.Evm.decodeWordOp [] 0 (UInt8.ofBitVec (productionBinaryOpcode op)) =
+      some (.binary op) := by
+  cases op <;> decide
+
+theorem production_ternary_opcode_sound (op : Ternary) :
+    Contract.Evm.decodeWordOp [] 0 (UInt8.ofBitVec (productionTernaryOpcode op)) =
+      some (.ternary op) := by
+  cases op <;> decide
+
+theorem production_nullary_opcode_sound (op : Nullary) :
+    Contract.Evm.decodeWordOp [] 0 (UInt8.ofBitVec (productionNullaryOpcode op)) =
+      some (.nullary op) := by
+  cases op <;> decide
 
 end Compiler.Algebraic

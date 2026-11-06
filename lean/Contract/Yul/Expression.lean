@@ -88,13 +88,12 @@ def Ternary.eval : Ternary → Word → Word → Word → Word
   | .mulmod, a, b, m => evmMulmod a b m
 
 theorem Nullary.eval_masked (ctx : Context) (op : Nullary) :
-    op.eval ctx &&& ((1#256 <<< 160) - 1#256) = op.eval ctx := by
+    op.eval ctx &&& addressMask = op.eval ctx := by
   cases op <;> exact Address.toWord_and_mask _
 
 inductive Expression where
   | literal (value : Nat)
   | variable (name : String)
-  | load (slot : Nat)
   | nullary (op : Nullary)
   | unary (op : Unary) (arg : Expression)
   | binary (op : Binary) (left right : Expression)
@@ -104,21 +103,18 @@ inductive Expression where
 def Expression.render : Expression → String
   | .literal n => toString n
   | .variable name => "$" ++ name
-  | .load slot => "sload(" ++ toString slot ++ ")"
   | .nullary op => op.name ++ "()"
   | .unary op a => op.name ++ "(" ++ a.render ++ ")"
   | .binary op a b => op.name ++ "(" ++ a.render ++ "," ++ b.render ++ ")"
   | .ternary op a b c => op.name ++ "(" ++ a.render ++ "," ++ b.render ++ "," ++ c.render ++ ")"
 
-def Expression.eval (storage : Word → Word) (ctx : Context) (locals : String → Word) :
-    Expression → Word
+def Expression.eval (ctx : Context) (locals : String → Word) : Expression → Word
   | .literal n => BitVec.ofNat 256 n
   | .variable name => locals name
-  | .load slot => storage (BitVec.ofNat 256 slot)
   | .nullary op => op.eval ctx
-  | .unary op a => op.eval (a.eval storage ctx locals)
-  | .binary op a b => op.eval (a.eval storage ctx locals) (b.eval storage ctx locals)
+  | .unary op a => op.eval (a.eval ctx locals)
+  | .binary op a b => op.eval (a.eval ctx locals) (b.eval ctx locals)
   | .ternary op a b c =>
-    op.eval (a.eval storage ctx locals) (b.eval storage ctx locals) (c.eval storage ctx locals)
+    op.eval (a.eval ctx locals) (b.eval ctx locals) (c.eval ctx locals)
 
 end Contract.Yul

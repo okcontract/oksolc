@@ -280,6 +280,17 @@ class VerificationSuiteTest(unittest.TestCase):
         bad = run_verify("word", req_bytes, json.dumps(tampered).encode("utf-8"))
         self.assertNotEqual(bad.returncode, 0)
 
+        # Negative control: unreachable invalid/undeclared input node in word request must be rejected
+        bad_dead_req = json.loads(req_bytes.decode("utf-8"))
+        bad_dead_req["nodes"].append({"input": "undeclared_dead_var"})
+        bad_dead_bytes = json.dumps(bad_dead_req).encode("utf-8")
+        tampered_dead = json.loads(exp.stdout.decode("utf-8"))
+        import hashlib
+
+        tampered_dead["requestSha256"] = hashlib.sha256(bad_dead_bytes).hexdigest()
+        bad_dead = run_verify("word", bad_dead_bytes, json.dumps(tampered_dead).encode("utf-8"))
+        self.assertNotEqual(bad_dead.returncode, 0)
+
     def test_public_preview_retained_fresh_and_corrupted(self) -> None:
         ver_dir = REPO_ROOT / "examples" / "verification"
         req_bytes = (ver_dir / "request.json").read_bytes()
@@ -354,6 +365,34 @@ class VerificationSuiteTest(unittest.TestCase):
                 "    }\n"
                 "}\n",
             ),
+            (
+                "PackedStorageAndPrecedence.sol",
+                "// SPDX-License-Identifier: GPL-3.0\npragma solidity ^0.8.0;\n"
+                "contract PackedStorageAndPrecedence {\n"
+                "    bool flagA = true;\n"
+                "    address owner;\n"
+                "    bool flagB = false;\n"
+                "    uint256 count = 7;\n"
+                "    constructor() {\n"
+                "        owner = msg.sender;\n"
+                "    }\n"
+                "    function flipAndSet(address nextOwner, bool b) external returns (bool) {\n"
+                "        flagA = !flagA;\n"
+                "        owner = nextOwner;\n"
+                "        flagB = b;\n"
+                "        return flagA;\n"
+                "    }\n"
+                "    function getOwner() external view returns (address) {\n"
+                "        return owner;\n"
+                "    }\n"
+                "    function getFlagB() external view returns (bool) {\n"
+                "        return flagB;\n"
+                "    }\n"
+                "    function checkPrec(uint256 a, uint256 b, uint256 c) external pure returns (bool) {\n"
+                "        return a == b & c;\n"
+                "    }\n"
+                "}\n",
+            ),
         ]
         for filename, source in corpus:
             req = make_standard_json_request(filename, source)
@@ -371,6 +410,46 @@ class VerificationSuiteTest(unittest.TestCase):
                 bad_sel["contracts"][filename][contract_name]["evm"]["methodIdentifiers"][first_sig] = "deadbeef"
                 bad_res = run_verify("standard-json", req_bytes, json.dumps(bad_sel).encode("utf-8"))
                 self.assertNotEqual(bad_res.returncode, 0, f"{filename} accepted corrupted selector")
+
+    def test_solidity_mutability_and_json_surrogate_controls(self) -> None:
+        import hashlib
+
+        # 1. Valid UTF-16 surrogate pair in Solidity comment inside request JSON is accepted
+        req_dict = make_standard_json_request("SurrogateOk.sol", "placeholder")
+        raw_req_str = json.dumps(req_dict).replace(
+            '"placeholder"',
+            '"// SPDX-License-Identifier: GPL-3.0\\n// Emoji: \\uD83D\\uDE00\\npragma solidity ^0.8.0;\\ncontract SurrogateOk { function ping() external pure returns (uint256) { return 1; } }\\n"',
+        )
+        req_bytes = raw_req_str.encode("utf-8")
+        comp = subprocess.run(
+            [str(OKSOLC_BIN), "--standard-json"],
+            input=req_bytes,
+            capture_output=True,
+            check=True,
+        )
+        ver = run_verify("standard-json", req_bytes, comp.stdout)
+        self.assertEqual(ver.returncode, 0, msg=ver.stderr)
+        self.assertTrue(json.loads(ver.stdout)["accepted"])
+
+        # 2. Lone high surrogate in JSON must be rejected by oksolc-verify
+        lone_req_bytes = raw_req_str.replace("\\uD83D\\uDE00", "\\uD83D").encode("utf-8")
+        lone_ver = run_verify("standard-json", lone_req_bytes, comp.stdout)
+        self.assertNotEqual(lone_ver.returncode, 0)
+
+        # 3. Spoofed source claiming `pure` while bytecode reads storage (`s`) is rejected by wellFormed
+        bad_pure_src = (
+            "// SPDX-License-Identifier: GPL-3.0\n"
+            "pragma solidity ^0.8.0;\n"
+            "contract BadPure {\n"
+            "    uint256 s;\n"
+            "    function readS() external pure returns (uint256) { return s; }\n"
+            "}\n"
+        )
+        bad_req = json.dumps(make_standard_json_request("BadPure.sol", bad_pure_src)).encode("utf-8")
+        fake_resp = json.loads(comp.stdout.decode("utf-8"))
+        fake_resp["requestSha256"] = hashlib.sha256(bad_req).hexdigest()
+        bad_pure_ver = run_verify("standard-json", bad_req, json.dumps(fake_resp).encode("utf-8"))
+        self.assertNotEqual(bad_pure_ver.returncode, 0)
 
 
 if __name__ == "__main__":

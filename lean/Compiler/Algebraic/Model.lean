@@ -46,8 +46,8 @@ def Guard.Holds : Guard → Word → Word → Prop
   | .right_zero, _, b => b = 0
   | .left_one, a, _ => a = 1
   | .right_one, _, b => b = 1
-  | .left_max, a, _ => a = BitVec.allOnes 256
-  | .right_max, _, b => b = BitVec.allOnes 256
+  | .left_max, a, _ => a = maxWord
+  | .right_max, _, b => b = maxWord
   | .equal, a, b => a = b
 
 def Guard.matches (guard : Guard) (facts : Facts) : Bool :=
@@ -56,8 +56,8 @@ def Guard.matches (guard : Guard) (facts : Facts) : Bool :=
   | .right_zero => decide (facts.right = some 0)
   | .left_one => decide (facts.left = some 1)
   | .right_one => decide (facts.right = some 1)
-  | .left_max => decide (facts.left = some (BitVec.allOnes 256))
-  | .right_max => decide (facts.right = some (BitVec.allOnes 256))
+  | .left_max => decide (facts.left = some maxWord)
+  | .right_max => decide (facts.right = some maxWord)
   | .equal => facts.equal
 
 def Guard.stage : Guard → Stage
@@ -66,7 +66,7 @@ def Guard.stage : Guard → Stage
 
 def Replacement.eval (replacement : Replacement) (a b : Word) : Word :=
   match replacement with
-  | .left => a | .right => b | .zero => 0 | .one => 1 | .max => BitVec.allOnes 256
+  | .left => a | .right => b | .zero => 0 | .one => 1 | .max => maxWord
   | .not_right => Unary.bitnot.eval b
   | .neg_left => Binary.sub.eval 0 a | .neg_right => Binary.sub.eval 0 b
   | .iszero_left => Unary.iszero.eval a | .iszero_right => Unary.iszero.eval b
@@ -85,9 +85,9 @@ def Replacement.expression (replacement : Replacement) (a b : Expression) : Expr
   | .bool_right => .unary .iszero (.unary .iszero b)
 
 theorem replacement_eval (replacement : Replacement) (a b : Expression)
-    (storage : Word → Word) (ctx : Contract.Context) (locals : String → Word) :
-    (replacement.expression a b).eval storage ctx locals =
-      replacement.eval (a.eval storage ctx locals) (b.eval storage ctx locals) := by
+    (ctx : Contract.Context) (locals : String → Word) :
+    (replacement.expression a b).eval ctx locals =
+      replacement.eval (a.eval ctx locals) (b.eval ctx locals) := by
   cases replacement <;> rfl
 
 def Rule.Sound (rule : Rule) : Prop :=

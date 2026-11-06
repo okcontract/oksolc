@@ -110,11 +110,16 @@ def finishCreation (before staged : World) (tx : Transaction) (target : Address)
       ⟨.exceptional, [], before, tx, 0⟩
   | other => observeFrame before staged tx target other
 
+/-- EIP-684 executable collision check on contract creation (`code = []` and `nonces = 0`). -/
+def canCreateAt (world : World) (target : Address) : Bool :=
+  world.code target == [] && world.nonces target == 0
+
 /-- Execute a Cancun contract-creation frame with EIP-3860 (`≤ 49152` initcode),
-EIP-161 initial nonce `1`, and staged balance-checked value transfer. -/
+EIP-684 collision rejection (`code = []` and `nonces = 0`), EIP-161 initial nonce `1`,
+and staged balance-checked value transfer. -/
 def executeCreation (initcode : List UInt8) (world : World) (tx : Transaction)
-    (ctx : Context) (_fresh : Fresh world ctx.self) (input : Input) (fuel gas : Nat) : Frame :=
-  if initcode.length ≤ 49152 then
+    (ctx : Context) (input : Input) (fuel gas : Nat) : Frame :=
+  if initcode.length ≤ 49152 && canCreateAt world ctx.self then
     match (world.prepare ctx.self).transfer ctx.caller ctx.self input.value with
     | none => ⟨.exceptional, [], world, tx, 0⟩
     | some staged =>
@@ -268,10 +273,10 @@ theorem executeCall_conserves_total (world : World) (tx : Transaction) (ctx : Co
 
 /-- End-to-end Ether conservation across `executeCreation`. -/
 theorem executeCreation_conserves_total (initcode : List UInt8) (world : World) (tx : Transaction)
-    (ctx : Context) (fresh : Fresh world ctx.self) (input : Input) (fuel gas : Nat)
+    (ctx : Context) (input : Input) (fuel gas : Nat)
     (addrs : List Address) (hnodup : addrs.Nodup)
     (hc : ctx.caller ∈ addrs) (hs : ctx.self ∈ addrs) :
-    totalBalance (executeCreation initcode world tx ctx fresh input fuel gas).world addrs =
+    totalBalance (executeCreation initcode world tx ctx input fuel gas).world addrs =
       totalBalance world addrs := by
   unfold executeCreation
   split
@@ -297,6 +302,18 @@ theorem executeCreation_conserves_total (initcode : List UInt8) (world : World) 
         | reverted _ => rfl
       | exceptional | unsupported _ | exhausted => rfl
   · rfl
+
+theorem canCreateAt_of_fresh {world : World} {target : Address} (h : Fresh world target) :
+    canCreateAt world target = true := by
+  rcases h with ⟨hcode, hnonce, _⟩
+  simp [canCreateAt, hcode, hnonce]
+
+theorem executeCreation_collision_rejects (initcode : List UInt8) (world : World) (tx : Transaction)
+    (ctx : Context) (input : Input) (fuel gas : Nat)
+    (hcoll : canCreateAt world ctx.self = false) :
+    executeCreation initcode world tx ctx input fuel gas =
+      ⟨.exceptional, [], world, tx, 0⟩ := by
+  simp [executeCreation, hcoll]
 
 theorem store_other_account (world : World) (target other : Address) (slots : Slots) (hne : other ≠ target) :
     (world.store target slots).storage other = world.storage other := by

@@ -7,12 +7,13 @@ import Contract.Export.Keccak
 import Contract.Yul.Expression
 import Contract.Evm.World
 
-/-! In-kernel Solidity source syntax, deterministic lexer/parser, Keccak-256
-method selector calculation, and executable source contract/deployment
-reference semantics over `Contract.Evm.World`.
+/-! In-kernel Solidity source syntax, deterministic lexer/parser, exact Solidity
+binary operator precedence, tight 32-byte storage slot packing, static
+well-formedness + mutability checking, Keccak-256 method selector calculation,
+and executable source contract/deployment reference semantics over `Contract.Evm.World`.
 
-Unlike external Python source extractors, every character of the admitted
-Solidity source is tokenized, parsed, and evaluated inside Lean. -/
+Unlike external source extractors, every character of the admitted Solidity
+source is tokenized, parsed, statically validated, and evaluated inside Lean. -/
 namespace Compiler.Validation.Solidity
 
 open Contract
@@ -32,19 +33,26 @@ def Ty.abiName : Ty → String
   | .address => "address"
   | .bytes32 => "bytes32"
 
+/-- Storage width in bytes matching `src/libsolidity/ast/types.zig:storageBytes`. -/
+def Ty.storageBytes : Ty → Nat
+  | .bool => 1
+  | .address => 20
+  | .uint256 => 32
+  | .bytes32 => 32
+
 /-- ABI calldata word validity check: `uint256` and `bytes32` accept all 256-bit
-words; `address` requires the upper 96 bits to be zero; `bool` requires `< 2`. -/
+words; `address` requires the upper 96 bits to be zero (`addressMask`); `bool` requires `< 2`. -/
 def Ty.validWord : Ty → Word → Bool
   | .uint256 => fun _ => true
   | .bytes32 => fun _ => true
-  | .address => fun w => (w &&& BitVec.ofNat 256 ((1 <<< 160) - 1)) == w
+  | .address => fun w => (w &&& addressMask) == w
   | .bool => fun w => decide (w.toNat < 2)
 
-/-- Mask/normalize an expression word to its declared return type. -/
+/-- Mask/normalize an expression word to its declared value type. -/
 def Ty.normalizeWord : Ty → Word → Word
   | .uint256 => id
   | .bytes32 => id
-  | .address => fun w => w &&& BitVec.ofNat 256 ((1 <<< 160) - 1)
+  | .address => fun w => w &&& addressMask
   | .bool => fun w => boolWord (w != 0#256)
 
 inductive Mutability where
@@ -155,17 +163,170 @@ def FuncDecl.selectorWord (fn : FuncDecl) : Word :=
 def panicPayload (code : Nat) : List UInt8 :=
   [0x4e, 0x48, 0x7b, 0x71] ++ wordBytes (BitVec.ofNat 256 code)
 
-/-- Look up sequential storage slot index `0, 1, ...` by variable name. -/
-def findSlotAux (name : String) (idx : Nat) : List StateVar → Option (Nat × Ty)
-  | [] => none
-  | v :: vs => if v.name == name then some (idx, v.ty) else findSlotAux name (idx + 1) vs
+/-! ## Tight 32-Byte Storage Slot Packing -/
 
-def ContractSpec.findSlot (spec : ContractSpec) (name : String) : Option (Nat × Ty) :=
-  findSlotAux name 0 spec.stateVars
+/-- Storage location of a value-type state variable: 256-bit `slot` index and
+low-order `byteOffset` (`0 .. 31`) within that slot. -/
+structure StorageEntry where
+  name : String
+  ty : Ty
+  slot : Nat
+  byteOffset : Nat
+  deriving DecidableEq, Repr, Inhabited
+
+private def computeStorageLayoutAux (slot byteOffset : Nat) :
+    List StateVar → List StorageEntry × Nat
+  | [] =>
+    let totalSlots := if byteOffset > 0 then slot + 1 else slot
+    ([], totalSlots)
+  | v :: vs =>
+    let bytes := v.ty.storageBytes
+    let (curSlot, curOff) :=
+      if byteOffset + bytes > 32 then (slot + 1, 0) else (slot, byteOffset)
+    let entry : StorageEntry := ⟨v.name, v.ty, curSlot, curOff⟩
+    let (nextSlot, nextOff) :=
+      if curOff + bytes ≤ 32 then (curSlot, curOff + bytes) else (curSlot + 1, 0)
+    let (rest, totalSlots) := computeStorageLayoutAux nextSlot nextOff vs
+    (entry :: rest, totalSlots)
+
+/-- Compute packed `(slot, byteOffset)` entries and total allocated storage slot
+count matching `src/libsolidity/ast/types.zig:computeStorageOffsetsAlloc`. -/
+def ContractSpec.storageLayoutWithSize (spec : ContractSpec) : List StorageEntry × Nat :=
+  computeStorageLayoutAux 0 0 spec.stateVars
+
+def ContractSpec.storageLayout (spec : ContractSpec) : List StorageEntry :=
+  spec.storageLayoutWithSize.1
+
+def ContractSpec.storageSlotCount (spec : ContractSpec) : Nat :=
+  spec.storageLayoutWithSize.2
+
+def ContractSpec.findStorageVar (spec : ContractSpec) (name : String) : Option StorageEntry :=
+  spec.storageLayout.find? (fun e => e.name == name)
+
+/-- Low-order mask covering `numBytes` bytes (`0..32`). -/
+def storageByteMask (numBytes : Nat) : Word :=
+  if numBytes ≥ 32 then maxWord
+  else (1#256 <<< (8 * numBytes)) - 1#256
+
+/-- Extract and clean a packed state variable from `storage`, matching
+`extract_from_storage_value_offset_*` + `cleanup_from_storage_*` in
+`yul_util_functions.zig` (first mask to `storageBytes`, then normalize for the value type). -/
+def readPackedVar (storage : Slots) (entry : StorageEntry) : Word :=
+  let raw := storage (BitVec.ofNat 256 entry.slot)
+  let shifted := raw >>> (8 * entry.byteOffset)
+  let masked := shifted &&& storageByteMask entry.ty.storageBytes
+  entry.ty.normalizeWord masked
+
+/-- Read-modify-write bitfield update of a packed state variable in `storage`, matching
+`update_byte_slice_*` in `yul_util_functions.zig`. -/
+def writePackedVar (storage : Slots) (entry : StorageEntry) (val : Word) : Slots :=
+  let key := BitVec.ofNat 256 entry.slot
+  let cleaned := entry.ty.normalizeWord val
+  let shiftBits := 8 * entry.byteOffset
+  let mask := storageByteMask entry.ty.storageBytes <<< shiftBits
+  let oldSlot := storage key
+  let newSlot := (oldSlot &&& ~~~mask) ||| ((cleaned <<< shiftBits) &&& mask)
+  writeSlot storage key newSlot
 
 def findParamAux (name : String) (idx : Nat) : List Param → Option (Nat × Ty)
   | [] => none
   | p :: ps => if p.name == name then some (idx, p.ty) else findParamAux name (idx + 1) ps
+
+/-! ## Static Well-Formedness & Mutability Checker -/
+
+/-- Check expression scope and state/environment read permissions (`allowsRead` is
+`false` for `pure`, `true` for `view` / `nonpayable` / `payable`). -/
+def checkExprWF (stateNames paramNames : List String) (allowsRead : Bool) : Expr → Bool
+  | .lit _ | .boolLit _ => true
+  | .var name =>
+    if paramNames.contains name then true
+    else if stateNames.contains name then allowsRead
+    else false
+  | .cast _ arg => checkExprWF stateNames paramNames allowsRead arg
+  | .msgSender | .msgValue | .addressThis | .txOrigin | .blockCoinbase => allowsRead
+  | .unary _ arg => checkExprWF stateNames paramNames allowsRead arg
+  | .binary _ lhs rhs =>
+    checkExprWF stateNames paramNames allowsRead lhs &&
+    checkExprWF stateNames paramNames allowsRead rhs
+
+def checkStmtWF (stateNames paramNames : List String) (mutability : Mutability)
+    (retTy : Option Ty) : Nat → Stmt → Bool
+  | 0, _ => false
+  | _ + 1, .assign slotName rhs =>
+    mutability.allowsWrite &&
+    !paramNames.contains slotName &&
+    stateNames.contains slotName &&
+    checkExprWF stateNames paramNames mutability.allowsRead rhs
+  | _ + 1, .returnVoid => retTy.isNone
+  | _ + 1, .returnVal expr =>
+    retTy.isSome && checkExprWF stateNames paramNames mutability.allowsRead expr
+  | depth + 1, .uncheckedBlock body =>
+    checkStmtsWFAux (checkStmtWF stateNames paramNames mutability retTy depth) body
+  | depth + 1, .ifElse cond thenBody elseBody =>
+    checkExprWF stateNames paramNames mutability.allowsRead cond &&
+    checkStmtsWFAux (checkStmtWF stateNames paramNames mutability retTy depth) thenBody &&
+    checkStmtsWFAux (checkStmtWF stateNames paramNames mutability retTy depth) elseBody
+where
+  checkStmtsWFAux (checkOne : Stmt → Bool) : List Stmt → Bool
+    | [] => true
+    | s :: ss => checkOne s && checkStmtsWFAux checkOne ss
+
+def checkStmtsWF (stateNames paramNames : List String) (mutability : Mutability)
+    (retTy : Option Ty) (depth : Nat) : List Stmt → Bool
+  | [] => true
+  | s :: ss =>
+    checkStmtWF stateNames paramNames mutability retTy depth s &&
+    checkStmtsWF stateNames paramNames mutability retTy depth ss
+
+private def checkStateInitsWF (allStateNames : List String) :
+    List String → List StateVar → Bool
+  | _, [] => true
+  | seenNames, v :: vs =>
+    let initOk := match v.init with
+      | none => true
+      | some expr => checkExprWF seenNames [] true expr
+    !allStateNames.isEmpty && initOk && checkStateInitsWF allStateNames (seenNames ++ [v.name]) vs
+
+private def hasUniqueStrings : List String → Bool
+  | [] => true
+  | x :: xs => !xs.contains x && hasUniqueStrings xs
+
+private def hasUniqueByteLists : List (List UInt8) → Bool
+  | [] => true
+  | x :: xs => !xs.contains x && hasUniqueByteLists xs
+
+private def checkFuncWF (stateNames : List String) (fn : FuncDecl) : Bool :=
+  let paramNames := fn.params.map Param.name
+  hasUniqueStrings paramNames &&
+  paramNames.all (fun n => !stateNames.contains n) &&
+  checkStmtsWF stateNames paramNames fn.mutability fn.returnTy 64 fn.body
+
+/-- Static contract well-formedness check enforced by both `parseSource` and
+evaluation entrypoints:
+1. State variable names are pairwise distinct.
+2. State variable initializers reference only previously declared state variables.
+3. Constructor body (if present) obeys nonpayable/payable write/read rules and returns void.
+4. Function signatures and 4-byte selectors are pairwise distinct.
+5. Each function has unique parameter names, no parameter/state-variable shadowing,
+   mutability-sound reads/writes (`pure` forbids state & env reads and state writes;
+   `view` forbids state writes), and return statements matching `returnTy`. -/
+def ContractSpec.wellFormed (spec : ContractSpec) : Bool :=
+  let stateNames := spec.stateVars.map StateVar.name
+  let stateUnique := hasUniqueStrings stateNames
+  let initsOk :=
+    if spec.stateVars.isEmpty then true
+    else checkStateInitsWF stateNames [] spec.stateVars
+  let ctorOk := match spec.ctor with
+    | none => true
+    | some c =>
+      let m : Mutability := if c.payable then .payable else .nonpayable
+      checkStmtsWF stateNames [] m none 64 c.body
+  let sigsUnique := hasUniqueStrings (spec.functions.map FuncDecl.signature)
+  let selsUnique := hasUniqueByteLists (spec.functions.map FuncDecl.selectorBytes)
+  let funcsOk := spec.functions.all (checkFuncWF stateNames)
+  stateUnique && initsOk && ctorOk && sigsUnique && selsUnique && funcsOk
+
+/-! ## Executable Source Reference Semantics -/
 
 inductive EvalOutcome (α : Type) where
   | ok (val : α)
@@ -173,8 +334,9 @@ inductive EvalOutcome (α : Type) where
   | invalidSource
   deriving DecidableEq, Repr
 
-/-- Source expression evaluation under `checked` / `unchecked` Solidity 0.8 arithmetic. -/
-def evalExpr (spec : ContractSpec) (params : List Param) (checked : Bool)
+/-- Source expression evaluation under `checked` / `unchecked` Solidity 0.8 arithmetic
+and mutability `allowsRead` enforcement. -/
+def evalExpr (spec : ContractSpec) (params : List Param) (allowsRead checked : Bool)
     (ctx : Context) (input : Input) (storage : Slots) : Expr → EvalOutcome Word
   | .lit w => .ok w
   | .boolLit b => .ok (boolWord b)
@@ -183,47 +345,48 @@ def evalExpr (spec : ContractSpec) (params : List Param) (checked : Bool)
     | some (idx, ty) =>
       .ok (ty.normalizeWord (loadWord input.calldata (4 + 32 * idx)))
     | none =>
-      match spec.findSlot name with
-      | some (slot, ty) => .ok (ty.normalizeWord (storage (BitVec.ofNat 256 slot)))
-      | none => .invalidSource
+      if !allowsRead then .invalidSource
+      else match spec.findStorageVar name with
+        | some entry => .ok (readPackedVar storage entry)
+        | none => .invalidSource
   | .cast ty arg =>
-    match evalExpr spec params checked ctx input storage arg with
+    match evalExpr spec params allowsRead checked ctx input storage arg with
     | .ok w => .ok (ty.normalizeWord w)
     | other => other
-  | .msgSender => .ok ctx.caller.toWord
-  | .msgValue => .ok input.value
-  | .addressThis => .ok ctx.self.toWord
-  | .txOrigin => .ok ctx.origin.toWord
-  | .blockCoinbase => .ok ctx.coinbase.toWord
+  | .msgSender => if allowsRead then .ok ctx.caller.toWord else .invalidSource
+  | .msgValue => if allowsRead then .ok input.value else .invalidSource
+  | .addressThis => if allowsRead then .ok ctx.self.toWord else .invalidSource
+  | .txOrigin => if allowsRead then .ok ctx.origin.toWord else .invalidSource
+  | .blockCoinbase => if allowsRead then .ok ctx.coinbase.toWord else .invalidSource
   | .unary op arg =>
-    match evalExpr spec params checked ctx input storage arg with
+    match evalExpr spec params allowsRead checked ctx input storage arg with
     | .ok w =>
       match op with
       | .bitNot => .ok (~~~w)
       | .lnot => .ok (boolWord (w == 0#256))
     | other => other
   | .binary .land lhs rhs =>
-    match evalExpr spec params checked ctx input storage lhs with
+    match evalExpr spec params allowsRead checked ctx input storage lhs with
     | .ok a =>
       if a == 0#256 then .ok 0#256
-      else match evalExpr spec params checked ctx input storage rhs with
+      else match evalExpr spec params allowsRead checked ctx input storage rhs with
         | .ok b => .ok (boolWord (b != 0#256))
         | other => other
     | other => other
   | .binary .lor lhs rhs =>
-    match evalExpr spec params checked ctx input storage lhs with
+    match evalExpr spec params allowsRead checked ctx input storage lhs with
     | .ok a =>
       if a != 0#256 then .ok 1#256
-      else match evalExpr spec params checked ctx input storage rhs with
+      else match evalExpr spec params allowsRead checked ctx input storage rhs with
         | .ok b => .ok (boolWord (b != 0#256))
         | other => other
     | other => other
   | .binary op lhs rhs =>
-    match evalExpr spec params checked ctx input storage lhs with
+    match evalExpr spec params allowsRead checked ctx input storage lhs with
     | .revert r => .revert r
     | .invalidSource => .invalidSource
     | .ok a =>
-      match evalExpr spec params checked ctx input storage rhs with
+      match evalExpr spec params allowsRead checked ctx input storage rhs with
       | .revert r => .revert r
       | .invalidSource => .invalidSource
       | .ok b =>
@@ -273,18 +436,18 @@ def evalStmtsWith (evalStmtFn : Bool → Slots → Stmt → StmtStep)
     | .cont storage' => evalStmtsWith evalStmtFn checked storage' ss
     | term => term
 
-def evalStmtAux (spec : ContractSpec) (params : List Param) (retTy : Option Ty)
-    (ctx : Context) (input : Input) : Nat → Bool → Slots → Stmt → StmtStep
+def evalStmtAux (spec : ContractSpec) (params : List Param) (mutability : Mutability)
+    (retTy : Option Ty) (ctx : Context) (input : Input) : Nat → Bool → Slots → Stmt → StmtStep
   | 0, _, _, _ => .invalidSource
   | _ + 1, checked, storage, .assign slotName rhs =>
-    match spec.findSlot slotName with
-    | none => .invalidSource
-    | some (slotIdx, ty) =>
-      match evalExpr spec params checked ctx input storage rhs with
-      | .ok val =>
-        .cont (writeSlot storage (BitVec.ofNat 256 slotIdx) (ty.normalizeWord val))
-      | .revert r => .reverted r
-      | .invalidSource => .invalidSource
+    if !mutability.allowsWrite then .invalidSource
+    else match spec.findStorageVar slotName with
+      | none => .invalidSource
+      | some entry =>
+        match evalExpr spec params mutability.allowsRead checked ctx input storage rhs with
+        | .ok val => .cont (writePackedVar storage entry val)
+        | .revert r => .reverted r
+        | .invalidSource => .invalidSource
   | _ + 1, _, storage, .returnVoid =>
     match retTy with
     | none => .returned [] storage
@@ -293,25 +456,26 @@ def evalStmtAux (spec : ContractSpec) (params : List Param) (retTy : Option Ty)
     match retTy with
     | none => .invalidSource
     | some ty =>
-      match evalExpr spec params checked ctx input storage expr with
+      match evalExpr spec params mutability.allowsRead checked ctx input storage expr with
       | .ok val => .returned (wordBytes (ty.normalizeWord val)) storage
       | .revert r => .reverted r
       | .invalidSource => .invalidSource
   | depth + 1, _, storage, .uncheckedBlock body =>
-    evalStmtsWith (evalStmtAux spec params retTy ctx input depth) false storage body
+    evalStmtsWith (evalStmtAux spec params mutability retTy ctx input depth) false storage body
   | depth + 1, checked, storage, .ifElse cond thenBody elseBody =>
-    match evalExpr spec params checked ctx input storage cond with
+    match evalExpr spec params mutability.allowsRead checked ctx input storage cond with
     | .ok val =>
       if val != 0#256 then
-        evalStmtsWith (evalStmtAux spec params retTy ctx input depth) checked storage thenBody
+        evalStmtsWith (evalStmtAux spec params mutability retTy ctx input depth) checked storage thenBody
       else
-        evalStmtsWith (evalStmtAux spec params retTy ctx input depth) checked storage elseBody
+        evalStmtsWith (evalStmtAux spec params mutability retTy ctx input depth) checked storage elseBody
     | .revert r => .reverted r
     | .invalidSource => .invalidSource
 
-def evalStmts (spec : ContractSpec) (params : List Param) (retTy : Option Ty)
-    (checked : Bool) (ctx : Context) (input : Input) (storage : Slots) (stmts : List Stmt) : StmtStep :=
-  evalStmtsWith (evalStmtAux spec params retTy ctx input 64) checked storage stmts
+def evalStmts (spec : ContractSpec) (params : List Param) (mutability : Mutability)
+    (retTy : Option Ty) (checked : Bool) (ctx : Context) (input : Input)
+    (storage : Slots) (stmts : List Stmt) : StmtStep :=
+  evalStmtsWith (evalStmtAux spec params mutability retTy ctx input 64) checked storage stmts
 
 def checkAbiParams (calldata : List UInt8) : Nat → List Param → Bool
   | _, [] => true
@@ -321,7 +485,9 @@ def checkAbiParams (calldata : List UInt8) : Nat → List Param → Bool
 /-- Source-level ABI dispatch + execution for a Solidity contract at runtime. -/
 def evalRuntime (spec : ContractSpec) (ctx : Context) (input : Input) (storage : Slots) :
     Option (Halt × Slots) :=
-  if input.calldata.isEmpty && spec.hasReceive then
+  if !spec.wellFormed then
+    none
+  else if input.calldata.isEmpty && spec.hasReceive then
     some (.returned [], storage)
   else if input.calldata.length < 4 then
     some (.reverted [], storage)
@@ -335,7 +501,7 @@ def evalRuntime (spec : ContractSpec) (ctx : Context) (input : Input) (storage :
          !checkAbiParams input.calldata 0 fn.params then
         some (.reverted [], storage)
       else
-        match evalStmts spec fn.params fn.returnTy true ctx input storage fn.body with
+        match evalStmts spec fn.params fn.mutability fn.returnTy true ctx input storage fn.body with
         | .returned bytes storage' => some (.returned bytes, storage')
         | .cont storage' =>
           match fn.returnTy with
@@ -345,36 +511,43 @@ def evalRuntime (spec : ContractSpec) (ctx : Context) (input : Input) (storage :
         | .invalidSource => none
 
 def evalStateInits (spec : ContractSpec) (ctx : Context) (input : Input)
-    (idx : Nat) (storage : Slots) : List StateVar → StmtStep
+    (storage : Slots) : List StateVar → StmtStep
   | [] => .cont storage
   | v :: vs =>
     match v.init with
-    | none => evalStateInits spec ctx input (idx + 1) storage vs
+    | none => evalStateInits spec ctx input storage vs
     | some expr =>
-      match evalExpr spec [] true ctx input storage expr with
-      | .ok val =>
-        let storage' := writeSlot storage (BitVec.ofNat 256 idx) (v.ty.normalizeWord val)
-        evalStateInits spec ctx input (idx + 1) storage' vs
-      | .revert bytes => .reverted bytes
-      | .invalidSource => .invalidSource
+      match spec.findStorageVar v.name with
+      | none => .invalidSource
+      | some entry =>
+        match evalExpr spec [] true true ctx input storage expr with
+        | .ok val =>
+          let storage' := writePackedVar storage entry val
+          evalStateInits spec ctx input storage' vs
+        | .revert bytes => .reverted bytes
+        | .invalidSource => .invalidSource
 
-/-- Source-level constructor + state-variable initialization semantics. -/
+/-- Source-level constructor + packed state-variable initialization semantics. -/
 def evalDeployment (spec : ContractSpec) (runtimeBytes : List UInt8)
     (ctx : Context) (input : Input) (storage : Slots) : Option (Halt × Slots) :=
-  let ctorPayable := match spec.ctor with | some c => c.payable | none => false
-  if !ctorPayable && input.value != 0#256 then
-    some (.reverted [], storage)
+  if !spec.wellFormed then
+    none
   else
-    match evalStateInits spec ctx input 0 storage spec.stateVars with
-    | .reverted bytes => some (.reverted bytes, storage)
-    | .invalidSource | .returned _ _ => none
-    | .cont storageAfterInit =>
-      let ctorBody := match spec.ctor with | some c => c.body | none => []
-      match evalStmts spec [] none true ctx input storageAfterInit ctorBody with
-      | .cont storageFinal | .returned _ storageFinal =>
-        some (.returned runtimeBytes, storageFinal)
+    let ctorPayable := match spec.ctor with | some c => c.payable | none => false
+    if !ctorPayable && input.value != 0#256 then
+      some (.reverted [], storage)
+    else
+      match evalStateInits spec ctx input storage spec.stateVars with
       | .reverted bytes => some (.reverted bytes, storage)
-      | .invalidSource => none
+      | .invalidSource | .returned _ _ => none
+      | .cont storageAfterInit =>
+        let ctorMut : Mutability := if ctorPayable then .payable else .nonpayable
+        let ctorBody := match spec.ctor with | some c => c.body | none => []
+        match evalStmts spec [] ctorMut none true ctx input storageAfterInit ctorBody with
+        | .cont storageFinal | .returned _ storageFinal =>
+          some (.returned runtimeBytes, storageFinal)
+        | .reverted bytes => some (.reverted bytes, storage)
+        | .invalidSource => none
 
 /-! ## Deterministic In-Kernel Lexer and Recursive-Descent Parser -/
 
@@ -390,23 +563,35 @@ inductive Token where
   | amp | ampamp | pipe | pipepipe
   deriving DecidableEq, Repr, Inhabited
 
+private def isAsciiAlpha (c : Char) : Bool :=
+  (65 ≤ c.val && c.val ≤ 90) || (97 ≤ c.val && c.val ≤ 122)
+
+private def isAsciiDigit (c : Char) : Bool :=
+  48 ≤ c.val && c.val ≤ 57
+
+private def isAsciiAlphanum (c : Char) : Bool :=
+  isAsciiAlpha c || isAsciiDigit c
+
+private def isAsciiSpace (c : Char) : Bool :=
+  c == ' ' || c == '\n' || c == '\r' || c == '\t'
+
 private def isIdentStart (c : Char) : Bool :=
-  c.isAlpha || c == '_' || c == '$'
+  isAsciiAlpha c || c == '_' || c == '$'
 
 private def isIdentCont (c : Char) : Bool :=
-  c.isAlphanum || c == '_' || c == '$'
+  isAsciiAlphanum c || c == '_' || c == '$'
 
 private def hexDigitVal (c : Char) : Option Nat :=
-  if '0' ≤ c ∧ c ≤ '9' then some (c.toNat - '0'.toNat)
-  else if 'a' ≤ c ∧ c ≤ 'f' then some (10 + c.toNat - 'a'.toNat)
-  else if 'A' ≤ c ∧ c ≤ 'F' then some (10 + c.toNat - 'A'.toNat)
+  if 48 ≤ c.val && c.val ≤ 57 then some (c.toNat - 48)
+  else if 97 ≤ c.val && c.val ≤ 102 then some (10 + c.toNat - 97)
+  else if 65 ≤ c.val && c.val ≤ 70 then some (10 + c.toNat - 65)
   else none
 
 private def parseDecChars : List Char → Nat → Option Nat
   | [], acc => some acc
   | '_' :: cs, acc => parseDecChars cs acc
   | c :: cs, acc =>
-    if '0' ≤ c ∧ c ≤ '9' then parseDecChars cs (acc * 10 + (c.toNat - '0'.toNat))
+    if isAsciiDigit c then parseDecChars cs (acc * 10 + (c.toNat - 48))
     else none
 
 private def parseHexChars : List Char → Nat → Option Nat
@@ -443,7 +628,7 @@ def tokenizeAux : Nat → List Char → List Token → Option (List Token)
   | 0, _, _ => none
   | _ + 1, [], acc => some acc.reverse
   | fuel + 1, c :: cs, acc =>
-    if c.isWhitespace then
+    if isAsciiSpace c then
       tokenizeAux fuel cs acc
     else if c == '/' then
       match cs with
@@ -456,11 +641,11 @@ def tokenizeAux : Nat → List Char → List Token → Option (List Token)
     else if isIdentStart c then
       let (word, rest) := takeWhileAux isIdentCont [c] cs
       tokenizeAux fuel rest (.ident (String.ofList word) :: acc)
-    else if c.isDigit then
-      let (numChars, rest) := takeWhileAux (fun ch => ch.isAlphanum || ch == '_') [c] cs
+    else if isAsciiDigit c then
+      let (numChars, rest) := takeWhileAux (fun ch => isAsciiAlphanum ch || ch == '_') [c] cs
       match parseNumberToken numChars with
       | some n =>
-        if n < 2 ^ 256 then tokenizeAux fuel rest (.num n :: acc) else none
+        if Nat.ble (Nat.shiftRight n 256) 0 then tokenizeAux fuel rest (.num n :: acc) else none
       | none => none
     else
       match c, cs with
@@ -557,6 +742,10 @@ def parseUnaryAux (parseExprFn : List Token → Option (Expr × List Token)) :
     | _ => none
   | _, _ => none
 
+/-- Parse a Solidity expression using the exact binary precedence hierarchy from
+`src/liblangutil/token.zig:precedence`:
+`pUnary` → `* / %` (13) → `+ -` (12) → `<< >>` (11) → `&` (10) → `^` (9) →
+`|` (8) → `< <= > >=` (7) → `== !=` (6) → `&&` (5) → `||` (4). -/
 def parseExpr : Nat → List Token → Option (Expr × List Token)
   | 0, _ => none
   | depth + 1, toks =>
@@ -568,14 +757,14 @@ def parseExpr : Nat → List Token → Option (Expr × List Token)
       | .plus => some .add | .minus => some .sub | _ => none)
     let pShift := mkLeftAssoc opFuel pAdd (fun
       | .shl => some .shl | .shr => some .shr | _ => none)
-    let pRel := mkLeftAssoc opFuel pShift (fun
+    let pBitAnd := mkLeftAssoc opFuel pShift (fun | .amp => some .bitAnd | _ => none)
+    let pBitXor := mkLeftAssoc opFuel pBitAnd (fun | .caret => some .bitXor | _ => none)
+    let pBitOr := mkLeftAssoc opFuel pBitXor (fun | .pipe => some .bitOr | _ => none)
+    let pRel := mkLeftAssoc opFuel pBitOr (fun
       | .lt => some .lt | .le => some .le | .gt => some .gt | .ge => some .ge | _ => none)
     let pEq := mkLeftAssoc opFuel pRel (fun
       | .eqeq => some .eq | .neq => some .ne | _ => none)
-    let pBitAnd := mkLeftAssoc opFuel pEq (fun | .amp => some .bitAnd | _ => none)
-    let pBitXor := mkLeftAssoc opFuel pBitAnd (fun | .caret => some .bitXor | _ => none)
-    let pBitOr := mkLeftAssoc opFuel pBitXor (fun | .pipe => some .bitOr | _ => none)
-    let pLand := mkLeftAssoc opFuel pBitOr (fun | .ampamp => some .land | _ => none)
+    let pLand := mkLeftAssoc opFuel pEq (fun | .ampamp => some .land | _ => none)
     let pLor := mkLeftAssoc opFuel pLand (fun | .pipepipe => some .lor | _ => none)
     pLor toks
 
@@ -642,28 +831,29 @@ private def parseParamsAux : Nat → List Param → List Token → Option (List 
   | _, _, _ => none
 
 private def parseFuncQualifiers :
-    Nat → Bool → Mutability → Option Ty → List Token →
+    Nat → Bool → Option Mutability → Option Ty → List Token →
     Option (Mutability × Option Ty × List Token)
   | 0, _, _, _, _ => none
-  | _ + 1, true, m, retTy, .lbrace :: rest => some (m, retTy, rest)
+  | _ + 1, true, m?, retTy, .lbrace :: rest =>
+    some (m?.getD .nonpayable, retTy, rest)
   | _ + 1, false, _, _, .lbrace :: _ => none
-  | fuel + 1, _, m, retTy, .ident "external" :: rest =>
-    parseFuncQualifiers fuel true m retTy rest
-  | fuel + 1, vis, _, retTy, .ident "pure" :: rest =>
-    parseFuncQualifiers fuel vis .pure retTy rest
-  | fuel + 1, vis, _, retTy, .ident "view" :: rest =>
-    parseFuncQualifiers fuel vis .view retTy rest
-  | fuel + 1, vis, _, retTy, .ident "payable" :: rest =>
-    parseFuncQualifiers fuel vis .payable retTy rest
-  | fuel + 1, vis, m, none,
+  | fuel + 1, false, m?, retTy, .ident "external" :: rest =>
+    parseFuncQualifiers fuel true m? retTy rest
+  | fuel + 1, vis, none, retTy, .ident "pure" :: rest =>
+    parseFuncQualifiers fuel vis (some .pure) retTy rest
+  | fuel + 1, vis, none, retTy, .ident "view" :: rest =>
+    parseFuncQualifiers fuel vis (some .view) retTy rest
+  | fuel + 1, vis, none, retTy, .ident "payable" :: rest =>
+    parseFuncQualifiers fuel vis (some .payable) retTy rest
+  | fuel + 1, vis, m?, none,
     .ident "returns" :: .lparen :: .ident tyStr :: .rparen :: rest =>
     match parseTyName tyStr with
-    | some ty => parseFuncQualifiers fuel vis m (some ty) rest
+    | some ty => parseFuncQualifiers fuel vis m? (some ty) rest
     | none => none
-  | fuel + 1, vis, m, none,
+  | fuel + 1, vis, m?, none,
     .ident "returns" :: .lparen :: .ident tyStr :: .ident _ :: .rparen :: rest =>
     match parseTyName tyStr with
-    | some ty => parseFuncQualifiers fuel vis m (some ty) rest
+    | some ty => parseFuncQualifiers fuel vis m? (some ty) rest
     | none => none
   | _, _, _, _, _ => none
 
@@ -679,7 +869,7 @@ private def parseContractItems :
   | fuel + 1, spec, .ident "function" :: .ident fnName :: .lparen :: rest =>
     match parseParamsAux fuel [] rest with
     | some (params, rest1) =>
-      match parseFuncQualifiers fuel false .nonpayable none rest1 with
+      match parseFuncQualifiers fuel false none none rest1 with
       | some (m, retTy, rest2) =>
         match parseBlockBody fuel [] rest2 with
         | some (body, rest3) =>
@@ -744,17 +934,27 @@ private def parseTopContracts :
     | none => none
   | _, _, _ => none
 
-/-- Parse a Solidity source file inside Lean and select the target contract
+/-- Parse a Solidity source file inside Lean, enforce pairwise unique contract names
+and static well-formedness (`ContractSpec.wellFormed`), and select the target contract
 (or the unique contract when `target? = none`). -/
-def parseSource (source : String) (target? : Option String := none) : Option ContractSpec := do
-  let toks ← tokenize source
-  let fuel := 4 * toks.length + 16
-  let contracts ← parseTopContracts fuel [] toks
-  match target? with
-  | some name => contracts.find? (fun c => c.name == name)
-  | none =>
-    match contracts with
-    | [c] => some c
-    | _ => none
+def parseSource (source : String) (target? : Option String := none) : Option ContractSpec :=
+  match tokenize source with
+  | none => none
+  | some toks =>
+    let fuel := 4 * toks.length + 16
+    match parseTopContracts fuel [] toks with
+    | none => none
+    | some contracts =>
+      if !hasUniqueStrings (contracts.map ContractSpec.name) then none
+      else
+        let selected? := match target? with
+          | some name => contracts.find? (fun (c : ContractSpec) => c.name == name)
+          | none =>
+            match contracts with
+            | [c] => some c
+            | _ => none
+        match selected? with
+        | some selected => if selected.wellFormed then some selected else none
+        | none => none
 
 end Compiler.Validation.Solidity

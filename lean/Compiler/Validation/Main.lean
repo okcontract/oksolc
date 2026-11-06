@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 // Copyright (C) 2026 OKcontract Pte. Ltd.
 -/
+import Contract.Hex
 import Compiler.Validation.GraphFailure
 import Compiler.Validation.WordBlock
 import Compiler.Validation.Bytecode
@@ -183,12 +184,18 @@ private def skipWs : List Char → List Char
   | [] => []
   | c :: cs => if isWs c then skipWs cs else c :: cs
 
-private def hexVal? (c : Char) : Option Nat :=
-  if '0' ≤ c && c ≤ '9' then some (c.toNat - '0'.toNat)
-  else if 'a' ≤ c && c ≤ 'f' then some (10 + (c.toNat - 'a'.toNat))
-  else if 'A' ≤ c && c ≤ 'F' then some (10 + (c.toNat - 'A'.toNat))
-  else none
+private def parseHex4? : List Char → Option (Nat × List Char)
+  | h1 :: h2 :: h3 :: h4 :: rest => do
+    let d1 ← Contract.Hex.charNibble? h1
+    let d2 ← Contract.Hex.charNibble? h2
+    let d3 ← Contract.Hex.charNibble? h3
+    let d4 ← Contract.Hex.charNibble? h4
+    some (((d1 * 16 + d2) * 16 + d3) * 16 + d4, rest)
+  | _ => none
 
+/-- RFC 8259 §7 JSON string decoder: decodes UTF-16 surrogate pairs
+(`0xD800..0xDBFF` followed immediately by `\u` + `0xDC00..0xDFFF`) into their
+supplementary Unicode scalar value and rejects lone UTF-16 surrogates (`0xD800..0xDFFF`). -/
 private def parseStringChars : Nat → List Char → List Char → Option (String × List Char)
   | 0, _, _ => none
   | _ + 1, _, [] => none
@@ -203,16 +210,21 @@ private def parseStringChars : Nat → List Char → List Char → Option (Strin
     | 'n' => parseStringChars fuel ('\n' :: acc) rest
     | 'r' => parseStringChars fuel ('\r' :: acc) rest
     | 't' => parseStringChars fuel ('\t' :: acc) rest
-    | 'u' =>
-      match rest with
-      | h1 :: h2 :: h3 :: h4 :: rest' => do
-        let d1 ← hexVal? h1
-        let d2 ← hexVal? h2
-        let d3 ← hexVal? h3
-        let d4 ← hexVal? h4
-        let code := ((d1 * 16 + d2) * 16 + d3) * 16 + d4
+    | 'u' => do
+      let (code, rest') ← parseHex4? rest
+      if 0xD800 ≤ code && code ≤ 0xDBFF then
+        match rest' with
+        | '\\' :: 'u' :: rest2 => do
+          let (low, rest3) ← parseHex4? rest2
+          if 0xDC00 ≤ low && low ≤ 0xDFFF then
+            let scalar := 0x10000 + (code - 0xD800) * 1024 + (low - 0xDC00)
+            parseStringChars fuel (Char.ofNat scalar :: acc) rest3
+          else none
+        | _ => none
+      else if 0xDC00 ≤ code && code ≤ 0xDFFF then
+        none
+      else
         parseStringChars fuel (Char.ofNat code :: acc) rest'
-      | _ => none
     | _ => none
   | fuel + 1, acc, c :: rest =>
     if c.toNat < 0x20 then none
@@ -307,12 +319,20 @@ def escapeJsonString (s : String) : String :=
     | '\n' => 'n' :: '\\' :: acc
     | '\r' => 'r' :: '\\' :: acc
     | '\t' => 't' :: '\\' :: acc
-    | _ => c :: acc
+    | _ =>
+      if c.toNat == 0x08 then 'b' :: '\\' :: acc
+      else if c.toNat == 0x0c then 'f' :: '\\' :: acc
+      else if c.toNat < 0x20 then
+        let b := UInt8.ofNat c.toNat
+        let hi := Contract.Hex.nibbleChar (b >>> (4 : UInt8))
+        let lo := Contract.Hex.nibbleChar (b &&& (0x0f : UInt8))
+        lo :: hi :: '0' :: '0' :: 'u' :: '\\' :: acc
+      else c :: acc
   String.ofList ((s.toList.foldl step []).reverse)
 
 end JsonParser
 
-/-! ## Hex, Decimal, and Identifier Parsers -/
+/-! ## Decimal and Identifier Parsers -/
 
 def parseDecimalWordLiteral? (s : String) : Option Nat := do
   let chars := s.toList
@@ -334,17 +354,6 @@ def validGraphName (s : String) : Bool :=
   !cs.isEmpty && cs.length ≤ 64 &&
     cs.all fun c =>
       ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z') || ('0' ≤ c && c ≤ '9') || c == '_' || c == '$'
-
-def decodeHexBytes? (s : String) : Option (List UInt8) :=
-  let rec go : List Char → List UInt8 → Option (List UInt8)
-    | [], acc => some acc.reverse
-    | [_], _ => none
-    | hi :: lo :: rest, acc => do
-      let h ← JsonParser.hexVal? hi
-      let l ← JsonParser.hexVal? lo
-      go rest (UInt8.ofNat (h * 16 + l) :: acc)
-  let trimmed := if s.startsWith "0x" || s.startsWith "0X" then (s.drop 2).toString else s
-  go trimmed.toList []
 
 /-! ## Graph & Word Node Decoders -/
 
@@ -474,16 +483,27 @@ def verifyGraph (reqBytes : ByteArray) (reqJson respJson : JsonVal) : Except Str
 
   if resultIds.length != before.length then
     .error "resultIds length does not match source nodes length"
-  if resultIds[beforeRoot]? != some afterRoot then
+  else if hSel : resultIds[beforeRoot]? = some afterRoot then
+    let fuel := before.length + after.length + 64
+    if hRoot : validate fuel before after beforeRoot afterRoot = true then
+      if hInv : Inventory.validate fuel before after resultIds cache = true then
+        let _cert :
+            (∀ ctx locals,
+              Inventory.Preserves before after resultIds cache ctx locals ∧
+              ∃ value,
+                evaluate before beforeRoot ctx locals = some value ∧
+                evaluate after afterRoot ctx locals = some value) :=
+          fun ctx locals =>
+            Inventory.certify fuel before after resultIds cache beforeRoot afterRoot hInv hSel ctx locals
+        let _rootCert := fun ctx locals =>
+          validate_sound fuel before after beforeRoot afterRoot hRoot ctx locals
+        return s!"\{\"accepted\":true,\"mode\":\"graph\",\"requestSha256\":\"{expectedSha}\",\"sourceNodes\":{before.length},\"optimizedNodes\":{after.length},\"cacheEntries\":{cache.length}}"
+      else
+        .error "inventory and CSE cache equivalence check failed"
+    else
+      .error "root DAG normalization equivalence check failed"
+  else
     .error "selected root does not match resultIds[beforeRoot]"
-
-  let fuel := before.length + after.length + 64
-  if !validate fuel before after beforeRoot afterRoot then
-    .error "root DAG normalization equivalence check failed"
-  if !Inventory.validate fuel before after resultIds cache then
-    .error "inventory and CSE cache equivalence check failed"
-
-  return s!"\{\"accepted\":true,\"mode\":\"graph\",\"requestSha256\":\"{expectedSha}\",\"sourceNodes\":{before.length},\"optimizedNodes\":{after.length},\"cacheEntries\":{cache.length}}"
 
 /-! ## Mode 2: `graph-failure` Validator -/
 
@@ -542,30 +562,14 @@ def verifyGraphFailure (reqBytes : ByteArray) (reqJson respJson : JsonVal) : Exc
   let observations ← (obsArr.mapM decodeObservation?).elim (.error "invalid observation payload") .ok
 
   let fuel := before.length + 64
-  if !Failure.validateSweep fuel before beforeRoot observations then
+  if hSweep : Failure.validateSweep fuel before beforeRoot observations = true then
+    let _cert := fun ctx locals =>
+      Failure.certifySweep fuel before beforeRoot observations hSweep ctx locals
+    return s!"\{\"accepted\":true,\"mode\":\"graph-failure\",\"requestSha256\":\"{expectedSha}\",\"observations\":{observations.length}}"
+  else
     .error "allocation-cut sweep failed Failure.validateSweep"
 
-  return s!"\{\"accepted\":true,\"mode\":\"graph-failure\",\"requestSha256\":\"{expectedSha}\",\"observations\":{observations.length}}"
-
 /-! ## Mode 3: `word` Validator -/
-
-/-- Lower admitted Solidity word-expression nodes (where shifts have `(value, count)` order)
-to EVM `Node`s (where shifts have `(count, value)` order), rejecting unsupported source ops
-even in unreachable nodes, matching `src/compiler_word_export.zig`. -/
-def lowerWordNode? (params : List String) : Node → Option Node
-  | .input name =>
-    if params.contains name then some (.input name) else none
-  | .literal n => some (.literal n)
-  | .nullary _ => none
-  | .unary .bitnot arg => some (.unary .bitnot arg)
-  | .unary _ _ => none
-  | .binary op left right =>
-    match op with
-    | .add | .sub | .mul | .and | .or | .xor => some (.binary op left right)
-    | .shl => some (.binary .shl right left)
-    | .shr => some (.binary .shr right left)
-    | _ => none
-  | .ternary _ _ _ _ => none
 
 def verifyWord (reqBytes : ByteArray) (reqJson respJson : JsonVal) : Except String String := do
   let reqFields ← (reqJson.asObj?).elim (.error "request must be JSON object") .ok
@@ -582,26 +586,32 @@ def verifyWord (reqBytes : ByteArray) (reqJson respJson : JsonVal) : Except Stri
     .error "invalid or duplicate word parameters"
   let rawNodes ← (reqJson.field? "nodes" >>= decodeNodes?).elim (.error "invalid word nodes") .ok
   let root ← (reqJson.field? "root" >>= JsonVal.asNat?).elim (.error "invalid word root") .ok
-  let loweredNodes ← (rawNodes.mapM (lowerWordNode? params)).elim (.error "unsupported source word operation") .ok
-  let sourceExpr ← (expand loweredNodes root).elim (.error "invalid node reference in word DAG") .ok
+  match hLow : WordBlock.lowerSourceNodes params rawNodes with
+  | none => .error "unsupported source word operation"
+  | some loweredNodes =>
+    match hExp : expand loweredNodes root with
+    | none => .error "invalid node reference in word DAG"
+    | some sourceExpr =>
+      let respFields ← (respJson.asObj?).elim (.error "response must be JSON object") .ok
+      if respFields.length != 3 then .error "unexpected fields in word response"
+      let respSchema ← (respJson.field? "schema" >>= JsonVal.asStr?).elim (.error "missing response schema") .ok
+      if respSchema != "oksolc.compiler-word-response.v1" then
+        .error s!"unsupported word response schema: {respSchema}"
+      let respSha ← (respJson.field? "requestSha256" >>= JsonVal.asStr?).elim (.error "missing requestSha256") .ok
+      let expectedSha := Sha256.hexDigest reqBytes
+      if respSha != expectedSha then
+        .error s!"requestSha256 mismatch: expected {expectedSha}, got {respSha}"
+      let hexCode ← (respJson.field? "bytecode" >>= JsonVal.asStr?).elim (.error "missing bytecode") .ok
+      let codeBytes ← (Contract.Hex.decodeBytes? hexCode).elim (.error "invalid hex bytecode") .ok
 
-  let respFields ← (respJson.asObj?).elim (.error "response must be JSON object") .ok
-  if respFields.length != 3 then .error "unexpected fields in word response"
-  let respSchema ← (respJson.field? "schema" >>= JsonVal.asStr?).elim (.error "missing response schema") .ok
-  if respSchema != "oksolc.compiler-word-response.v1" then
-    .error s!"unsupported word response schema: {respSchema}"
-  let respSha ← (respJson.field? "requestSha256" >>= JsonVal.asStr?).elim (.error "missing requestSha256") .ok
-  let expectedSha := Sha256.hexDigest reqBytes
-  if respSha != expectedSha then
-    .error s!"requestSha256 mismatch: expected {expectedSha}, got {respSha}"
-  let hexCode ← (respJson.field? "bytecode" >>= JsonVal.asStr?).elim (.error "missing bytecode") .ok
-  let codeBytes ← (decodeHexBytes? hexCode).elim (.error "invalid hex bytecode") .ok
-
-  let fuel := loweredNodes.length + codeBytes.length + 64
-  if !WordBlock.validate fuel codeBytes params sourceExpr then
-    .error "word bytecode failed WordBlock.validate against source semantics"
-
-  return s!"\{\"accepted\":true,\"mode\":\"word\",\"requestSha256\":\"{expectedSha}\",\"bytecodeBytes\":{codeBytes.length},\"parameters\":{params.length}}"
+      let fuel := loweredNodes.length + codeBytes.length + 64
+      if hVal : WordBlock.validate fuel codeBytes params sourceExpr = true then
+        let _cert := fun input env locals s hpc hstack =>
+          WordBlock.validateSource_sound fuel codeBytes params rawNodes loweredNodes root sourceExpr
+            hLow hExp hVal input env locals s hpc hstack
+        return s!"\{\"accepted\":true,\"mode\":\"word\",\"requestSha256\":\"{expectedSha}\",\"bytecodeBytes\":{codeBytes.length},\"parameters\":{params.length}}"
+      else
+        .error "word bytecode failed WordBlock.validate against source semantics"
 
 /-! ## Mode 4: `standard-json` Validator -/
 
@@ -641,7 +651,7 @@ private def decodeMethodIds? (j : JsonVal) : Option (List (String × List UInt8)
   let fields ← j.asObj?
   fields.mapM fun (sig, hexVal) => do
     let hexStr ← hexVal.asStr?
-    let bytes ← decodeHexBytes? hexStr
+    let bytes ← Contract.Hex.decodeBytes? hexStr
     if bytes.length == 4 then some (sig, bytes) else none
 
 def verifyStandardJson (reqBytes respBytes : ByteArray) (reqJson respJson : JsonVal) : Except String String := do
@@ -674,26 +684,27 @@ def verifyStandardJson (reqBytes respBytes : ByteArray) (reqJson respJson : Json
     (.error "missing evm.deployedBytecode.object") .ok
   let methodIdsJson ← (evmObj.field? "methodIdentifiers").elim (.error "missing evm.methodIdentifiers") .ok
 
-  let creationBytes ← (decodeHexBytes? creationHex).elim (.error "invalid creation hex bytecode") .ok
-  let runtimeBytes ← (decodeHexBytes? runtimeHex).elim (.error "invalid deployed hex bytecode") .ok
+  let creationBytes ← (Contract.Hex.decodeBytes? creationHex).elim (.error "invalid creation hex bytecode") .ok
+  let runtimeBytes ← (Contract.Hex.decodeBytes? runtimeHex).elim (.error "invalid deployed hex bytecode") .ok
   let methodIds ← (decodeMethodIds? methodIdsJson).elim (.error "invalid methodIdentifiers map") .ok
   if creationBytes.isEmpty || runtimeBytes.isEmpty then
     .error "empty creation or deployed bytecode"
 
-  if !Bytecode.validateContractArtifact spec creationBytes runtimeBytes methodIds then
+  if hArt : Bytecode.validateContractArtifact spec creationBytes runtimeBytes methodIds = true then
+    let _cert := Bytecode.validateContractArtifact_sound spec creationBytes runtimeBytes methodIds hArt
+    let isPublicPreview :=
+      sourceContent == Bytecode.previewSource &&
+      creationBytes == Bytecode.previewCreationBytes &&
+      runtimeBytes == Bytecode.previewRuntimeBytes
+
+    let reqSha := Sha256.hexDigest reqBytes
+    let respSha := Sha256.hexDigest respBytes
+    let escapedContract := JsonParser.escapeJsonString spec.name
+    let escapedSource := JsonParser.escapeJsonString sourceName
+    let previewFlag := if isPublicPreview then "true" else "false"
+    return s!"\{\"accepted\":true,\"mode\":\"standard-json\",\"source\":\"{escapedSource}\",\"contract\":\"{escapedContract}\",\"requestSha256\":\"{reqSha}\",\"responseSha256\":\"{respSha}\",\"functions\":{spec.functions.length},\"stateVars\":{spec.stateVars.length},\"creationBytes\":{creationBytes.length},\"runtimeBytes\":{runtimeBytes.length},\"universalPreviewTheorem\":{previewFlag}}"
+  else
     .error s!"contract {spec.name} failed semantic bytecode validation against source specification"
-
-  let isPublicPreview :=
-    sourceContent == Bytecode.previewSource &&
-    creationBytes == Bytecode.previewCreationBytes &&
-    runtimeBytes == Bytecode.previewRuntimeBytes
-
-  let reqSha := Sha256.hexDigest reqBytes
-  let respSha := Sha256.hexDigest respBytes
-  let escapedContract := JsonParser.escapeJsonString spec.name
-  let escapedSource := JsonParser.escapeJsonString sourceName
-  let previewFlag := if isPublicPreview then "true" else "false"
-  return s!"\{\"accepted\":true,\"mode\":\"standard-json\",\"source\":\"{escapedSource}\",\"contract\":\"{escapedContract}\",\"requestSha256\":\"{reqSha}\",\"responseSha256\":\"{respSha}\",\"functions\":{spec.functions.length},\"stateVars\":{spec.stateVars.length},\"creationBytes\":{creationBytes.length},\"runtimeBytes\":{runtimeBytes.length},\"universalPreviewTheorem\":{previewFlag}}"
 
 end Compiler.Validation.Cli
 

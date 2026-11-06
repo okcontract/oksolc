@@ -93,6 +93,7 @@ jobs:
         working-directory: lean
         run: |
           lake --quiet --rehash build Contract Compiler oksolc-verify
+          LEAN_PATH=.lake/build/lib/lean leanchecker --fresh Contract
           LEAN_PATH=.lake/build/lib/lean leanchecker --fresh Compiler
 
       - name: Run end-to-end verification corpus and negative controls
