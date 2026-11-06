@@ -1,0 +1,90 @@
+/-
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2026 OKcontract Pte. Ltd.
+-/
+import Contract.Check.Axioms
+import Compiler.Algebraic.Proofs
+import Compiler.Algebraic.RuleListProofs
+
+/-! Kernel axiom audit for all production algebraic table theorems and procedural
+`RuleList` rewrite theorems. Every theorem must depend solely on Lean's three
+standard foundational axioms (`propext`, `Classical.choice`, `Quot.sound`). -/
+namespace Compiler.Algebraic.Audit
+
+#audit_contract_proof Compiler.Algebraic.replacement_eval
+#audit_contract_proof Compiler.Algebraic.matches_sound
+#audit_contract_proof Compiler.Algebraic.select_sound
+#audit_contract_proof Compiler.Algebraic.production_rules_sound
+#audit_contract_proof Compiler.Algebraic.production_selection_sound
+#audit_contract_proof Compiler.Algebraic.production_expression_sound
+
+#audit_contract_proof Compiler.Algebraic.RuleList.and_byte_mask
+#audit_contract_proof Compiler.Algebraic.RuleList.byte_31_eq_and
+#audit_contract_proof Compiler.Algebraic.RuleList.shl_ge_256
+#audit_contract_proof Compiler.Algebraic.RuleList.shr_ge_256
+#audit_contract_proof Compiler.Algebraic.RuleList.byte_ge_32
+#audit_contract_proof Compiler.Algebraic.RuleList.signextend_ge_31
+#audit_contract_proof Compiler.Algebraic.RuleList.xor_cancel_left
+#audit_contract_proof Compiler.Algebraic.RuleList.xor_cancel_right
+#audit_contract_proof Compiler.Algebraic.RuleList.add_sub_cancel_left
+#audit_contract_proof Compiler.Algebraic.RuleList.add_sub_cancel_right
+#audit_contract_proof Compiler.Algebraic.RuleList.sub_add_cancel_left
+#audit_contract_proof Compiler.Algebraic.RuleList.sub_add_cancel_right
+#audit_contract_proof Compiler.Algebraic.RuleList.sub_sub_cancel
+#audit_contract_proof Compiler.Algebraic.RuleList.not_add_one_eq_neg
+#audit_contract_proof Compiler.Algebraic.RuleList.demorgan_not_or
+#audit_contract_proof Compiler.Algebraic.RuleList.demorgan_not_and
+#audit_contract_proof Compiler.Algebraic.RuleList.or_absorb_and_left
+#audit_contract_proof Compiler.Algebraic.RuleList.or_absorb_and_right
+#audit_contract_proof Compiler.Algebraic.RuleList.and_absorb_or_left
+#audit_contract_proof Compiler.Algebraic.RuleList.and_absorb_or_right
+#audit_contract_proof Compiler.Algebraic.RuleList.or_complement
+#audit_contract_proof Compiler.Algebraic.RuleList.and_complement
+#audit_contract_proof Compiler.Algebraic.RuleList.and_drop_repeated_right
+#audit_contract_proof Compiler.Algebraic.RuleList.and_drop_repeated_left
+#audit_contract_proof Compiler.Algebraic.RuleList.or_drop_repeated_right
+#audit_contract_proof Compiler.Algebraic.RuleList.or_drop_repeated_left
+#audit_contract_proof Compiler.Algebraic.RuleList.bitnot_bitnot
+#audit_contract_proof Compiler.Algebraic.RuleList.iszero_triple
+#audit_contract_proof Compiler.Algebraic.RuleList.iszero_iszero_eq
+#audit_contract_proof Compiler.Algebraic.RuleList.iszero_iszero_lt
+#audit_contract_proof Compiler.Algebraic.RuleList.iszero_iszero_gt
+#audit_contract_proof Compiler.Algebraic.RuleList.iszero_iszero_slt
+#audit_contract_proof Compiler.Algebraic.RuleList.iszero_iszero_sgt
+#audit_contract_proof Compiler.Algebraic.RuleList.iszero_xor_eq
+#audit_contract_proof Compiler.Algebraic.RuleList.iszero_sub_eq
+#audit_contract_proof Compiler.Algebraic.RuleList.signextend_nested_min
+#audit_contract_proof Compiler.Algebraic.RuleList.signextend_idempotent
+#audit_contract_proof Compiler.Algebraic.RuleList.strip_signextend_low_mask
+#audit_contract_proof Compiler.Algebraic.RuleList.address_mask_idempotent
+#audit_contract_proof Compiler.Algebraic.RuleList.mod_pow2_eq_and
+#audit_contract_proof Compiler.Algebraic.RuleList.mul_pow2_eq_shl
+#audit_contract_proof Compiler.Algebraic.RuleList.div_pow2_eq_shr
+#audit_contract_proof Compiler.Algebraic.RuleList.mul_shl_one_eq_shl
+#audit_contract_proof Compiler.Algebraic.RuleList.div_shl_one_eq_shr
+#audit_contract_proof Compiler.Algebraic.RuleList.exp_zero_base
+#audit_contract_proof Compiler.Algebraic.RuleList.exp_one_base
+#audit_contract_proof Compiler.Algebraic.RuleList.exp_two_base
+#audit_contract_proof Compiler.Algebraic.RuleList.exp_max_base
+#audit_contract_proof Compiler.Algebraic.RuleList.shl_nested
+#audit_contract_proof Compiler.Algebraic.RuleList.shr_nested
+#audit_contract_proof Compiler.Algebraic.RuleList.shr_of_shl_combine
+#audit_contract_proof Compiler.Algebraic.RuleList.shl_of_shr_combine
+#audit_contract_proof Compiler.Algebraic.RuleList.distribute_alternating_mask
+#audit_contract_proof Compiler.Algebraic.RuleList.remove_covered_shl_mask
+#audit_contract_proof Compiler.Algebraic.RuleList.remove_covered_shr_mask
+#audit_contract_proof Compiler.Algebraic.RuleList.and_shl_distribute
+#audit_contract_proof Compiler.Algebraic.RuleList.sub_const_eq_add_neg
+#audit_contract_proof Compiler.Algebraic.RuleList.sub_nested_reassociate
+#audit_contract_proof Compiler.Algebraic.RuleList.signextend_shr_eq_sar
+#audit_contract_proof Compiler.Algebraic.RuleList.byte_shl
+#audit_contract_proof Compiler.Algebraic.RuleList.byte_shr_zero
+#audit_contract_proof Compiler.Algebraic.RuleList.byte_shr
+#audit_contract_proof Compiler.Algebraic.RuleList.shl_signextend
+#audit_contract_proof Compiler.Algebraic.RuleList.shl_and_const
+#audit_contract_proof Compiler.Algebraic.RuleList.shr_and_const
+#audit_contract_proof Compiler.Algebraic.RuleList.add_mod_pow2_eq_addmod
+#audit_contract_proof Compiler.Algebraic.RuleList.mul_mod_pow2_eq_mulmod
+#audit_contract_proof Compiler.Algebraic.RuleList.sub_add_self_cancel
+
+end Compiler.Algebraic.Audit

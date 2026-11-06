@@ -65,6 +65,7 @@ pub const liblangutil = struct {
 
 pub const libevmasm = struct {
     pub const abstract_assembly_stack = @import("libevmasm/abstract_assembly_stack.zig");
+    pub const algebraic_rules = @import("libevmasm/algebraic_rules.zig");
     pub const assembly = @import("libevmasm/assembly.zig");
     pub const assembly_item = @import("libevmasm/assembly_item.zig");
     pub const cse_chunk_cache = @import("libevmasm/cse_chunk_cache.zig");
