@@ -6,12 +6,6 @@ internal use in developing [Chainwall](https://chainwall.org).
 Its goal is to provide an alternative implementation of Solidity for development
 purposes, allowing faster iteration on the developer experience.
 
-**We don’t consider `oksolc` to be production ready for deploying smart
-contracts onchain, and recommend using the original solc compiler for
-deployment. That said, we strive to be byte-compatible at this stage with
-Solidity 0.8.36, apart from the documented exceptions below. Other deviations in
-compiler output should be considered bugs and reported in Issues.**
-
 The supported compilation path is the optimized, via-IR compilation through the
 Standard JSON interface.
 
