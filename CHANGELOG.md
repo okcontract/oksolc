@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Import optional Lean 4.29.0 compiler proofs, source-binding checks and sound
+  validators for selected optimizer and Solidity/EVM artifacts, with scoped
+  trust-boundary documentation and verification CI. This is partial compiler
+  verification; ordinary builds do not require Lean.
+
 ## 0.2.4 - 2026-11-03
 
 Solidity compatibility target: `0.8.36`.

@@ -1,0 +1,30 @@
+name: Verification proof or model gap
+description: Report a missing correspondence, unsupported case, or incorrect verification claim
+title: 'verification: '
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A rejected model observation is not automatically a compiler bug.
+        For a suspected vulnerability, use the private reporting route in SECURITY.md.
+  - type: textarea
+    id: endpoint
+    attributes:
+      label: Affected endpoint and source revision
+      description: Give the commit, module, theorem or artifact profile, and the exact claim at issue.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and reproduction
+      description: Include a minimal public input, command, actual result and expected result. Distinguish proof rejection, resource failure and native behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: completion
+    attributes:
+      label: Missing premise or proposed completion criterion
+      description: Identify the consuming theorem and what must be derived without expanding the trust boundary.
+    validations:
+      required: true

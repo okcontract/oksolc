@@ -1,0 +1,1365 @@
+{
+  "schema": "oksolc.recursive-constructor-call-inventory.v1",
+  "boundaryVersion": 2,
+  "scope": "constructor wrappers and every constructor call in the extracted dispatcher/helper bodies; excludes test bodies and other graph entry points",
+  "semanticAcceptance": false,
+  "sources": [
+    {
+      "path": "src/libevmasm/algebraic_rules.zig",
+      "sha256": "d2c488ec16a8dcd03b89c992a1f4e0a21c998184a84d94aef65d0cd0781ee3fa",
+      "sites": [
+        {
+          "owner": "apply",
+          "callee": "makeConstant",
+          "startByte": 5755,
+          "endByte": 5790,
+          "line": 100,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "apply",
+          "callee": "makeConstant",
+          "startByte": 5812,
+          "endByte": 5847,
+          "line": 101,
+          "sha256": "a202662cee6bcd658349937ac6acc9697293d4c74e12351fffc27f7926ab0a27",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "apply",
+          "callee": "makeConstant",
+          "startByte": 5869,
+          "endByte": 5911,
+          "line": 102,
+          "sha256": "7d5d33ef95b157635ed5e1e942bc741be702fb89986da5b43a5fb44333ac8f94",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "apply",
+          "callee": "makeOperation",
+          "startByte": 5939,
+          "endByte": 5989,
+          "line": 103,
+          "sha256": "f56463e6582860cbd5354898ceb7b825c75c46d98e0efb4b2762625ed9c234e2",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        },
+        {
+          "owner": "apply",
+          "callee": "makeOperation",
+          "startByte": 6028,
+          "endByte": 6194,
+          "line": 104,
+          "sha256": "60f0ab66225fa68c9ba44e37c8b33ec235f1aced025ab1914da9e52210bf0ccd",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            5
+          ]
+        },
+        {
+          "owner": "apply",
+          "callee": "makeConstant",
+          "startByte": 6076,
+          "endByte": 6111,
+          "line": 105,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "apply",
+          "callee": "makeOperation",
+          "startByte": 6239,
+          "endByte": 6358,
+          "line": 108,
+          "sha256": "147e942ec0becac4b7c1ba668173cf0fc1b498bbec67477b706823d3e6085ae2",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        },
+        {
+          "owner": "apply",
+          "callee": "makeOperation",
+          "startByte": 6432,
+          "endByte": 6557,
+          "line": 112,
+          "sha256": "1aafdd1a60beb589cb6f1d299a5037ee02a23b275c3011da71f51475a0c0a67d",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        },
+        {
+          "owner": "apply",
+          "callee": "makeOperation",
+          "startByte": 6586,
+          "endByte": 6639,
+          "line": 115,
+          "sha256": "57fdf8aea5ecce4960a2122b59d8a6ac79f38b813e518bf684750dd24d603a10",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        }
+      ]
+    },
+    {
+      "path": "src/libevmasm/rule_list.zig",
+      "sha256": "4f77329fcde8c89bb2429491fd7f8545f343c04b6630065c919e558c460fbf6d",
+      "sites": [
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 3243,
+          "endByte": 3282,
+          "line": 80,
+          "sha256": "bbd266d7acc6ffd7c0958e186462d85b65f10e372a7f3ba2bef98aa67b23b914",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 4101,
+          "endByte": 4136,
+          "line": 97,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 4387,
+          "endByte": 4438,
+          "line": 103,
+          "sha256": "afd95e86a87a35fa244e5ec787cb26302cc9781098bbd0ca507fd50b46facfed",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 4568,
+          "endByte": 4759,
+          "line": 108,
+          "sha256": "91bf282b9427ba68f259a8006a306b4cc1a38b4d0239fda08bb3f978ed5a3dbf",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            4
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 4660,
+          "endByte": 4698,
+          "line": 110,
+          "sha256": "880f4a97c170a373db825647dbaf59070794f8c6bfeb183bdb532c20494bef4b",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 5204,
+          "endByte": 5239,
+          "line": 122,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 5824,
+          "endByte": 5866,
+          "line": 134,
+          "sha256": "7d5d33ef95b157635ed5e1e942bc741be702fb89986da5b43a5fb44333ac8f94",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 6195,
+          "endByte": 6230,
+          "line": 140,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 6845,
+          "endByte": 6913,
+          "line": 152,
+          "sha256": "855d2db8a6f1f3164e7b6b106aed4321d31e78c979c2bd07c037d1e5f1f266f5",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 7057,
+          "endByte": 7298,
+          "line": 154,
+          "sha256": "f806cc4098b9a1d3a2087e7056d7d3c3b70270e4472bc6c89b4e9cd059b36d3d",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            10
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 7157,
+          "endByte": 7219,
+          "line": 156,
+          "sha256": "93fb0a36b6f2ba2a92ffd17334a29d29fdf7c9185e0c8255174de2263f050402",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 7941,
+          "endByte": 8129,
+          "line": 173,
+          "sha256": "3bf189a5edc70cb46103301968ad613c9647ae19ac420011ecef438bbe9f3da6",
+          "storage": "temporary",
+          "arity": 3,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 8276,
+          "endByte": 8464,
+          "line": 180,
+          "sha256": "39415acb499ced1acf7d79f9b6e0df304febcaaeb86430861f93e96322f55cc8",
+          "storage": "temporary",
+          "arity": 3,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 8587,
+          "endByte": 8768,
+          "line": 187,
+          "sha256": "0013294b492256db6f728f6d972101384d74be6d5b3bea13ffb8c1766518e85e",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            14
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 8670,
+          "endByte": 8715,
+          "line": 189,
+          "sha256": "19a41a4db1c7caf6c83d0ac51f86e44109554e6e229152e31154a5b9417ce696",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 8926,
+          "endByte": 8961,
+          "line": 195,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 9072,
+          "endByte": 9107,
+          "line": 197,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 9570,
+          "endByte": 9630,
+          "line": 205,
+          "sha256": "5be4b30912bf9c9ca12a64e0195a7ee83d65ad73522c1f33da5df002d2ec2246",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 9739,
+          "endByte": 9799,
+          "line": 207,
+          "sha256": "5be4b30912bf9c9ca12a64e0195a7ee83d65ad73522c1f33da5df002d2ec2246",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 10536,
+          "endByte": 10571,
+          "line": 221,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 10608,
+          "endByte": 10846,
+          "line": 222,
+          "sha256": "f99f137325397e21a384932edcd465c79222bfe9be2eb2eb7d42ebf50a779f7e",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            21
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 10708,
+          "endByte": 10767,
+          "line": 224,
+          "sha256": "e8cd505a503717c7202d09a4bb99da9479bfea3ac594233c07123992f7504cd2",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 12053,
+          "endByte": 12257,
+          "line": 249,
+          "sha256": "23f06c74ef3e725c32b434a962ea2a41b2ebf006278113ed4389bdea94c0d64d",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 12298,
+          "endByte": 12531,
+          "line": 254,
+          "sha256": "2b34d1befecb34897781c9833c24ee9f80364d9a9e6cdea06892110f5f9e335c",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            24
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 12408,
+          "endByte": 12454,
+          "line": 256,
+          "sha256": "171cfa3c457bcf58c0f5dc3cc95c9e121e7ade06bfe075416ce2048156ddf8c4",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 13240,
+          "endByte": 13313,
+          "line": 273,
+          "sha256": "ab9fe386c02e79c6a33340b90ab34560ac31bf2c292b2f13836147488510a78e",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 13350,
+          "endByte": 13419,
+          "line": 274,
+          "sha256": "23eebaf15b459aae823c5b2437e4162e444d2ee2a695d1c7653b8d85a740df0d",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 13899,
+          "endByte": 13960,
+          "line": 285,
+          "sha256": "88a4883ecdd374917e685733a28d074f05af322001c3f5749e895ade964ebd95",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 14297,
+          "endByte": 14532,
+          "line": 291,
+          "sha256": "18080495ecbc39277a6bbdcdedb32bffee9b91ec792edd1f5f7ce2747eab0db7",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            29
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 14391,
+          "endByte": 14453,
+          "line": 293,
+          "sha256": "35a09cf8388df7470c8dadd31e519a9522d4a0d862ca377fb71d52d85378859c",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 14777,
+          "endByte": 14812,
+          "line": 299,
+          "sha256": "0fea90f9e25c8495d623589e4503901712bb4f5f71b6e10706e0e914e974062f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 14933,
+          "endByte": 15168,
+          "line": 301,
+          "sha256": "6aa5497d709aa2faaa90a7b454c97eadb1c357323d395548b5082f22afccb59e",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            32
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 15027,
+          "endByte": 15089,
+          "line": 303,
+          "sha256": "f75592b31a2a168b204edebde268a33cf6f281aa0ab97653ce152214926a12d2",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 15588,
+          "endByte": 15655,
+          "line": 313,
+          "sha256": "12a3314adc5061b333f85e05b6345748478653d0b290e77b3101fd0c25d2e490",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 15692,
+          "endByte": 15939,
+          "line": 314,
+          "sha256": "39409fef58c6128c07c0d8b7a20d2dcb061501071a65ebeae05acfda1afcc4b3",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            35
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 15792,
+          "endByte": 15861,
+          "line": 316,
+          "sha256": "80b6e128c9557b091f61d086c3f0eeebf18b2d3812e0ff359a3de4630202bbaf",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 16386,
+          "endByte": 16451,
+          "line": 327,
+          "sha256": "bc5cca3b1509ecbf9a5ccba8e70feedfb07f1cbaff98e3dbd207a9c3f4e56846",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 16623,
+          "endByte": 16806,
+          "line": 333,
+          "sha256": "aa93a33ac0e4aa70c9695d4d2d8c5db3c65d4bfcd86e1754bf79480b75e677e4",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            38
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 16706,
+          "endByte": 16753,
+          "line": 335,
+          "sha256": "1035aec8083359e6c6d2326b40cd597f8b82e0b4f0df986863607491d1356843",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 16959,
+          "endByte": 17029,
+          "line": 340,
+          "sha256": "abb5b6cbc82581140e687e84d3a73fa14cd41cd978f8b9df784bf136ebf49d94",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 17058,
+          "endByte": 17200,
+          "line": 341,
+          "sha256": "473aea9813caff8abe641cce61ebd1e80ade65366791f9c37ddceaa7e67e81a2",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            41
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "materializeConstant",
+          "startByte": 17106,
+          "endByte": 17185,
+          "line": 341,
+          "sha256": "9d0886c66f5c99d3202a2397659fb30e8632e3b4f5f86fc0ce14f6fcf185ec05",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 17368,
+          "endByte": 17437,
+          "line": 344,
+          "sha256": "c337d4dcad6172e72ecf1d600034546d4475fb0f223be6e19710ca6e43483c70",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 17466,
+          "endByte": 17658,
+          "line": 345,
+          "sha256": "f569f1587f7cca07ac95b918931c164783d4784fdaafa3cf4280e51517206794",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            44
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 17555,
+          "endByte": 17605,
+          "line": 347,
+          "sha256": "0ebdf1d809b61f84121f3e6a06494bb24cf6a15aeccb1f4af530e55e0bbeca26",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 17878,
+          "endByte": 17941,
+          "line": 353,
+          "sha256": "638f674c7fd2b2b4d8f6a4e1f47f11cb0e3b0944bc7a9b7ebc22cd07012ba4b1",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 17974,
+          "endByte": 18097,
+          "line": 354,
+          "sha256": "5f32f44c2452f9ec5809e1a8cf27965fba264ac67c1e1b5ce43472f642abcded",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            47
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "materializeConstant",
+          "startByte": 18022,
+          "endByte": 18082,
+          "line": 354,
+          "sha256": "d3f8133394b5ee73200accda6cffe054a01646e569d5dc08079ab7408b414a04",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 18225,
+          "endByte": 18288,
+          "line": 357,
+          "sha256": "36e735e40ed70244f59b2bc4fde3e5c86efa50f5910b75928ef78d0543bd4f91",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 18321,
+          "endByte": 18437,
+          "line": 358,
+          "sha256": "020fcb7865ac6c42b200bc1076f33dbd27a75c89a834dd5596da5b079ea539f5",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            50
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "materializeConstant",
+          "startByte": 18357,
+          "endByte": 18417,
+          "line": 358,
+          "sha256": "69759677cc26ec2fa9c4d252dabb70e9291a2ced910e855cb63389afc79d8fec",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 18676,
+          "endByte": 18738,
+          "line": 363,
+          "sha256": "c11c0e3a53020f808a10d758098a8954e5c936eb2b0e21b5058bb521d5c3a6eb",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 18771,
+          "endByte": 18971,
+          "line": 364,
+          "sha256": "0d5c5546ecd2116d1745d2a0a195945c3c0632b20933b2562f73c8e88091545f",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            53
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 18868,
+          "endByte": 18910,
+          "line": 366,
+          "sha256": "fcb5b21be4bd14b477ee452dfab03bb015bfb4908c6d318a896bb1bfa77a49b7",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 19099,
+          "endByte": 19161,
+          "line": 371,
+          "sha256": "f99b54de38d7e1707fbdfdcbcefc2f11773e74d2842320ff17831e2b98b5ced5",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 19194,
+          "endByte": 19392,
+          "line": 372,
+          "sha256": "e256462debc63e0521bf70097e66716f955baffbb80993c17d235a2f11bc1d4c",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            56
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 19284,
+          "endByte": 19331,
+          "line": 374,
+          "sha256": "1035aec8083359e6c6d2326b40cd597f8b82e0b4f0df986863607491d1356843",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 19982,
+          "endByte": 20038,
+          "line": 393,
+          "sha256": "56a76cbd96e9bf5a9691a74f993823cdf0db81d5024c24b2910f517557c80625",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 20143,
+          "endByte": 20188,
+          "line": 395,
+          "sha256": "33faadf5339070ab66f3381089c7ad6744efaed2b3f706e15bada6fa8bd1aa24",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 20293,
+          "endByte": 20338,
+          "line": 397,
+          "sha256": "0ddd7a8ff05f7af47465f19a84ca1aba781e1dee40983ab8b76ae0286b8119eb",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 20444,
+          "endByte": 20490,
+          "line": 399,
+          "sha256": "ff80210644539a6be02a771c278b23b15a1c2428de9b5a55314a7acff3fb6478",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 20595,
+          "endByte": 20640,
+          "line": 401,
+          "sha256": "e1425727acb98c2bd73681c2eb91ef5ee9af89497c201a0aa8c4b3c60200dcfa",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 20746,
+          "endByte": 20792,
+          "line": 403,
+          "sha256": "3e7f73c2eb22153e6a1a4e1e826ae07a29597ec3a8e9351c759962a0a3e0310e",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 20901,
+          "endByte": 20946,
+          "line": 406,
+          "sha256": "33faadf5339070ab66f3381089c7ad6744efaed2b3f706e15bada6fa8bd1aa24",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 21040,
+          "endByte": 21085,
+          "line": 408,
+          "sha256": "33faadf5339070ab66f3381089c7ad6744efaed2b3f706e15bada6fa8bd1aa24",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 21481,
+          "endByte": 21534,
+          "line": 417,
+          "sha256": "0bd0b24aa1ca9977d026346a516af341fbc33be0a9e7b7a0fb8fe80ce356bb87",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 21716,
+          "endByte": 21776,
+          "line": 422,
+          "sha256": "f8c1f15447f24cc13f4085db6b22066b1c10770837f92d7a871b3c8b5898e71a",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 21832,
+          "endByte": 21867,
+          "line": 424,
+          "sha256": "a202662cee6bcd658349937ac6acc9697293d4c74e12351fffc27f7926ab0a27",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 21960,
+          "endByte": 22139,
+          "line": 426,
+          "sha256": "78f23dffbbdd5b113949473f1ad5c7e7987d91baf7a31f8806114732697baa9d",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            69
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 22051,
+          "endByte": 22086,
+          "line": 428,
+          "sha256": "a202662cee6bcd658349937ac6acc9697293d4c74e12351fffc27f7926ab0a27",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 22209,
+          "endByte": 22244,
+          "line": 432,
+          "sha256": "a202662cee6bcd658349937ac6acc9697293d4c74e12351fffc27f7926ab0a27",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 22281,
+          "endByte": 22345,
+          "line": 433,
+          "sha256": "7dd00c1eea9f46a847c9d5097e07fc2d00131ce86194bcd8ade06404f2377bba",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 22380,
+          "endByte": 22434,
+          "line": 434,
+          "sha256": "679402b58c32949a4662f7cbf8e0465a3337d5494e0cd6422d34428d2d9ab2d0",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 22463,
+          "endByte": 22522,
+          "line": 435,
+          "sha256": "1bb17117048bf1450d3bddab9a4e33c8903921f6df6b8d46566552a70e373233",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 22830,
+          "endByte": 23045,
+          "line": 443,
+          "sha256": "a98bc05b824a55dce3eeaa46f250083e50ca7490996a158b07abf2fb0535dee9",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            75
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 22923,
+          "endByte": 22962,
+          "line": 445,
+          "sha256": "4b02bf2db8b657b7e420b6f17bcfcd4951054861b86c88014c5a9c210dcb0966",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 23214,
+          "endByte": 23429,
+          "line": 450,
+          "sha256": "97045d139f57be65325dfcbac73366720f7166181ff18e75d17f56c3a2dee924",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            77
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 23307,
+          "endByte": 23346,
+          "line": 452,
+          "sha256": "4b02bf2db8b657b7e420b6f17bcfcd4951054861b86c88014c5a9c210dcb0966",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeOperation",
+          "startByte": 23609,
+          "endByte": 23808,
+          "line": 458,
+          "sha256": "6852d4ac24475a11bbad3e0a9f7fbe9a8bc92e782562fdafd21dc48fefeba150",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            79
+          ]
+        },
+        {
+          "owner": "simplifyWithOptions",
+          "callee": "makeConstant",
+          "startByte": 23694,
+          "endByte": 23733,
+          "line": 460,
+          "sha256": "4b02bf2db8b657b7e420b6f17bcfcd4951054861b86c88014c5a9c210dcb0966",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "doubleIsZero",
+          "callee": "makeOperation",
+          "startByte": 24693,
+          "endByte": 24746,
+          "line": 487,
+          "sha256": "784e8bff0d506b2af17d763d68e64a179fcd397b4f93212ce391f2d7b5b8b17b",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        },
+        {
+          "owner": "doubleIsZero",
+          "callee": "makeOperation",
+          "startByte": 24759,
+          "endByte": 24812,
+          "line": 488,
+          "sha256": "3001004aec5f6ad39db17160fcd68333a257d0d7f0870ba77cf1da8e907cd2bb",
+          "storage": "temporary",
+          "arity": 1,
+          "children": []
+        },
+        {
+          "owner": "dropRepeatedNested",
+          "callee": "makeOperation",
+          "startByte": 26682,
+          "endByte": 26739,
+          "line": 531,
+          "sha256": "4f67d544909d2ce1cea1004c41f36e3729366501e99f110815f24f3f552e2b4b",
+          "storage": "local-array",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "stripRedundantSignExtendMask",
+          "callee": "materializeConstant",
+          "startByte": 27601,
+          "endByte": 27659,
+          "line": 550,
+          "sha256": "16b45b7643cbe262d634a26b37f0a1a96709913da4ce4acb3f8782eba15a0857",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "stripRedundantSignExtendMask",
+          "callee": "makeOperation",
+          "startByte": 27676,
+          "endByte": 27756,
+          "line": 551,
+          "sha256": "5fa842e728e32b4f2ddc930c0b234b5e53a4157ce253a9990b8bfd2745bc6a3c",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "reassociate",
+          "callee": "makeOperation",
+          "startByte": 29103,
+          "endByte": 29363,
+          "line": 592,
+          "sha256": "b98f7df8bdd4a2cc08f61f2d1da5e0963be435d28f367b7914ad1fe4ef5c9f66",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            86
+          ]
+        },
+        {
+          "owner": "reassociate",
+          "callee": "makeConstant",
+          "startByte": 29221,
+          "endByte": 29313,
+          "line": 596,
+          "sha256": "909bdf43dfbf44572999a474ba9aafea63f238f929630d70b2c105bb3eee929c",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "reassociate",
+          "callee": "makeOperation",
+          "startByte": 29635,
+          "endByte": 29712,
+          "line": 604,
+          "sha256": "eb240428a2dedd59c8004ce5aac5faa4c31f3f0b07595d05a7e39f4e3c9de5c1",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "reassociate",
+          "callee": "makeOperation",
+          "startByte": 29734,
+          "endByte": 29811,
+          "line": 606,
+          "sha256": "828cadb85ab222b32dc57c639f1e9186174bba0acaafd230a53bb1ca927b1771",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "reassociate",
+          "callee": "makeOperation",
+          "startByte": 29828,
+          "endByte": 30003,
+          "line": 607,
+          "sha256": "e52453401b11b7568d03b35504dbdea1b3ce785f6e216fee9c80e0869d95ee62",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            90
+          ]
+        },
+        {
+          "owner": "reassociate",
+          "callee": "materializeConstant",
+          "startByte": 29895,
+          "endByte": 29974,
+          "line": 609,
+          "sha256": "9d0886c66f5c99d3202a2397659fb30e8632e3b4f5f86fc0ce14f6fcf185ec05",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "combineOppositeShifts",
+          "callee": "makeOperation",
+          "startByte": 30467,
+          "endByte": 30672,
+          "line": 627,
+          "sha256": "8c4c8c1e6ef4862fba77b7923990062572234154489446cd780176dcc3ef6dcd",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            92
+          ]
+        },
+        {
+          "owner": "combineOppositeShifts",
+          "callee": "makeConstant",
+          "startByte": 30569,
+          "endByte": 30628,
+          "line": 629,
+          "sha256": "db3b1e8d83fe4a0d1e1f744524e885b9b1a9c0e6dd535eae50f5ee0acafb1bd2",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "combineOppositeShifts",
+          "callee": "makeOperation",
+          "startByte": 30725,
+          "endByte": 30902,
+          "line": 633,
+          "sha256": "6da3b7427b5c6bba7168a405c32b5ff156e3158fa3b84eeb9f34eff532e25d3b",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            94
+          ]
+        },
+        {
+          "owner": "combineOppositeShifts",
+          "callee": "makeConstant",
+          "startByte": 30799,
+          "endByte": 30858,
+          "line": 635,
+          "sha256": "3068fdd2b422044ff057544d13f1638652ff83c091a2d0cb6f27e64818b1759f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "combineOppositeShifts",
+          "callee": "makeOperation",
+          "startByte": 30938,
+          "endByte": 31067,
+          "line": 640,
+          "sha256": "5952f287cbf6174578a6a8732c51e9e24c7ffc79f070b44928c2cd17e4379df7",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            96
+          ]
+        },
+        {
+          "owner": "combineOppositeShifts",
+          "callee": "makeConstant",
+          "startByte": 31000,
+          "endByte": 31038,
+          "line": 642,
+          "sha256": "0bc9463997d47f2b9b3868480db5545db67c2a987b32cb9498b5cd772be1a3d9",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "distributeAlternatingMask",
+          "callee": "makeOperation",
+          "startByte": 32551,
+          "endByte": 32763,
+          "line": 673,
+          "sha256": "d18c9a6d40ff1edfb5f9727874bff2935790a4a0578048aff18264dc8b15f513",
+          "storage": "temporary",
+          "arity": 2,
+          "children": [
+            98
+          ]
+        },
+        {
+          "owner": "distributeAlternatingMask",
+          "callee": "makeConstant",
+          "startByte": 32653,
+          "endByte": 32710,
+          "line": 675,
+          "sha256": "d9a73b6085b0083815941b7364840ba4d9a4cd6d487b7e15df295ffdf623741f",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "distributeAlternatingMask",
+          "callee": "materializeConstant",
+          "startByte": 32968,
+          "endByte": 33113,
+          "line": 680,
+          "sha256": "3ba9fc7335125bae5ee293cc988751ab7bc42d8c4e155a41ea15c759fc755fa6",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "distributeAlternatingMask",
+          "callee": "makeOperation",
+          "startByte": 33149,
+          "endByte": 33329,
+          "line": 685,
+          "sha256": "f6cb711beabb9231416281e9f8e80ea06efc3baac422f4708ecdc2401ff737f9",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "distributeAlternatingMask",
+          "callee": "makeOperation",
+          "startByte": 33358,
+          "endByte": 33415,
+          "line": 690,
+          "sha256": "ea632e5be305b87bcc3d118217cb7b134d20de3cae4f6e055204653af82c1077",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        },
+        {
+          "owner": "removeCoveredShiftMask",
+          "callee": "makeOperation",
+          "startByte": 34075,
+          "endByte": 34123,
+          "line": 710,
+          "sha256": "47002ff4b652737cde1bdb960683962e1940a70e1f82b5c38c8c400df01dbd8b",
+          "storage": "borrowed",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "powerOfTwoShiftProduct",
+          "callee": "makeOperation",
+          "startByte": 34476,
+          "endByte": 34538,
+          "line": 723,
+          "sha256": "80b679df9628196c1d90df70948b057df533f3c5d89061849d59d5b36e74f5d1",
+          "storage": "temporary",
+          "arity": 2,
+          "children": []
+        }
+      ]
+    },
+    {
+      "path": "src/libevmasm/expression_classes.zig",
+      "sha256": "d66c002eb6f32b6886bc4c6cb24b33b4551f47a98d95fd5c5ad84a97f64b0603",
+      "sites": [
+        {
+          "owner": "findDefault",
+          "callee": "find",
+          "startByte": 10833,
+          "endByte": 10868,
+          "line": 271,
+          "sha256": "ad613fcd822986eea84c7844d8785ceb33ac79b48dc42bcb0e0ccae58ee60557",
+          "storage": "forwarded",
+          "arity": null,
+          "children": []
+        },
+        {
+          "owner": "makeConstant",
+          "callee": "findDefault",
+          "startByte": 14325,
+          "endByte": 14354,
+          "line": 359,
+          "sha256": "6e1a705b972fd0339554ce82a483120feff179ec14d3f0455d92955acbfa0bc8",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "materializeConstant",
+          "callee": "makeConstant",
+          "startByte": 14538,
+          "endByte": 14574,
+          "line": 368,
+          "sha256": "1964330805efa145be2fa1c129204a9bc53ad95d685105389887806132e5cfee",
+          "storage": "empty",
+          "arity": 0,
+          "children": []
+        },
+        {
+          "owner": "makeOperation",
+          "callee": "findDefault",
+          "startByte": 14857,
+          "endByte": 14891,
+          "line": 378,
+          "sha256": "ab0916aceeb14da8d765c6834157faf9ae7ae3e76d084a587109466e7cff9071",
+          "storage": "forwarded",
+          "arity": null,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

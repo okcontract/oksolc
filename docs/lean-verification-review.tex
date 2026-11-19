@@ -1,0 +1,649 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs,tabularx,array}
+\usepackage{xurl}
+\usepackage[hidelinks]{hyperref}
+\hypersetup{pdftitle={Compiler Verification in oksolc: A Source-Based Review},pdfauthor={Repository review}}
+\Urlmuskip=0mu plus 2mu\relax
+\newtheorem{obligation}{Obligation}
+\newtheorem{proposition}{Proposition}
+\newcommand{\Word}{\mathbb{W}}
+\newcommand{\Nat}{\mathbb{N}}
+\newcommand{\eval}[1]{\mathopen{[\![}#1\mathclose{]\!]}}
+\newcommand{\Ord}{\operatorname{Ord}}
+\newcommand{\Inv}{\operatorname{Inv}}
+\newcommand{\Rep}{\operatorname{Rep}}
+\newcommand{\Obs}{\operatorname{Obs}}
+\newcommand{\run}{\operatorname{run}}
+\newcommand{\src}[1]{\path{#1}}
+\title{Compiler Verification in oksolc:\\
+A Source-Based Review of Proofs and Boundaries}
+\author{\IEEEauthorblockN{Repository review}
+\IEEEauthorblockA{Snapshot: 4 November 2026\\
+Public preview proof sources}}
+\begin{document}
+\maketitle
+\begin{abstract}
+The oksolc Lean development combines source-bound implementation models,
+restricted Zig AIR translation, and certificates for selected compiler artifacts.
+This is a sound architectural choice provided that model adequacy, source
+admission, host contracts, and unclosed compiler premises remain explicit. It
+does not currently establish correctness of the complete Solidity-to-EVM
+compiler. Substantial proof sources cover algebraic rewrites, normalization,
+ownership, finite recursive optimizer executions, typed memory, and restricted
+deployment/runtime artifacts. The main implementation gap is composition from
+actual compiler initialization and native data structures to the endpoint's
+preconditions. A concrete remaining adapter limitation rejects anonymous empty
+byte slices in a captured hash-update call. We state the relevant obligations,
+inventory representative proof endpoints, and recommend prioritizing artifact
+validation for semantic breadth while bounding native proof work by removal of
+specific endpoint premises. This review inspected source only: no Lean build,
+kernel replay, compiler execution, or historical acceptance run was performed.
+\end{abstract}
+
+\section{Scope and interpretation of evidence}
+The review concerns the committed development in \src{lean/}, with supporting
+inspection of its Python extractors, \src{test/lean/} certificate drivers,
+compiler sources, and verification documentation. The accompanying proof snapshot contains 1,440 Lean source files including the Lake file,
+172,081 lines, and 404 files whose names contain ``Test.'' These are maintenance
+measurements, not measures of verified compiler coverage. The main distribution
+is 1,147 files in \src{Compiler/Extraction}, 226 in \src{Compiler/ZigAir},
+38 in \src{Compiler/Validation}, and four in \src{Compiler/Algebraic}; shared
+language, EVM, interaction, and audit modules reside in \src{Contract/}.
+
+The review traced representative top-level theorem statements, their principal
+predicates, interpreters, extraction boundaries, and artifact acceptance code.
+It is a global architectural and implementation-quality review, not a claim to
+have independently checked every proof term or every line of this corpus.
+Throughout this paper, ``proof present'' means a theorem and proof body exist
+in the inspected source. It does not mean that this review freshly elaborated
+that theorem or reproduced a production certificate. Current acceptance requires evidence tied to the exact public commit; it is
+separate from the source-supported statements in this paper.
+
+The project pins Lean 4.29.0 and enables warnings as errors. A lexical scan of
+the Lean sources found no occurrences of \texttt{sorry} or
+\texttt{native\_decide}, no explicit axiom declarations, and no declarations
+beginning with \texttt{unsafe def} or \texttt{partial def}. This is useful
+hygiene, but cannot replace a compiled dependency audit and kernel replay.
+The dependency auditor permits only \texttt{propext},
+\texttt{Classical.choice}, and \texttt{Quot.sound}; it also rejects unsafe,
+partial, missing, and non-closed dependencies~\cite{audit}.
+
+The coverage map declares 34 obligations: 13 closed, ten partial, and eleven
+open~\cite{map}. These are heterogeneous scoped obligations, not a percentage
+of compiler correctness. In particular, a closed artifact route means that
+its restricted certificate mechanism has proofs; it does not mean that every
+current compiler output is accepted.
+
+\section{Compiler notation and intended correctness}
+\subsection{Requests, stages, and artifacts}
+Let $s$ denote the exact Solidity source collection, including source names,
+and let $\theta$ contain the language version, EVM fork, optimizer settings,
+metadata policy, library bindings, and other admitted compilation settings.
+Write the implemented compiler as
+\[
+ C_\theta(s)\in\operatorname{Result}(\mathcal A,\mathcal E_C),
+ \qquad a=(b_{\rm init},b_{\rm run},\mu)\in\mathcal A,
+\]
+where $b_{\rm init}$ and $b_{\rm run}$ are exact creation and runtime bytes,
+$\mu$ is auxiliary output, and $\mathcal E_C$ contains compiler failures.
+Compiler failure is distinct from a successfully compiled program reverting
+at runtime. A useful conceptual decomposition is
+\[
+ s\xrightarrow{P}A\xrightarrow{T}A_t\xrightarrow{L}Y
+ \xrightarrow{O_Y}Y'\xrightarrow{B}E
+ \xrightarrow{O_E}E'\xrightarrow{J}a.
+\]
+Here $P,T,L,O_Y,B,O_E,J$ denote parsing, semantic analysis, lowering to Yul,
+Yul optimization, backend lowering, assembly optimization, and
+assembly/linking. This is notation for proof interfaces, not a claim that all
+compiler modes execute this identical sequence. The repository separately
+tracks these stages, request orchestration, and their currently open
+implementation obligations~\cite{map}.
+
+\subsection{Observable behavior}
+Let $\omega$ be a persistent world, $\tau$ transaction-local state, $\kappa$
+a call or creation context, $x$ calldata and incoming value, and $g$ available
+execution gas. An observation may contain
+\[
+ o=(\text{status},\text{bytes},\omega',\tau',\text{logs},
+       \text{interactions},g').
+\]
+The intended comparison must specify which components are visible and what
+transaction admission has already occurred. The current artifact fragments do
+not implement arbitrary logs or external calls. Their absence is part of the
+fragment, not a proof about general effectful Solidity.
+
+There is no universal claim that two compiler outputs consume equal gas.
+For admitted code without gas introspection or external calls, the certificate
+can establish a source functional outcome together with the exact target
+execution cost. It then derives the target observation at every gas budget.
+Storage execution additionally tracks warm accesses, original/current slots,
+refund deltas, static mode, and an execution threshold for the SSTORE sentry.
+This differs from inventing an independent source-level gas cost and proving
+cost equality with it.
+
+\begin{obligation}[Source-to-bytecode endpoint]\label{ob:end}
+For a declared source/settings domain $D$, observation policy $\mathcal O$,
+and adequacy/binding assumptions $H$, establish
+\[
+ \begin{split}
+ H\land D(s,\theta)\land C_\theta(s)=\operatorname{ok}(a)
+ \land\operatorname{Accepted}(s,\theta,a)\\
+ {}\Longrightarrow
+ \operatorname{Refines}_{\mathcal O}(s,\theta,b_{\rm init},b_{\rm run}).
+ \end{split}
+\]
+The relation must connect successful deployment to the exact installed
+runtime, and quantify over the admitted calls, worlds, and gas budgets.
+Unsupported inputs, validator rejection, and exhausted proof resources provide
+no such conclusion. For universal implementation correctness, remove the
+per-artifact acceptance premise only after proving the full admitted pipeline.
+\end{obligation}
+
+The repository does not yet discharge Obligation~\ref{ob:end} for general
+Solidity. Selected artifact certificates do instantiate narrower versions.
+An implementation route would additionally need adjacent-stage simulation
+relations $R_i$ and proofs that every successful stage maps $R_i$-related
+inputs to $R_{i+1}$-related outputs, with explicit failure behavior. A verified
+optimizer subroutine cannot supply the missing frontend, backend, or request
+composition proofs.
+
+\section{Two complementary proof routes}
+\subsection{Implementation modeling and extraction}
+The Zig-to-Lean translation machinery is included. There are two families.
+First, \src{extract_*.py} parses restricted production source patterns and
+emits Lean programs or data. For example, \src{extract_compiler.py} admits
+matching and graph-construction syntax, while \src{extract_cache.py} binds
+key equality and normalization decisions. The lexer rejects unrecognized
+tokens, and the parsers constrain declarations, types, control flow, and
+recognized primitive calls. Many adapters intentionally demand exact source
+shapes. This is conservative but expensive to maintain when the Zig code
+changes.
+
+Second, \src{lean/zig_air/} contains toolchain patch/build scripts,
+\src{SemanticExport.zig}, \src{SemanticValidity.zig}, capture and specialization
+linking tools, and scalar, aggregate, memory, and operation-specific generators.
+The toolchain builder pins Zig revision
+\texttt{7647adab80dd088f4de3610fd245915a912eb6ad} and version
+\texttt{0.17.0}. Capture occurs after semantic analysis and before legalization.
+The admitted scalar configuration requires ReleaseFast and LLVM; the inspected
+memory decoder requires AArch64 macOS, 64-bit pointers, and little-endian
+layout~\cite{airtools}.
+
+This is a restricted translation framework, not a general Zig compiler to Lean
+and not a verified Zig frontend. A normal installed Zig binary is insufficient
+for new captures: the instrumented toolchain, admitted source closure, capture
+records, and matching identities are required. Committed generated Lean models
+can be examined or built independently, without establishing fresh native
+capture or current source correspondence.
+
+\begin{obligation}[Translation and source safety]\label{ob:translation}
+For an admitted Zig body $z$, capture $u$, and generated Lean program $p$,
+establish or explicitly trust the chain
+\[
+ z\xrightarrow[\text{source identity}]{\text{admission/capture}}u
+ \xrightarrow{\text{decode}}p,
+\]
+and, under a representation relation $R$ and source preconditions $Q$,
+\[
+ \begin{split}
+ Q(n)\land R(n,m)\land n\Downarrow_z(r,n')\\
+ {}\Longrightarrow \exists m'.\ m\Downarrow_p(r,m')\land R(n',m').
+ \end{split}
+\]
+Source undefined behavior and safety preconditions must be excluded or modeled;
+they cannot be recovered merely by proving the remaining AIR instructions.
+\end{obligation}
+
+The code is commendably explicit about this issue. Capture records require
+\src{sourceValidityConditionsPreserved} set to false; the validity sidecar
+describes an incomplete runtime-slice inventory. Memory generation restores
+selected guards at their anchors and rejects unsupported cases, including
+unadmitted length-based slicing. A proof about generated AIR is therefore not
+by itself a complete Zig source-safety theorem.
+
+The typed source IR provides useful internal cross-checking.
+\src{Correspondence.lean} proves matcher, selection, and construction agreement
+between an interpreted IR and a separate readable-code backend. Selection is
+proved for arbitrary rule lists; construction preserves callback/error order
+for arbitrary monads. However, both backends share parsing and admission through
+\src{extract_compiler.py} and \src{compiler_ir.py}. Their agreement cannot detect
+a shared incorrect source interpretation~\cite{extraction}.
+
+\subsection{Artifact certificates}
+Artifact validation instead proves a statement about a supplied source/output
+pair. Abstractly, for certificate $\pi$,
+\[
+ V(s,\theta,a,\pi)=\operatorname{accept}
+ \Longrightarrow \operatorname{Refines}_{\mathcal O}(s,\theta,a).
+\]
+The implementation need not be proved globally if the actual artifacts are
+bound to a sound certificate. Graph validation uses proved executable
+equivalence checks. Solidity bytecode validation uses Python to generate
+specialized Lean proof obligations and proofs about exact byte lists; the
+kernel, rather than a trusted Python success flag, checks their semantic
+content. Source parsing and the association of source/settings/bytes with
+the theorem remain trusted admission responsibilities.
+
+The shared artifact driver records exact request/response hashes, batches
+individual claims, creates a fresh package, compares preflight and compiled
+declaration audits, and invokes imported kernel replay. Corpus controls
+distinguish semantic rejection from resource failure. These are strong
+engineering choices. They still do not prove that a supplied graph snapshot
+contains every native entry, or that the trusted source parser has interpreted
+all admitted Solidity syntax correctly~\cite{artifactdriver}.
+
+\section{Present proof obligations and results}
+\subsection{Words, rewrites, and graph invariants}
+Let $\Word=\operatorname{BitVec}(256)$; arithmetic wraps modulo $2^{256}$
+where the model specifies EVM word operations. Checked Solidity arithmetic is
+a separate layer that can produce a panic outcome. Let a graph be
+$G=(N,K)$, where $N$ maps 32-bit node identifiers to represented items and
+$K$ maps expression keys to representatives. A key records item kind, opcode,
+data, argument identifiers, and sequence number. An environment $\rho$ maps
+free word variables to $\Word$.
+
+\begin{obligation}[Rewrite soundness]
+For every admitted rule $r$, facts $f$, and operands whose values satisfy those
+facts, prove
+\[
+ \operatorname{matches}(r,f)\Longrightarrow
+ \eval{\operatorname{replace}(r)}_\rho
+       =\eval{\operatorname{original}(r)}_\rho.
+\]
+Selection, construction, instruction interpretation, and graph updates must
+preserve the same equality; proving a rule table alone is insufficient.
+\end{obligation}
+
+The 45-entry production algebraic table has
+\src{production_rules_sound},
+\src{production_selection_sound}, and
+\src{production_expression_sound} proof sources~\cite{algebraic}.
+The extraction development extends beyond that table into constant folding,
+shifts, masks, nested operations, reassociation, dispatch ordering, and graph
+construction. Generalized meanings and callback interfaces allow modular
+proofs, but their hypotheses must be instantiated with the production behavior.
+
+Write $\Inv(G)$ for cache/representation validity and
+$G\preceq G'$ for preservation of all previously represented values. For a
+request $q$ with value $v$, the key recursive obligation is
+\[
+ \begin{split}
+ \Inv(G)\land\eval q_G=v\land\run(q,G)=(r,G')\land\Ord(r)\\
+ {}\Longrightarrow \Inv(G')\land G\preceq G'\\
+ {}\land\bigl(\forall i,\ r=\operatorname{ok}(i)\Longrightarrow G'.\mathrm{read}(i)=v\bigr).
+ \end{split}
+\]
+\src{InsertionSortNormalization.lean} supplies
+\texttt{detailed\_verified} for finite recursive model execution, including
+stable/extended graphs and closed local ownership. It assumes graph primitive
+contracts and frames, and quantifies over finite depth. It does not establish
+termination of unrestricted native recursion~\cite{recursive}.
+
+\subsection{Normalization, ownership, and physical execution}
+Let $m$ denote typed memory, $a$ the logical argument list, and
+$\Rep(m,v,a)$ a represented view. A session also includes ownership registries
+and external effect state. The normalization function is
+\[
+ \operatorname{norm}(c,a)=
+ \begin{cases}\operatorname{sort}(a)&c\land |a|\geq2,\\a&\text{otherwise}.
+ \end{cases}
+\]
+The proof must follow one execution through borrowing, scratch copying,
+allocation, sorting, transfer, and release, rather than combining unrelated
+final states.
+
+\begin{obligation}[Normalization lifecycle]
+From valid represented input, the actual fresh caller scratch allocation, and
+admitted external allocation/copy/free contracts, prove: exact normalized
+contents; source and unrelated-storage framing on the specified ordinary
+outcomes; independent ownership for borrowed duplication; identity-preserving
+transfer for owned temporaries; and release exactly by the current owner.
+OOM and incomplete/fault observations must retain the actual reached state.
+\end{obligation}
+
+\src{NormalizationMemoryCaller.lean},
+\src{Normalization.production_verified}, composes these obligations and
+derives scratch separation from an actual modeled allocation of two node IDs.
+Transferred contents preserve word meaning. Its statement explicitly allows
+preparation incompleteness or modeled memory exhaustion in its framing
+disjunction; it must not be paraphrased as unconditional successful cleanup.
+\src{NormalizationMemorySettles.lean} supplies the companion settling result.
+The external allocator, layout, copy, free, and stack contracts remain fixed
+boundary assumptions, not proved implementations~\cite{normalization}.
+
+Physical caller proofs deliberately distinguish ordinary results from rejected
+semantic observations. In \src{InternerOwnedMemory.lean}, ordinary results are
+success or language OOM/capacity/invalid-ID/assembly-exception errors. In
+\src{InternerPhysicalMeaning.lean},
+\[
+ \begin{split}
+ \operatorname{Ensures}(G,r,G',Q):={}\\
+ \Ord(r)\Rightarrow\bigl(\Inv(G')\land G\preceq G'\\
+ {}\land(\forall v,\ r=\operatorname{ok}(v)\Rightarrow Q(v,G'))\bigr).
+ \end{split}
+\]
+Thus rejected observations do not prove memory safety or useful completion.
+\texttt{Caller.Verified} additionally preserves the exact body result and fault
+state, and closes ownership for ordinary outcomes. This is a sensible partial
+correctness interface; a deployment-facing theorem still needs admission and
+progress arguments to exclude pervasive rejection.
+
+The general \src{Recursive.production_verified} composition retains
+explicit memory/semantic graph contracts, constructor coupling, constructor
+soundness, query coherence, graph validity, and represented input. More recent
+\src{NativeRecursion.production_find_verified} and
+\texttt{production\_force\_verified} specialize actual modeled callers and
+remove important callback premises. Find still requires native graph
+\texttt{Facts}, enclosing frames, query agreements, source privacy and array
+representation, item representation, scratch allocation, and semantic validity.
+Force still requires the equality it is being asked to record; recording that
+equality does not prove it~\cite{nativeendpoints}.
+
+\subsection{Native memory, hashing, and map operations}
+The AIR development contains typed memory and byte views, allocation and
+lifetime properties, read/write framing, stack cleanup, slice guards,
+finite-control/machine correspondence, loop reasoning, and concrete clients
+such as word copying/swapping and exponentiation. For example,
+\texttt{Control.Machine.finite\_run} gives a
+sufficient fuel witness for finite code, and \texttt{finite\_result} identifies
+every completed finite-machine result with the evaluator result. These are
+valuable reusable proofs, without implying adequacy of every translated Zig
+operation~\cite{airproofs}.
+
+\src{WyhashUpdateAirComplete.lean}, theorem \texttt{invocation}, is substantial:
+under represented bytes, separation, geometry, arithmetic bounds, and the
+update invariant, some fuel completes captured update execution. Success
+matches the cell update model and preserves the hash invariant; OOM retains
+the reached write prefix; cleanup frames caller storage. It is not a theorem
+that the entire production hash producer, including all call preparation and
+finalization, has been connected to native lookup/publication.
+
+There is a concrete adapter counterexample in
+\src{ExpressionMapHashNativeEmpty.lean}. The theorem
+\texttt{empty\_native\_update} connects the actual empty argument view to the
+captured update call. The view produces \texttt{emptyBytes}; execution yields
+OOM or unsupported, while preserving caller storage. Successful cell-model
+execution on an empty list cannot discharge this call. This is an explicitly
+documented model/admission limitation, not evidence of a native compiler bug.
+
+\src{ExpressionMapSearchMemory.lean} proves receiver-based lookup and probe/
+publication under a table/probe invariant and caller custody. Its
+\texttt{hashes : Key -> BitVec 64} parameter identifies a remaining boundary
+at this interface. Other local hash proofs reduce that boundary, but do not
+eliminate the full native producer obligation. Hash collision resistance is
+not required for correctness: probing and full key equality must handle
+collisions. Migration of all live entries during rehash, installation in the
+real owner, retirement of old storage, and derivation of initial native
+invariants remain important composition work~\cite{hashmap}.
+
+\subsection{Graph artifact validation}
+For input graph $G$, output graph $G'$, returned identifiers $I$, and captured
+cache bindings $K$, \src{Inventory.validate_sound} proves
+\[
+ \begin{split}
+ V_f(G,G',I,K)=\mathrm{true}\Longrightarrow \forall\rho,\ \exists L,R:\\
+ \operatorname{evalGraph}(G,\rho)=L\land\operatorname{evalGraph}(G',\rho)=R\\
+ {}\land\operatorname{map}(R[\cdot]?,I)=\operatorname{map}(\mathrm{some},L)\\
+ {}\land\bigl(\forall(k,i)\in K,\ \exists v:\\
+ \eval{k}_{R,\rho}=v\land R[i]?=\mathrm{some}(v)\bigr).
+ \end{split}
+\]
+The theorem also checks otherwise unused supplied nodes and cache bindings.
+\texttt{Inventory.certify} derives selected-root preservation from this same
+inventory certificate. Sound normalization includes associative/commutative
+constant regrouping for ADD, MUL, AND, OR, and XOR. Fuel can cause rejection;
+it does not justify an equality. Snapshot completeness, future mutations,
+native ownership, and arbitrary effectful graphs are outside this statement.
+There are separate graph-failure and raw word-block validator proofs~\cite{graph}.
+
+\subsection{Solidity deployment and call certificates}
+The call certificate admits inputs with calldata length below $2^{64}$,
+an explicit proof domain rather than a protocol limit. The result includes
+short calldata, unknown selectors, nonpayable rejection, and trailing bytes.
+For an admitted source $s$, bytes $b$, and bound $n$,
+\texttt{SolidityCall.certify} consumes an inhabited ABI domain and
+\[
+ \forall x\in D,\ \exists c:\quad
+ \run(b,x,n)=\operatorname{finished}(c,\operatorname{outcome}_s(x)).
+\]
+It derives metered execution for every fuel $f\geq n$ and gas $g$: execution
+finishes with $g-c$ if $c\leq g$, otherwise it is exceptional. Frame theorems
+include incoming-value rollback on failure. An inhabited ABI domain does not
+mean that the body ever succeeds; checked arithmetic may always panic.
+
+Contract-level proofs compose all admitted selectors and rejection paths from
+the same runtime entry. Deployment proofs bind creation bytes, runtime bytes,
+installation, code-size/prefix restrictions, code-deposit gas, and subsequent
+calls. The storage route adds slot-layout, Boolean packing, supported
+initializers/constructors, static-write faults, rollback, warmth, and refund
+effects. The statement of \texttt{TracePreserves} quantifies over arbitrary
+admitted initial storage environments; it is not a finite test of storage
+values~\cite{solidity}.
+
+These are meaningful whole-artifact results for the admitted units, including
+selected empty/no-return/raw-word and typed-literal extensions. They do not
+cover arbitrary Solidity statements, loops, calls, inheritance, dynamic ABI
+values, or all deployment/linking forms. Transaction admission, fee settlement,
+and general creation-address behavior remain outside the modeled frame.
+The trusted source parsers and partial EVM specifications are therefore
+especially consequential correctness boundaries.
+
+\begin{table*}[t]
+\caption{Representative endpoints. P: proof source present for the scoped result;
+C: composition with substantive compiler premises; O: open endpoint. No row
+claims a fresh build or replay by this review.}
+\label{tab:status}
+\centering\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{.20\textwidth}c>{\raggedright\arraybackslash}p{.33\textwidth}>{\raggedright\arraybackslash}X@{}}
+\toprule
+Boundary & Status & Present result & Remaining restriction or obligation\\
+\midrule
+Algebraic table / selection & P & Word equalities for the production rule table and selected replacements & Source admission, production meaning and graph construction connection\\
+Normalization lifecycle & P & Represented contents, ownership, transfer, framing, stated failures & Host contracts; valid caller input; no whole-optimizer conclusion\\
+Recursive logical optimizer & C & Finite model invariants, old values and local ownership & Primitive contracts and frames; native admission/completion\\
+Physical/native find and force & C & Same modeled caller execution, cleanup and word properties & Initial facts, representation, query agreement, equality for force, production wiring\\
+AIR memory / hash update & P & Typed-memory laws and complete admitted update invocation & Source adequacy, empty-slice adapter, full native hash composition\\
+Native expression map & C & Receiver lookup, probing and selected publication & Producer correspondence, rehash/install/retire and invariant establishment\\
+Graph / word-block artifacts & P & Sound acceptance of exact supplied graph or byte block & Complete capture, restricted pure semantics and successful validation\\
+Solidity artifacts & P & Restricted creation/runtime, dispatch, arithmetic and storage certificates & Trusted source admission/model adequacy; unsupported language constructs\\
+General compiler & O & No complete endpoint theorem found; map explicitly open & Frontend, Yul passes, backend, linking and request composition, or broader artifact route\\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\section{Soundness and global implementation quality}
+\subsection{What is well designed}
+The central architecture is credible. Proofs frequently quantify over arbitrary
+operands, memories, callback results, and gas budgets, rather than just proving
+closed examples. The development keeps exact reached failure states, derives
+scratch separation, distinguishes borrowing from ownership transfer, and
+relates memory and word semantics on the same execution. Strict unsupported
+outcomes are preferable to silently treating absent semantics as success.
+Explicit ABI witnesses and full dispatch partitions reduce vacuous or
+entry-point-only claims.
+
+The audit and fresh-package infrastructure is stronger than relying on
+\texttt{lake build} alone. Source/tool digests, strict JSON admission,
+compiled theorem statement capture, logical-axiom closure, corruption controls,
+and fresh imported replay target different failure modes. The README correctly
+states that a build alone proves neither native freshness nor complete compiler
+verification. The existing boundary and map also acknowledge the major gaps.
+
+No explicit logical escape hatch or demonstrated contradiction was found in
+the inspected proof sources. This is a source-review conclusion with the
+limits stated above, not an independent proof of soundness of the entire
+development. Logical validity, semantic adequacy, extraction correctness,
+and coverage are separate questions.
+
+\subsection{High-priority findings}
+\paragraph{F1: Production closure remains incomplete.}
+The native caller theorems are progress beyond abstract callback proofs, but
+their initial graph facts, input representation, and query contracts still
+need derivation from real compiler creation and call sites. The map leaves
+\src{optimizer.recursiveProduction} and the general pipeline open.
+Promoting a theorem named \texttt{production\_verified} to a whole-compiler
+claim would overstate its type. The corrective action is a premise ledger tied
+to the actual final consumer, with initial-state establishment and preservation
+through every reachable mutation.
+
+\paragraph{F2: A concrete native adapter path is unsupported.}
+The empty-slice/update mismatch above prevents substituting a successful local
+hash model for the native call sequence. It should be fixed and consumed at
+the hash/map endpoint before further claims of native hash completion.
+Acceptance should include empty input without assuming a successful update,
+and distinguish modeled rejection from a Zig runtime defect.
+
+\paragraph{F3: Semantic adequacy and source safety remain trusted.}
+The independent Solidity/EVM models, restricted source parsers, AIR exporter,
+and source-validity restoration are real trust obligations. Hashes prove
+identity, not meaning. Dual generated backends share a frontend. Post-Sema
+ReleaseFast AIR does not retain all source safety conditions. The next trust
+reduction should target an independent account of an actually admitted
+semantic boundary, rather than merely adding more agreement proofs between
+models with the same origin.
+
+\paragraph{F4: Conditional safety needs admission and progress.}
+The ordinary-result implication intentionally grants no semantic postcondition
+on unsupported or incomplete observations. Finite recursion unfolds can be
+correct while never establishing completion of an unrestricted native call.
+For each published endpoint, record separately: partial correctness,
+precondition establishment, exclusion of semantic faults, and sufficient fuel
+or termination. Successful examples are useful non-vacuity controls but cannot
+replace the quantified obligations. Likewise, a graph certificate cannot
+detect entries omitted before capture.
+
+\subsection{Maintainability and prioritization findings}
+\paragraph{F5: Proof effort is concentrated below the main semantic endpoint.}
+The extraction and AIR trees dominate the development while the artifact
+validation tree is comparatively small. This is not evidence that the proofs
+are poor: ownership and real failure behavior are difficult and valuable.
+It does indicate a prioritization risk. Many narrowly factored modules,
+large theorem telescopes, effect projections, and overlapping logical,
+cell-level, typed-memory, and native views increase the cost of seeing which
+remaining premise prevents deployment assurance. The empty-slice mismatch
+illustrates the cost of composition across these views.
+
+Retain useful abstractions, but expose a small set of canonical endpoint
+interfaces. Group coherent invariants into explicit structures without hiding
+their fields; require every added lemma to identify the consumer premise it
+removes. Generate a dependency/assumption summary from declarations and retain
+non-vacuity fixtures beside the endpoint. Do not refactor all 1,440 files at
+once merely to reduce the file count.
+
+\paragraph{F6: Evidence navigation is weaker than the proof infrastructure.}
+The coverage map records scoped obligations, but a reader still needs a
+compact view of the final theorem statements and their unclosed premises.
+Public acceptance evidence must identify the exact source revision, tool
+versions, theorem statements, domain restrictions, unresolved compiler
+premises, and retained replay artifacts. The preview release procedure
+describes how to retain and check commit-bound receipts; the existence of that
+procedure is not evidence that its gates have passed. Development checks should remain clearly distinguished from
+artifact certification; \src{prove.py} already makes that distinction.
+
+\section{Is this the best approach?}
+There is no unconditional best route independent of the assurance target.
+For correctness of emitted Solidity artifacts, retain the hybrid architecture
+but make artifact certification the primary breadth strategy. It can cover
+many compiler transformations at once and avoids proving the native hash table,
+allocator protocol, and every optimizer implementation merely to establish a
+particular source/output semantic relation. Proof generation may remain
+untrusted if acceptance checks the exact statement and binding. Rejection is
+an acceptable loss of completeness, provided it is explicit.
+
+For compiler process memory safety, corruption resistance, and all executions
+of a reusable optimization pass, artifact validation is insufficient.
+Implementation refinement is the right complementary route. Finish a bounded
+vertical slice from real initialization through a native caller and its
+mutations to the semantic endpoint. Continue low-level work when it discharges
+a named premise of that slice, especially the empty adapter path, native hash
+producer, and rehash/owner transition. Avoid making complete standard-library
+or allocator verification a prerequisite unless reducing that trust boundary
+is itself the chosen objective.
+
+A verified general Zig frontend would reduce translation trust but introduces
+a much larger project. Reimplementing the optimizer in Lean could simplify
+some proof interfaces, but would require a new production integration and
+runtime trust story. Neither is justified as an immediate replacement by the
+inspected sources. The existing restricted translation should instead publish
+precise supported constructs, source-validity conditions, platform pins, and
+an explicit rejection inventory.
+
+The next major semantic challenge for artifact coverage is controlled expansion
+into loops and interactions, with proof-producing symbolic execution or
+inductive invariants and an explicit policy for gas-sensitive behavior. A
+bounded unrolling that proves only selected executions must not be advertised
+as all-input preservation. Progress should be reported in admitted language
+features and endpoint premises discharged, not theorem totals.
+
+\section{Review conclusion and reproducibility}
+The project has substantial, carefully scoped proof engineering and a
+defensible separation of implementation and artifact assurance. The strongest
+current claim supported by this review is the presence of conditional
+implementation proofs and soundness/certificate proof sources for explicitly
+restricted artifacts. General compiler correctness, universal native optimizer
+admission, and complete native map/hash composition remain open.
+
+The accompanying \src{lean-verification-next-steps.md} gives ordered milestones
+and acceptance criteria. It proposes work; it changes no verification status.
+This paper uses the IEEEtran conference class and can be compiled with the
+system Tectonic installation:
+\begin{quote}\small
+\texttt{tectonic --outdir docs}\par
+\texttt{\ \ docs/lean-verification-review.tex}
+\end{quote}
+Only document compilation was executed for this review. Lean elaboration,
+kernel replay, extraction freshness, native tests, and benchmark results must
+be obtained separately before asserting current acceptance.
+
+\begin{thebibliography}{14}
+\bibitem{map} oksolc sources, \src{docs/compiler-verification-map.json};
+\src{docs/compiler-verification-boundary.md}; \src{lean/README.md}.
+\bibitem{audit} \src{lean/Contract/Check/Declarations.lean}, especially
+\texttt{closure} and \texttt{axioms}; \src{lean/Contract/Check/Axioms.lean};
+\src{lean/prove.py}.
+\bibitem{airtools} \src{lean/zig_air/README.md};
+\src{lean/zig_air/build_toolchain.py}; \src{lean/zig_air/capture.py};
+\src{lean/zig_air/generate.py}; \src{lean/zig_air/generate_memory.py};
+\src{lean/zig_air/SemanticExport.zig}; \src{lean/zig_air/SemanticValidity.zig}.
+\bibitem{extraction} \src{lean/extract_compiler.py};
+\src{lean/extract_cache.py}; \src{lean/compiler_ir.py};
+\src{lean/Compiler/Extraction/Correspondence.lean}.
+\bibitem{artifactdriver} \src{test/lean/compiler_artifacts.py};
+\src{test/lean/check_compiler_contracts.py};
+\src{test/lean/solidity_function_source.py};
+\src{test/lean/solidity_contract_source.py}.
+\bibitem{algebraic} \src{lean/Compiler/Algebraic/Rules.lean};
+\src{lean/Compiler/Algebraic/Proofs.lean};
+\src{lean/Compiler/Extraction/DispatchProofs.lean}.
+\bibitem{recursive} \src{lean/Compiler/Extraction/InsertionSortNormalization.lean};
+\src{lean/Compiler/Extraction/InternerPhysicalDispatchProduction.lean};
+\src{lean/Compiler/Extraction/InternerPhysicalDispatchPreservation.lean}.
+\bibitem{normalization} \src{lean/Compiler/Extraction/NormalizationMemoryCaller.lean};
+\src{lean/Compiler/Extraction/NormalizationMemorySettles.lean};
+\src{lean/Compiler/Extraction/InternerCallerProduction.lean};
+\src{lean/Compiler/Extraction/InternerPhysicalMeaning.lean};
+\src{lean/Compiler/Extraction/InternerOwnedMemory.lean}.
+\bibitem{nativeendpoints} \src{lean/Compiler/Extraction/InternerNativeFindProduction.lean};
+\src{lean/Compiler/Extraction/InternerNativeForceProduction.lean};
+\src{lean/Compiler/Extraction/InternerNativeGraph.lean}.
+\bibitem{airproofs} \src{lean/Compiler/ZigAir/MachineRefinement.lean};
+\src{lean/Compiler/ZigAir/ControlSafety.lean};
+\src{lean/Compiler/ZigAir/WyhashUpdateAirComplete.lean}.
+\bibitem{hashmap} \src{lean/Compiler/Extraction/ExpressionMapHashNativeEmpty.lean};
+\src{lean/Compiler/Extraction/ExpressionMapSearchMemory.lean};
+\src{lean/Compiler/Extraction/ExpressionMapWyhash.lean}.
+\bibitem{graph} \src{lean/Compiler/Validation/GraphInventory.lean};
+\src{lean/Compiler/Validation/Normalize.lean};
+\src{lean/Compiler/Validation/GraphFailure.lean};
+\src{lean/Compiler/Validation/WordBlock.lean}.
+\bibitem{solidity} \src{lean/Compiler/Validation/SolidityCall.lean};
+\src{lean/Compiler/Validation/SolidityContract.lean};
+\src{lean/Compiler/Validation/SolidityStorage.lean};
+\src{lean/Compiler/Validation/SolidityStorageDeployment.lean};
+\src{lean/Contract/Evm/Subset.lean}; \src{lean/Contract/Evm/Storage.lean};
+\src{lean/Contract/Evm/Frames.lean}; \src{lean/Contract/Evm/StorageFrames.lean}.
+\end{thebibliography}
+\end{document}

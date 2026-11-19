@@ -1,0 +1,93 @@
+/-
+// Copyright (C) 2026 OKcontract Pte. Ltd.
+// SPDX-License-Identifier: GPL-3.0
+Generated from captured AIR; do not edit. Source/backend preservation remains open.
+-/
+import Compiler.ZigAir.AggregateAir
+
+namespace Compiler.ZigAir.GeneratedWyhashInit
+open AggregateAir
+
+def resultType : Memory.Ty := (.aggregate "hash.wyhash.Wyhash" ⟨104, 8⟩ [(0, (.scalar (.int false 64))), (8, (.scalar (.int false 64))), (16, (.object (.array 3 (.scalar (.int false 64))))), (40, (.scalar (.int false 64))), (48, (.scalar (.int false 64))), (56, (.object (.array 48 (.scalar (.int false 8)))))])
+
+def fn_init : Program :=
+{ parameters := [(.scalar (.int false 64))], returnType := resultType, body :=
+  (.bind 0 (.scalar (.int false 64))
+  (.argument 0)
+  (.bind 1 (.pointer true false resultType)
+  (.memory (.alloc resultType))
+  (.bind 2 (.scalar .unit)
+  (.store (.local 1) (.constant (.aggregate resultType [(48, (.scalar (.int false 64 (0)))), (40, (.scalar (.int false 64 (0))))])))
+  (.bind 4 (.pointer true false (.array 3 (.scalar (.int false 64))))
+  (.fieldPointer (.local 1) 16)
+  (.bind 5 (.pointer true false (.scalar (.int false 64)))
+  (.arrayElementPointer (.local 4) (.constant (.value (.scalar (.int false 64 (0))))))
+  (.bind 6 (.scalar (.int false 64))
+  (.memory (.scalar (.bitXor (.local 0) (.constant (.int false 64 (11562461410679940143))))))
+  (.bind 8 (.pointer true false (.scalar (.int false 64)))
+  (.memory (.alloc (.scalar (.int false 64))))
+  (.bind 9 (.scalar .unit)
+  (.store (.local 8) (.local 6))
+  (.bind 11 (.pointer true false (.scalar (.int false 64)))
+  (.memory (.alloc (.scalar (.int false 64))))
+  (.bind 12 (.scalar .unit)
+  (.store (.local 11) (.constant (.value (.scalar (.int false 64 (16646288086500911323))))))
+  (.bind 15 (.scalar (.int false 64))
+  (.load (.local 8))
+  (.bind 16 (.scalar (.int false 128))
+  (.memory (.scalar (.cast .unchecked (.int false 128) (.local 15))))
+  (.bind 17 (.scalar (.int false 64))
+  (.load (.local 11))
+  (.bind 18 (.scalar (.int false 128))
+  (.memory (.scalar (.cast .unchecked (.int false 128) (.local 17))))
+  (.bind 19 (.scalar (.int false 128))
+  (.memory (.scalar (.arithmetic .mul .wrapping (.local 16) (.local 18))))
+  (.bind 20 (.scalar (.int false 64))
+  (.memory (.scalar (.cast .trunc (.int false 64) (.local 19))))
+  (.bind 21 (.scalar .unit)
+  (.store (.local 8) (.local 20))
+  (.bind 22 (.scalar (.int false 128))
+  (.memory (.scalar (.shiftRight (.local 19) (.constant (.int false 7 (64))))))
+  (.bind 23 (.scalar (.int false 64))
+  (.memory (.scalar (.cast .trunc (.int false 64) (.local 22))))
+  (.bind 24 (.scalar .unit)
+  (.store (.local 11) (.local 23))
+  (.bind 26 (.scalar (.int false 64))
+  (.load (.local 8))
+  (.bind 27 (.scalar (.int false 64))
+  (.load (.local 11))
+  (.bind 28 (.scalar (.int false 64))
+  (.memory (.scalar (.bitXor (.local 26) (.local 27))))
+  (.bind 30 (.scalar (.int false 64))
+  (.memory (.scalar (.bitXor (.local 0) (.local 28))))
+  (.bind 31 (.scalar .unit)
+  (.store (.local 5) (.local 30))
+  (.bind 32 (.pointer true false (.array 3 (.scalar (.int false 64))))
+  (.fieldPointer (.local 1) 16)
+  (.bind 33 (.pointer true false (.scalar (.int false 64)))
+  (.arrayElementPointer (.local 32) (.constant (.value (.scalar (.int false 64 (1))))))
+  (.bind 34 (.pointer true false (.array 3 (.scalar (.int false 64))))
+  (.fieldPointer (.local 1) 16)
+  (.bind 35 (.pointer true false (.scalar (.int false 64)))
+  (.arrayElementPointer (.local 34) (.constant (.value (.scalar (.int false 64 (0))))))
+  (.bind 36 (.scalar (.int false 64))
+  (.load (.local 35))
+  (.bind 37 (.scalar .unit)
+  (.store (.local 33) (.local 36))
+  (.bind 38 (.pointer true false (.array 3 (.scalar (.int false 64))))
+  (.fieldPointer (.local 1) 16)
+  (.bind 39 (.pointer true false (.scalar (.int false 64)))
+  (.arrayElementPointer (.local 38) (.constant (.value (.scalar (.int false 64 (2))))))
+  (.bind 40 (.pointer true false (.array 3 (.scalar (.int false 64))))
+  (.fieldPointer (.local 1) 16)
+  (.bind 41 (.pointer true false (.scalar (.int false 64)))
+  (.arrayElementPointer (.local 40) (.constant (.value (.scalar (.int false 64 (0))))))
+  (.bind 42 (.scalar (.int false 64))
+  (.load (.local 41))
+  (.bind 43 (.scalar .unit)
+  (.store (.local 39) (.local 42))
+  (.bind 44 resultType
+  (.load (.local 1))
+  (.ret (.local 44)))))))))))))))))))))))))))))))))))))))) }
+
+end Compiler.ZigAir.GeneratedWyhashInit
