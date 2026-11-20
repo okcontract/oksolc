@@ -1404,6 +1404,8 @@ pub const IRGeneratorForStatements = struct {
             "basefee"
         else if (std.mem.eql(u8, access.member_name, "blobbasefee"))
             "blobbasefee"
+        else if (std.mem.eql(u8, access.member_name, "slotnum"))
+            "slotnum"
         else
             return error.UnsupportedExpression;
         const expression = try self.buildExpression("@0()", .{opcode});

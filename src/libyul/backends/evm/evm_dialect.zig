@@ -5,6 +5,7 @@
 //! Versioned EVM Yul dialect with handle-compatible builtin slots.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("../../ast.zig");
 const BuiltinHandle = @import("../../builtins.zig").BuiltinHandle;
 const Diagnostics = @import("../../../liblangutil/diagnostics.zig");
@@ -58,6 +59,16 @@ pub const EVMDialect = struct {
         evm_version: EVMVersion,
         object_access: bool,
     ) !EVMDialect {
+        return initForSolc(allocator, evm_version, SolcVersion.default, object_access);
+    }
+
+    pub fn initForSolc(
+        allocator: std.mem.Allocator,
+        evm_version: EVMVersion,
+        solc_version: SolcVersion,
+        object_access: bool,
+    ) !EVMDialect {
+        const slotnum_available = evm_version.hasSlotNum() and solc_version.atLeast(.v0_8_37);
         var result: EVMDialect = .{
             .allocator = allocator,
             .object_access = object_access,
@@ -74,7 +85,7 @@ pub const EVMDialect = struct {
                 entry,
                 evm_version,
                 object_access,
-            ))
+            ) and (entry.builtin.instruction != .SLOTNUM or slotnum_available))
                 &entry.builtin
             else
                 null;
@@ -89,7 +100,7 @@ pub const EVMDialect = struct {
 
         try result.verbatim_functions.resize(allocator, verbatim_id_offset);
         @memset(result.verbatim_functions.items, null);
-        try result.createReservedIdentifiers();
+        try result.createReservedIdentifiers(slotnum_available);
 
         result.discard_function = result.findBuiltin("pop");
         result.equality_function = result.findBuiltin("eq");
@@ -356,7 +367,7 @@ pub const EVMDialect = struct {
         return false;
     }
 
-    fn createReservedIdentifiers(self: *EVMDialect) !void {
+    fn createReservedIdentifiers(self: *EVMDialect, slotnum_available: bool) !void {
         @setEvalBranchQuota(10_000);
         inline for (std.enums.values(Instruction)) |instruction| {
             const instruction_name = @tagName(instruction);
@@ -366,7 +377,8 @@ pub const EVMDialect = struct {
                 const lowercase = buffer;
                 break :blk &lowercase;
             };
-            if (!reservedInstructionException(instruction, instruction_name, self.evm_version))
+            if ((instruction != .SLOTNUM or slotnum_available) and
+                !reservedInstructionException(instruction, instruction_name, self.evm_version))
                 try self.reserved.put(name, {});
         }
         try self.reserved.put("difficulty", {});
@@ -538,17 +550,18 @@ const dialect_vtable: AST.DialectVTable = .{
 };
 
 const version_count = @typeInfo(Version).@"enum".field_names.len;
+const dialect_cache_size = 2 * version_count;
 var cache_mutex: std.Io.Mutex = .init;
-var inline_dialect_cache: [version_count]?*EVMDialect = @splat(null);
-var object_dialect_cache: [version_count]?*EVMDialect = @splat(null);
+var inline_dialect_cache: [dialect_cache_size]?*EVMDialect = @splat(null);
+var object_dialect_cache: [dialect_cache_size]?*EVMDialect = @splat(null);
 var reset_callback_registered = false;
 
 pub fn strictAssemblyForEVM(evm_version: EVMVersion) !*const EVMDialect {
-    return cachedDialect(&inline_dialect_cache, evm_version, false);
+    return strictAssemblyForSolc(evm_version, SolcVersion.default, false);
 }
 
 pub fn strictAssemblyForEVMObjects(evm_version: EVMVersion) !*const EVMDialect {
-    return cachedDialect(&object_dialect_cache, evm_version, true);
+    return strictAssemblyForSolc(evm_version, SolcVersion.default, true);
 }
 
 /// Checked counterpart of the upstream `dynamic_cast<EVMDialect const*>`.
@@ -557,9 +570,9 @@ pub fn fromDialect(dialect_value: AST.Dialect) ?*const EVMDialect {
     return dialectFromContext(dialect_value.context);
 }
 
-fn cachedDialect(
-    cache: *[version_count]?*EVMDialect,
+pub fn strictAssemblyForSolc(
     evm_version: EVMVersion,
+    solc_version: SolcVersion,
     object_access: bool,
 ) !*const EVMDialect {
     mutexLock(&cache_mutex);
@@ -568,11 +581,16 @@ fn cachedDialect(
         try (YulString.ResetCallback{ .function = clearDialectCaches }).register();
         reset_callback_registered = true;
     }
-    const index: usize = @intCast(@backingInt(evm_version.version));
+    const cache = if (object_access) &object_dialect_cache else &inline_dialect_cache;
+    // Before Amsterdam the dialect is identical for all supported releases.
+    // With Amsterdam, releases before SLOTNUM need a separate cache entry.
+    const legacy_slotnum = evm_version.hasSlotNum() and !solc_version.atLeast(.v0_8_37);
+    const index = @as(usize, @intCast(@backingInt(evm_version.version))) +
+        if (legacy_slotnum) version_count else 0;
     if (cache[index] == null) {
         const dialect = try std.heap.page_allocator.create(EVMDialect); // zlinter-disable-current-line no_hidden_allocations - process-wide dialect cache has process-wide allocation lifetime
         errdefer std.heap.page_allocator.destroy(dialect); // zlinter-disable-current-line no_hidden_allocations - process-wide dialect cache has process-wide allocation lifetime
-        dialect.* = try EVMDialect.init(std.heap.page_allocator, evm_version, object_access);
+        dialect.* = try EVMDialect.initForSolc(std.heap.page_allocator, evm_version, solc_version, object_access);
         cache[index] = dialect;
     }
     return cache[index].?;
@@ -585,7 +603,7 @@ fn clearDialectCaches(_: ?*anyopaque) void {
     clearDialectCache(&object_dialect_cache);
 }
 
-fn clearDialectCache(cache: *[version_count]?*EVMDialect) void {
+fn clearDialectCache(cache: *[dialect_cache_size]?*EVMDialect) void {
     for (cache) |*maybe_dialect| {
         if (maybe_dialect.*) |dialect| {
             dialect.deinit();

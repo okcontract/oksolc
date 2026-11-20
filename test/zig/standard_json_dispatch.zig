@@ -132,6 +132,83 @@ test "future Yul stack instruction identifiers warn from Solidity 0.8.38" {
     }
 }
 
+test "slot number reads require Solidity 0.8.37 and Amsterdam" {
+    const allocator = std.testing.allocator;
+    const prefix = "// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; ";
+    const cases = [_]struct { language: []const u8, source: []const u8 }{
+        .{ .language = "Solidity", .source = prefix ++ "contract C { function read() external view returns (uint64) { return block.slotnum; } }" },
+        .{ .language = "Solidity", .source = prefix ++ "contract C { function read() external view returns (uint64 n) { assembly { n := slotnum() } } }" },
+        .{ .language = "Yul", .source = "object \"C\" { code { mstore(0, slotnum()) return(0, 32) } }" },
+    };
+    var dispatcher: libsolc.Dispatcher = .{};
+    for (cases, 0..) |case, index| {
+        for ([_][]const u8{ "amsterdam", "osaka" }) |fork| {
+            const amsterdam = std.mem.eql(u8, fork, "amsterdam");
+            const input = try std.json.Stringify.valueAlloc(allocator, .{
+                .language = case.language,
+                .sources = .{ .@"test" = .{ .content = case.source } },
+                .settings = .{
+                    .experimental = true,
+                    .evmVersion = fork,
+                    .viaIR = @as(?bool, if (index < 2) true else null),
+                    .optimizer = .{ .enabled = true },
+                    .outputSelection = .{ .@"*" = .{ .C = &.{"evm.bytecode.opcodes"} } },
+                },
+            }, .{ .emit_null_optional_fields = false });
+            defer allocator.free(input);
+            for (std.enums.values(solidity.SolcVersion)) |target| {
+                var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+                defer output.deinit();
+                const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+                defer parsed.deinit();
+                const diagnostics = if (parsed.value.object.get("errors")) |errors| errors.array.items else &.{};
+                if (amsterdam and target.atLeast(.v0_8_37)) {
+                    try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+                    const artifact = parsed.value.object.get("contracts").?.object.get("test").?.object.get("C").?.object;
+                    const opcodes = artifact.get("evm").?.object.get("bytecode").?.object.get("opcodes").?.string;
+                    try std.testing.expect(std.mem.find(u8, opcodes, "SLOTNUM") != null);
+                } else {
+                    try std.testing.expect(!parsed.value.object.contains("contracts"));
+                    try std.testing.expect(diagnostics.len > 0);
+                    const diagnostic = diagnostics[0].object;
+                    try std.testing.expectEqualStrings("error", diagnostic.get("severity").?.string);
+                    if (index == 0) {
+                        const expected = if (target.atLeast(.v0_8_37)) "1048" else "9582";
+                        try std.testing.expectEqualStrings(expected, diagnostic.get("errorCode").?.string);
+                    } else {
+                        try std.testing.expectEqualStrings("Function \"slotnum\" not found.", diagnostic.get("message").?.string);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "SLOTNUM only reserves its Yul name when available" {
+    const input =
+        \\{"language":"Yul","sources":{"C.yul":{"content":"object \"C\" { code { let slotnum := 7 mstore(0, slotnum) return(0, 32) } }"}},"settings":{"experimental":true,"evmVersion":"amsterdam","optimizer":{"enabled":true},"outputSelection":{"*":{"C":["evm.bytecode.object"]}}}}
+    ;
+    const allocator = std.testing.allocator;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for ([_]solidity.SolcVersion{ .v0_8_39, .v0_8_36 }) |target| {
+        var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(target == .v0_8_36, parsed.value.object.contains("contracts"));
+        const diagnostics = parsed.value.object.get("errors").?.array.items;
+        if (target == .v0_8_36) {
+            try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+        } else {
+            try std.testing.expect(diagnostics.len > 0);
+            try std.testing.expectEqualStrings(
+                "Cannot use builtin function name \"slotnum\" as identifier name.",
+                diagnostics[0].object.get("message").?.string,
+            );
+        }
+    }
+}
+
 test "constant helpers keep checked and wrapping arithmetic separate" {
     const input =
         \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { uint constant VALUE = uint(40) + uint(2); function checked() external pure returns (uint) { return VALUE; } function wrapping() external pure returns (uint) { unchecked { return VALUE; } } }"}},"settings":{"viaIR":true,"outputSelection":{"*":{"*":["ir"]}}}}

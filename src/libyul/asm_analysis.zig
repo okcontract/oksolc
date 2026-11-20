@@ -658,7 +658,8 @@ pub const AsmAnalyzer = struct {
                 .{label},
             );
         }
-        if (self.dialect.reservedIdentifier(label)) {
+        const reserved_identifier = self.dialect.reservedIdentifier(label);
+        if (reserved_identifier) {
             try self.reportFormat(
                 .DeclarationError,
                 5017,
@@ -668,9 +669,11 @@ pub const AsmAnalyzer = struct {
             );
         }
         const future_keyword = Token.isFutureYulKeyword(label);
+        const future_slotnum = self.solc_version.atLeast(.v0_8_37) and
+            !reserved_identifier and std.mem.eql(u8, label, "slotnum");
         const future_stack_instruction = self.solc_version.atLeast(.v0_8_38) and
             (std.mem.eql(u8, label, "swapn") or std.mem.eql(u8, label, "dupn") or std.mem.eql(u8, label, "exchange"));
-        if (future_keyword or Token.isFutureYulReservedIdentifier(label) or future_stack_instruction) {
+        if (future_keyword or Token.isFutureYulReservedIdentifier(label) or future_slotnum or future_stack_instruction) {
             try self.reportFormat(
                 .Warning,
                 5470,

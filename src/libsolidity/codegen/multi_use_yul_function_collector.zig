@@ -6,6 +6,7 @@
 //! `MultiUseYulFunctionCollector.cpp`.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const YulAST = @import("../../libyul/ast.zig");
 const Template = @import("../../libyul/ast_template.zig");
 const Printer = @import("../../libyul/asm_printer.zig");
@@ -26,6 +27,7 @@ pub const MultiUseYulFunctionCollector = struct {
     arena: std.heap.ArenaAllocator,
     /// Optional enclosing object owner. Never reset or free this borrowed arena.
     output_arena: ?*std.heap.ArenaAllocator = null,
+    solc_version: SolcVersion = SolcVersion.default,
     dialect: ?EVMDialect = null,
     generated: std.ArrayList(YulAST.FunctionDefinition) = .empty,
     /// Source origin inherited by the next completed helper. Source-written
@@ -50,7 +52,7 @@ pub const MultiUseYulFunctionCollector = struct {
     }
 
     pub fn generator(self: *MultiUseYulFunctionCollector, version: EVMVersion) CollectorError!Builder {
-        if (self.dialect == null) self.dialect = EVMDialect.init(self.allocator, version, true) catch |err| switch (err) {
+        if (self.dialect == null) self.dialect = EVMDialect.initForSolc(self.allocator, version, self.solc_version, true) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidDialect,
         };

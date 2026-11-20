@@ -4523,6 +4523,13 @@ pub const TypeChecker = struct {
                             node.location,
                             "\"blobbasefee\" is not supported by the VM version.",
                         )
+                    else if (std.mem.eql(u8, value.member_name, "slotnum") and
+                        !self.evm_version.hasSlotNum())
+                        try self.reporter.typeError(
+                            errorId(1048),
+                            node.location,
+                            "\"slotnum\" is not supported by the VM version.",
+                        )
                     else if (std.mem.eql(u8, value.member_name, "prevrandao") and
                         !self.evm_version.hasPrevRandao())
                         try self.reporter.warning(
@@ -5075,7 +5082,9 @@ pub const TypeChecker = struct {
                     null,
                     .{},
                 );
-            } else if (std.mem.eql(u8, name, "difficulty") or
+            } else if (self.solc_version.atLeast(.v0_8_37) and std.mem.eql(u8, name, "slotnum"))
+                try self.type_provider.uint(64)
+            else if (std.mem.eql(u8, name, "difficulty") or
                 std.mem.eql(u8, name, "prevrandao") or
                 std.mem.eql(u8, name, "gaslimit") or
                 std.mem.eql(u8, name, "number") or

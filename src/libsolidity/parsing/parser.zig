@@ -1670,7 +1670,7 @@ pub const Parser = struct {
         defer recursion_guard.deinit();
         var location = self.currentLocation();
         try self.expect(.Assembly);
-        const dialect = EVMDialect.strictAssemblyForEVM(self.evm_version) catch |err| switch (err) {
+        const dialect = EVMDialect.strictAssemblyForSolc(self.evm_version, self.solc_version, false) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidParserState,
         };

@@ -288,7 +288,7 @@ pub const ObjectOptimizer = struct {
             .data => {},
         };
 
-        const dialect = try EVMDialectModule.strictAssemblyForEVMObjects(settings.evm_version);
+        const dialect = try EVMDialectModule.strictAssemblyForSolc(settings.evm_version, settings.solc_version, true);
         var meter = EVMMetrics.GasMeter.initUnsigned(
             dialect,
             is_creation,

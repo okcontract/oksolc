@@ -230,7 +230,7 @@ pub const IRGenerator = struct {
         const creation_object = try Objects.Object.create(allocator, creation_name);
         const deployed_object = try Objects.Object.create(allocator, deployed_name);
         try creation_object.addSubObject(.{ .object = deployed_object });
-        const dialect = (EVMDialect.strictAssemblyForEVMObjects(self.evm_version) catch |err| switch (err) {
+        const dialect = (EVMDialect.strictAssemblyForSolc(self.evm_version, self.context.solc_version, true) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidDialect,
         }).dialect();
@@ -359,6 +359,7 @@ pub const IRGenerator = struct {
             self.solidity_source_provider,
         );
         next_context.solc_version = self.context.solc_version;
+        next_context.functionCollector().solc_version = next_context.solc_version;
         self.context.deinit();
         self.context = next_context;
         self.context.functionCollector().output_arena = self.output_arena;

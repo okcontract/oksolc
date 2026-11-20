@@ -280,6 +280,10 @@ pub const YulStack = struct {
         return success;
     }
 
+    fn evmDialect(self: *const YulStack) !*const EVMDialect.EVMDialect {
+        return EVMDialect.strictAssemblyForSolc(self.evm_version, self.optimiser_settings.solc_version, true);
+    }
+
     fn parse(self: *YulStack, source_name: []const u8, source: []const u8) !bool {
         self.char_stream = try CharStream.initOwned(
             self.allocator,
@@ -289,7 +293,7 @@ pub const YulStack = struct {
         );
         var scanner = try Scanner.init(self.allocator, &self.char_stream.?, .Solidity);
         defer scanner.deinit();
-        const evm_dialect = try EVMDialect.strictAssemblyForEVMObjects(self.evm_version);
+        const evm_dialect = try self.evmDialect();
         var parser = ObjectParser.init(
             self.allocator,
             &scanner,
@@ -316,7 +320,7 @@ pub const YulStack = struct {
     }
 
     fn analyzeObjectTree(self: *YulStack, object: *Object) !bool {
-        const evm_dialect = try EVMDialect.strictAssemblyForEVMObjects(self.evm_version);
+        const evm_dialect = try self.evmDialect();
         return analyzeObjectTreeWithReporter(
             self.allocator,
             object,
@@ -403,7 +407,7 @@ pub const YulStack = struct {
         }
         var temporary_reporter = Diagnostics.ErrorReporter.init(self.allocator);
         defer temporary_reporter.deinit();
-        const evm_dialect = try EVMDialect.strictAssemblyForEVMObjects(self.evm_version);
+        const evm_dialect = try self.evmDialect();
         if (!try analyzeObjectTreeWithReporter(
             self.allocator,
             object,
@@ -669,7 +673,7 @@ fn reparseForTest(self: *YulStack) !void {
     defer self.allocator.free(source);
     var temporary_reporter = Diagnostics.ErrorReporter.init(self.allocator);
     defer temporary_reporter.deinit();
-    const evm_dialect = try EVMDialect.strictAssemblyForEVMObjects(self.evm_version);
+    const evm_dialect = try self.evmDialect();
     const replacement = (try ObjectParser.parseSource(
         self.allocator,
         source,
