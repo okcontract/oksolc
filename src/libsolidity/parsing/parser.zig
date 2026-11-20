@@ -395,7 +395,7 @@ pub const Parser = struct {
                 tokens.items[1..],
                 literals.items[1..],
             );
-        if (literals.items.len >= 2 and
+        if (!self.solc_version.atLeast(.v0_8_37) and literals.items.len >= 2 and
             std.mem.eql(u8, literals.items[0], "experimental") and
             std.mem.eql(u8, literals.items[1], "solidity"))
         {

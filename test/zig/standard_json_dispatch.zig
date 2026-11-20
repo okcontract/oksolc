@@ -70,6 +70,37 @@ test "ABIEncoderV2 warning starts at Solidity 0.8.37" {
     }
 }
 
+test "experimental Solidity pragma is removed from Solidity 0.8.37" {
+    const allocator = std.testing.allocator;
+    const prefix = "// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; ";
+    var dispatcher: libsolc.Dispatcher = .{};
+    for ([_][]const u8{ "pragma experimental solidity; contract C {}", "contract C {} pragma experimental solidity;" }, 0..) |source, index| {
+        const content = try std.mem.concat(allocator, u8, &.{ prefix, source });
+        defer allocator.free(content);
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = content } },
+            .settings = .{
+                .experimental = true,
+                .viaIR = true,
+                .outputSelection = .{ .@"*" = .{ .C = &.{"evm.bytecode.object"} } },
+            },
+        }, .{});
+        defer allocator.free(input);
+        for (std.enums.values(solidity.SolcVersion)) |target| {
+            var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+            defer output.deinit();
+            const expected = if (target.atLeast(.v0_8_37)) "3332" else if (index == 0) "2264" else "8185";
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            const diagnostics = parsed.value.object.get("errors").?.array.items;
+            try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try std.testing.expectEqualStrings(expected, diagnostics[0].object.get("errorCode").?.string);
+            try std.testing.expectEqual(target == .v0_8_36 and index == 0, parsed.value.object.contains("contracts"));
+        }
+    }
+}
+
 test "constant helpers keep checked and wrapping arithmetic separate" {
     const input =
         \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { uint constant VALUE = uint(40) + uint(2); function checked() external pure returns (uint) { return VALUE; } function wrapping() external pure returns (uint) { unchecked { return VALUE; } } }"}},"settings":{"viaIR":true,"outputSelection":{"*":{"*":["ir"]}}}}

@@ -210,6 +210,12 @@ const SyntaxChecker = struct {
                 node.location,
                 "Unsupported experimental feature name.",
             );
+        if (feature == .Solidity and self.options.solc_version.atLeast(.v0_8_37))
+            return self.reporter.syntaxError(
+                errorId(3332),
+                node.location,
+                "The experimental Solidity prototype has been removed from the compiler.",
+            );
         const source = self.source_unit orelse return error.InvalidAst;
         const annotation = try sourceUnitAnnotation(self.tree, source);
         if (containsFeature(annotation.experimental_features.items, feature))
