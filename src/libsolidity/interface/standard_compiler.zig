@@ -4435,12 +4435,11 @@ fn parseSettings(
                 const contract_selections = jsonObject(source_value) orelse continue;
                 for (contract_selections.keys(), contract_selections.values()) |contract_name, *contract_value| {
                     const artifacts = jsonArray(contract_value) orelse continue;
-                    for (artifacts.items) |*artifact_value|
-                        try result.addOutput(
-                            source_name,
-                            contract_name,
-                            jsonString(artifact_value).?,
-                        );
+                    for (artifacts.items) |*artifact_value| {
+                        const artifact = jsonString(artifact_value).?;
+                        if (solc_version.atLeast(.v0_8_38) and std.mem.eql(u8, artifact, "yulCFGJson")) continue;
+                        try result.addOutput(source_name, contract_name, artifact);
+                    }
                 }
             }
         } else {
@@ -4459,7 +4458,11 @@ fn parseSettings(
             hasExactArtifactRequest(&result.projection.output_selection, "irOptimizedAst") or
             hasExactArtifactRequest(&result.projection.output_selection, "yulCFGJson"))
         {
-            return .{ .fatal = .{ .error_type = .FatalError, .message = "'irAst', 'irOptimizedAst', 'yulCFGJson', and 'ethdebug' outputs are experimental and can only be used with the 'settings.experimental' option enabled." } };
+            const message = if (solc_version.atLeast(.v0_8_38))
+                "'irAst', 'irOptimizedAst', and 'ethdebug' outputs are experimental and can only be used with the 'settings.experimental' option enabled."
+            else
+                "'irAst', 'irOptimizedAst', 'yulCFGJson', and 'ethdebug' outputs are experimental and can only be used with the 'settings.experimental' option enabled.";
+            return .{ .fatal = .{ .error_type = .FatalError, .message = message } };
         }
         if (result.ir.via_ssa_cfg)
             return .{ .fatal = .{ .error_type = .FatalError, .message = "'viaSSACFG' setting is experimental and can only be used with the 'settings.experimental' option enabled." } };
