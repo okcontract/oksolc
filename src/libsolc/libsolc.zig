@@ -438,6 +438,7 @@ pub const Dispatcher = struct {
             const bytes = StandardCompiler.compileYulStandardJsonAlloc(
                 allocator,
                 root,
+                request.solc_version,
                 callback_state.loaded_sources.items,
                 callback_state.source_errors.items,
                 object_optimizer,
@@ -474,6 +475,7 @@ pub const Dispatcher = struct {
             const bytes = StandardCompiler.compileSolidityStandardJsonAlloc(
                 allocator,
                 root,
+                request.solc_version,
                 callback_state.loaded_sources.items,
                 callback_state.source_errors.items,
                 read_callback,

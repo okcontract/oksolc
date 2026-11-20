@@ -16,8 +16,10 @@ const CompilerStack = @import("compiler_stack.zig");
 const DebugSettings = @import("debug_settings.zig");
 const ImportRemapper = @import("import_remapper.zig");
 const OptimiserSettings = @import("optimiser_settings.zig").OptimiserSettings;
+const SolcVersion = @import("common").SolcVersion;
 
 pub const FrontendOptions = struct {
+    solc_version: SolcVersion = SolcVersion.default,
     evm_version: EVMVersion = EVMVersion.current(),
     remappings: std.ArrayList(ImportRemapper.NormalizedRemapping) = .empty,
     experimental: bool = false,

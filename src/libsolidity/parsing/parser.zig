@@ -35,6 +35,7 @@ pub const ParseError = AST.CreateNodeError ||
 
 pub const ParseResult = struct {
     tree: AST.Tree,
+    solc_version: Version.SolcVersion = Version.SolcVersion.default,
 
     pub fn root(self: *const ParseResult) ?*const AST.Node {
         return self.tree.root;
@@ -96,6 +97,28 @@ pub fn parseSourceWithIdentity(
     source_id: AST.SourceId,
     previous_max_id: i64,
 ) ParseError!ParseResult {
+    return parseSourceWithVersion(
+        allocator,
+        source,
+        source_name,
+        error_reporter,
+        evm_version,
+        Version.SolcVersion.default,
+        source_id,
+        previous_max_id,
+    );
+}
+
+pub fn parseSourceWithVersion(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    source_name: []const u8,
+    error_reporter: *Diagnostics.ErrorReporter,
+    evm_version: EVMVersion,
+    solc_version: Version.SolcVersion,
+    source_id: AST.SourceId,
+    previous_max_id: i64,
+) ParseError!ParseResult {
     var tree = try AST.Tree.initWithSourceId(
         allocator,
         source_id,
@@ -108,11 +131,12 @@ pub fn parseSourceWithIdentity(
     var scanner = try ScannerModule.Scanner.init(allocator, &stream, .Solidity);
     defer scanner.deinit();
     var parser = Parser.init(allocator, &tree, &scanner, error_reporter, evm_version);
+    parser.solc_version = solc_version;
     tree.root = parser.parse() catch |err| switch (err) {
         error.FatalDiagnostic => null,
         else => return err,
     };
-    return .{ .tree = tree };
+    return .{ .tree = tree, .solc_version = solc_version };
 }
 
 const VarDeclKind = enum { file_level, state, other };
@@ -179,6 +203,7 @@ pub const Parser = struct {
     tree: *AST.Tree,
     base: ParserBaseModule.ParserBase,
     evm_version: EVMVersion,
+    solc_version: Version.SolcVersion = Version.SolcVersion.default,
     inside_modifier: bool = false,
     experimental_solidity: bool = false,
 
@@ -422,7 +447,7 @@ pub const Parser = struct {
             },
         };
         defer expression.deinit();
-        var current = SemVer.SemVerVersion.init(self.allocator, Version.VersionNumber) catch |err| switch (err) {
+        var current = SemVer.SemVerVersion.init(self.allocator, self.solc_version.number()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidParserState,
         };
@@ -430,7 +455,7 @@ pub const Parser = struct {
         if (!expression.matches(current)) {
             const message = try self.allocator.print(
                 "Source file requires different compiler version (current compiler is {s}) - note that nightly builds are considered to be strictly less than the released version",
-                .{Version.VersionString},
+                .{Version.compatibilityString(self.solc_version)},
             );
             defer self.allocator.free(message);
             try self.base.error_reporter.fatal(

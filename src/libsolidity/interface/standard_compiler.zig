@@ -66,6 +66,7 @@ const LinkerObjectModule = @import("../../libevmasm/linker_object.zig");
 const LinkerObject = LinkerObjectModule.LinkerObject;
 const CompilationOptionsModule = @import("compilation_options.zig");
 const CompilationOptions = CompilationOptionsModule.CompilationOptions;
+const SolcVersion = @import("common").SolcVersion;
 const OutputSelection = CompilationOptionsModule.OutputSelection;
 const DebugSettings = @import("debug_settings.zig");
 const OptimiserSettingsModule = @import("optimiser_settings.zig");
@@ -255,6 +256,7 @@ fn assembleAndLinkBackend(
 pub fn compileSolidityStandardJsonAlloc(
     allocator: std.mem.Allocator,
     input: *const Json,
+    solc_version: SolcVersion,
     loaded_sources: []const SourceContent,
     source_errors: []const []const u8,
     read_callback: ?SolidityReadFile.ReadCallback,
@@ -296,6 +298,7 @@ pub fn compileSolidityStandardJsonAlloc(
     const parsed_options = try parseSettings(
         arena,
         input,
+        solc_version,
     );
     var settings = switch (parsed_options) {
         .options => |value| value,
@@ -448,6 +451,7 @@ pub fn compileSolidityStandardJsonAlloc(
                 if (previous.reusableFor(
                     &source.content_digest,
                     settings.frontend.evm_version,
+                    solc_version,
                 )) {
                     try candidate_syntax.retainReused(source_id, previous);
                     previous.replayParseDiagnostics(&reporter) catch |err| switch (err) {
@@ -458,12 +462,13 @@ pub fn compileSolidityStandardJsonAlloc(
                 };
 
             const diagnostic_start = reporter.diagnostics().len;
-            var parsed = try SolidityParser.parseSourceWithIdentity(
+            var parsed = try SolidityParser.parseSourceWithVersion(
                 allocator,
                 source.content,
                 source.name,
                 &reporter,
                 settings.frontend.evm_version,
+                solc_version,
                 source_id,
                 next_ast_id,
             );
@@ -1915,6 +1920,7 @@ fn appendSolidityViaIRArtifacts(
         source_graph,
     );
     const metadata_options: SolidityCompilerStack.MetadataOptions = .{
+        .solc_version = settings.frontend.solc_version,
         .evm_version = settings.frontend.evm_version,
         .optimiser = settings.optimizer.settings,
         .bytecode_hash = settings.metadata.hash,
@@ -3999,6 +4005,7 @@ fn solidityContractAnnotationConst(
 pub fn compileYulStandardJsonAlloc(
     allocator: std.mem.Allocator,
     input: *const Json,
+    solc_version: SolcVersion,
     loaded_sources: []const SourceContent,
     source_errors: []const []const u8,
     shared_object_optimizer: ?*ObjectOptimizer,
@@ -4019,6 +4026,7 @@ pub fn compileYulStandardJsonAlloc(
     const parsed_options = try parseSettings(
         arena,
         input,
+        solc_version,
     );
     var settings = switch (parsed_options) {
         .options => |value| value,
@@ -4213,8 +4221,10 @@ pub fn compileYulStandardJsonAlloc(
 fn parseSettings(
     allocator: std.mem.Allocator,
     input: *const Json,
+    solc_version: SolcVersion,
 ) !CompilationOptionsResult {
     var result = CompilationOptions.init(allocator);
+    result.frontend.solc_version = solc_version;
     var result_transferred = false;
     defer if (!result_transferred) result.deinit();
 
@@ -5256,7 +5266,7 @@ test "parsed compilation options do not borrow the JSON document" {
             "\"outputSelection\":{\"A.sol\":{\"A\":[\"evm.bytecode\"]}}}}",
     );
     const root = parsed.document.rootConst();
-    const result = try parseSettings(std.testing.allocator, root);
+    const result = try parseSettings(std.testing.allocator, root, SolcVersion.default);
     var options = switch (result) {
         .options => |value| value,
         .fatal => return error.UnexpectedFatalOptions,

@@ -247,6 +247,7 @@ pub fn frontendFingerprint(options: *const CompilationOptions) FrontendFingerpri
     // Yul optimizer is active, so this optimizer setting also belongs to the
     // frontend invalidation domain.
     hasher.addBool(10, options.optimizer.settings.run_yul_optimiser);
+    hasher.addU64(11, @backingInt(options.frontend.solc_version));
     return hasher.finish();
 }
 

@@ -10,6 +10,40 @@ const standard_json = solidity.standard_json;
 const Profiler = solidity.libsolutil.profiler.Profiler;
 const ObjectOptimizer = solidity.libyul.object_optimizer.ObjectOptimizer;
 
+test "compiler sessions isolate Solidity version targets" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C {}"}},"settings":{"viaIR":true,"metadata":{"bytecodeHash":"none"},"outputSelection":{"*":{"*":["metadata","evm.deployedBytecode.object"]}}}}
+    ;
+    var session = solidity.CompilerSession.init(allocator);
+    defer session.deinit();
+    for (std.enums.values(solidity.SolcVersion)) |target| {
+        var response = try session.compile(allocator, .{ .input = input, .solc_version = target });
+        defer response.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.bytes, .{});
+        defer parsed.deinit();
+        const contract = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object;
+        const metadata = try std.json.parseFromSlice(std.json.Value, allocator, contract.get("metadata").?.string, .{});
+        defer metadata.deinit();
+        try std.testing.expectEqualStrings(target.metadataVersion(), metadata.value.object.get("compiler").?.object.get("version").?.string);
+        const bytecode = contract.get("evm").?.object.get("deployedBytecode").?.object.get("object").?.string;
+        const version_hex = std.fmt.bytesToHex(target.compactBytes(), .lower);
+        const trailer = try allocator.print("a164736f6c6343{s}000a", .{version_hex});
+        defer allocator.free(trailer);
+        try std.testing.expect(std.mem.endsWith(u8, bytecode, trailer));
+    }
+
+    const exact_pragma =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.39; contract C {}"}},"settings":{"outputSelection":{"*":{"*":["abi"]}}}}
+    ;
+    var accepted = try session.compile(allocator, .{ .input = exact_pragma, .solc_version = .v0_8_39 });
+    defer accepted.deinit();
+    try std.testing.expect(std.mem.find(u8, accepted.bytes, "\"abi\":[]") != null);
+    var rejected = try session.compile(allocator, .{ .input = exact_pragma, .solc_version = .v0_8_36 });
+    defer rejected.deinit();
+    try std.testing.expect(std.mem.find(u8, rejected.bytes, "\"errorCode\":\"5333\"") != null);
+}
+
 test "tuple conversion cleanup matches solc with separately owned component types" {
     const cases = .{
         .{ @embedFile("standard-json/solidity-tuple-cleanup-optimized.json"), @embedFile("standard-json/expected/solidity-tuple-cleanup-optimized.json") },

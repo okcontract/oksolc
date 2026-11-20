@@ -6,6 +6,7 @@
 
 pub const execution = @import("execution.zig");
 pub const standard_json = @import("standard_json.zig");
+pub const SolcVersion = @import("solc_version.zig").SolcVersion;
 
 test {
     _ = execution;

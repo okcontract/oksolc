@@ -249,7 +249,7 @@ pub const CompilerSession = struct {
 
         const reference = exactResponseReference(
             self.compiler_fingerprint,
-            request.input,
+            request,
         );
 
         // Progress is always observable.
@@ -412,13 +412,14 @@ pub const CompilerSession = struct {
 
 fn exactResponseReference(
     compiler_fingerprint: PhaseKey.CompilerFingerprint,
-    input: []const u8,
+    request: common.standard_json.Request,
 ) ArtifactStoreModule.ArtifactRef {
     var key_builder = PhaseKey.PhaseKeyBuilder.init(
         .exact_response,
         compiler_fingerprint,
     );
-    key_builder.addInputBytes(input);
+    key_builder.addInputBytes(request.solc_version.number());
+    key_builder.addInputBytes(request.input);
     return .{
         .kind = .exact_response,
         .key = key_builder.finish(),
@@ -2086,7 +2087,7 @@ test "Solidity coherence preflight rejects a persistent response without copying
     defer expected_revised.deinit();
 
     var probe_store: ExactResponseProbeStore = .{
-        .reference = exactResponseReference(fingerprint, first_input),
+        .reference = exactResponseReference(fingerprint, .{ .input = first_input }),
         .payload = expected_first.bytes,
     };
     var session = try CompilerSession.initWithBackingStore(
@@ -2181,7 +2182,7 @@ test "Solidity coherence is rechecked after a persistent response copy" {
     defer expected_revised.deinit();
 
     var probe_store: ExactResponseProbeStore = .{
-        .reference = exactResponseReference(fingerprint, first_input),
+        .reference = exactResponseReference(fingerprint, .{ .input = first_input }),
         .payload = expected_first.bytes,
         .block_get = true,
     };

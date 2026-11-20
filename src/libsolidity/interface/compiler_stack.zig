@@ -64,6 +64,7 @@ pub const MetadataSources = struct {
 };
 
 pub const MetadataOptions = struct {
+    solc_version: Version.SolcVersion = Version.SolcVersion.default,
     evm_version: EVMVersion = EVMVersion.current(),
     optimiser: OptimiserSettings = OptimiserSettings.minimal(),
     bytecode_hash: MetadataHash = .ipfs,
@@ -96,7 +97,7 @@ pub fn createMetadataAlloc(
     var metadata: Json = .{ .object = .empty };
 
     var compiler: Json = .{ .object = .empty };
-    try putString(scratch, &compiler, "version", Version.MetadataVersion);
+    try putString(scratch, &compiler, "version", options.solc_version.metadataVersion());
     try metadata.object.put(scratch, "compiler", compiler);
     try putString(scratch, &metadata, "language", "Solidity");
 
@@ -170,7 +171,7 @@ pub fn createCBORMetadataAlloc(
         .none => {},
     }
     if (options.experimental) try encoder.pushBool("experimental", true);
-    try encoder.pushBytes("solc", &Version.VersionCompactBytes);
+    try encoder.pushBytes("solc", &options.solc_version.compactBytes());
     return encoder.serialise();
 }
 

@@ -20,6 +20,7 @@ pub const libsolc = compiler.libsolc;
 pub const incremental = compiler.incremental;
 /// Independent oksolc product version. See baseline.version for the Solidity target.
 pub const version = libsolidity.@"interface/version".OksolcVersion;
+pub const SolcVersion = @import("common").SolcVersion;
 pub const StandardJsonDispatcher = libsolc.libsolc.Dispatcher;
 /// Supported long-lived in-memory Standard JSON compiler session.
 pub const CompilerSession = incremental.CompilerSession;
