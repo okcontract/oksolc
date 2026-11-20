@@ -17,6 +17,7 @@ const FunctionSelector = @import("../../libsolutil/function_selector.zig");
 const Numeric = @import("../../libsolutil/numeric.zig");
 const SetOnce = @import("../../libsolutil/set_once.zig");
 const StringUtils = @import("../../libsolutil/string_utils.zig");
+const SolcVersion = @import("common").SolcVersion;
 
 pub const CheckError = ConstantEvaluator.EvaluateError ||
     std.mem.Allocator.Error ||
@@ -36,6 +37,7 @@ pub const PostTypeContractLevelChecker = struct {
     tree: *AST.Tree,
     reporter: *Diagnostics.ErrorReporter,
     type_provider: *TypeProviderModule.TypeProvider,
+    solc_version: SolcVersion = SolcVersion.default,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -280,10 +282,9 @@ pub const PostTypeContractLevelChecker = struct {
             try self.reporter.typeError(errorId(6753), expression.location, message);
             return;
         }
-        if (!TypeBehavior.isImplicitlyConvertibleTo(
-            expression_type,
-            self.type_provider.uint256(),
-        )) {
+        if (!self.solc_version.atLeast(.v0_8_37) and
+            !TypeBehavior.isImplicitlyConvertibleTo(expression_type, self.type_provider.uint256()))
+        {
             const rendered = try TypeBehavior.humanReadableNameAlloc(
                 self.allocator,
                 expression_type,

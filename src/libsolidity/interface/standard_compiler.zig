@@ -1297,6 +1297,7 @@ fn analyzeSolidityFrontend(
                 reporter,
                 type_provider,
             );
+            checker.solc_version = settings.frontend.solc_version;
             if (!(try checker.check(root))) no_errors = false;
             try recordSemanticDiagnosticDelta(
                 semantic,
