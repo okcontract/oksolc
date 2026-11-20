@@ -295,6 +295,7 @@ pub const YulStack = struct {
             &self.error_reporter,
             evm_dialect.dialect(),
         );
+        parser.solc_version = self.optimiser_settings.solc_version;
         self.parser_result = try parser.parse(false);
         if (!self.error_reporter.hasErrors() and self.parser_result != null)
             self.stack_state = .parsed;
