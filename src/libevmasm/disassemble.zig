@@ -5,6 +5,7 @@
 //! Bytecode iteration and textual disassembly translated from `Disassemble.cpp`.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const instruction = @import("instruction.zig");
 const EVMVersion = @import("../liblangutil/evm_version.zig").EVMVersion;
 
@@ -58,11 +59,23 @@ pub fn disassembleAlloc(
     evm_version: EVMVersion,
     delimiter: []const u8,
 ) std.mem.Allocator.Error![]u8 {
+    return disassembleForSolcAlloc(allocator, code, evm_version, SolcVersion.default, delimiter);
+}
+
+pub fn disassembleForSolcAlloc(
+    allocator: std.mem.Allocator,
+    code: []const u8,
+    evm_version: EVMVersion,
+    solc_version: SolcVersion,
+    delimiter: []const u8,
+) std.mem.Allocator.Error![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     var decoded = iterator(code, evm_version);
     while (decoded.next()) |item| {
-        if (!instruction.isValidInstruction(item.instruction)) {
+        if (!instruction.isValidInstruction(item.instruction) or
+            (item.instruction == .SLOTNUM and !solc_version.atLeast(.v0_8_37)))
+        {
             try appendFormat(allocator, &output, "0x{X}", .{@backingInt(item.instruction)});
         } else {
             const info = instruction.instructionInfo(item.instruction, evm_version);

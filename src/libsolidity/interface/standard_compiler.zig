@@ -2357,7 +2357,7 @@ fn appendSolidityViaIRArtifacts(
                 "bytecode",
                 false,
                 &assembly_pair.creation,
-                settings.frontend.evm_version,
+                &settings.frontend,
                 true,
             );
             try appendMachineObject(
@@ -2369,7 +2369,7 @@ fn appendSolidityViaIRArtifacts(
                 "deployedBytecode",
                 true,
                 &assembly_pair.deployed,
-                settings.frontend.evm_version,
+                &settings.frontend,
                 true,
             );
             if (artifactContract(
@@ -2782,7 +2782,7 @@ const ParallelViaIRJob = struct {
             "bytecode",
             false,
             &assembly_pair.creation,
-            self.settings.frontend.evm_version,
+            &self.settings.frontend,
             true,
         );
         try appendMachineObject(
@@ -2794,7 +2794,7 @@ const ParallelViaIRJob = struct {
             "deployedBytecode",
             true,
             &assembly_pair.deployed,
-            self.settings.frontend.evm_version,
+            &self.settings.frontend,
             true,
         );
         if (artifactContract(
@@ -4205,7 +4205,7 @@ pub fn compileYulStandardJsonAlloc(
         "bytecode",
         false,
         &assembly_pair.creation,
-        settings.frontend.evm_version,
+        &settings.frontend,
         false,
     );
     try appendMachineObject(
@@ -4217,7 +4217,7 @@ pub fn compileYulStandardJsonAlloc(
         "deployedBytecode",
         true,
         &assembly_pair.deployed,
-        settings.frontend.evm_version,
+        &settings.frontend,
         false,
     );
 
@@ -4636,7 +4636,7 @@ fn appendMachineObject(
     kind: []const u8,
     deployed: bool,
     machine_object: *const YulStackModule.MachineAssemblyObject,
-    evm_version: EVMVersion,
+    frontend: *const CompilationOptionsModule.FrontendOptions,
     include_generated_sources: bool,
 ) !void {
     const prefix = try allocator.print("evm.{s}", .{kind});
@@ -4669,7 +4669,13 @@ fn appendMachineObject(
         try bytecode_json.object.put(allocator, "object", .{ .string = value });
     }
     if (requestedElement(output_selection, source_name, contract_name, prefix, "opcodes")) {
-        const value = try Disassemble.disassembleAlloc(allocator, bytecode.bytecode.items, evm_version, " ");
+        const value = try Disassemble.disassembleForSolcAlloc(
+            allocator,
+            bytecode.bytecode.items,
+            frontend.evm_version,
+            frontend.solc_version,
+            " ",
+        );
         try bytecode_json.object.put(allocator, "opcodes", .{ .string = value });
     }
     if (requestedElement(output_selection, source_name, contract_name, prefix, "sourceMap")) {

@@ -209,6 +209,35 @@ test "SLOTNUM only reserves its Yul name when available" {
     }
 }
 
+test "SLOTNUM opcode rendering follows the selected Solidity release" {
+    const allocator = std.testing.allocator;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for ([_][]const u8{ "osaka", "amsterdam" }) |fork| {
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Yul",
+            .sources = .{ .@"C.yul" = .{ .content = "object \"C\" { code { verbatim_0i_0o(hex\"4b00\") } }" } },
+            .settings = .{
+                .experimental = true,
+                .evmVersion = fork,
+                .outputSelection = .{ .@"*" = .{ .C = &.{ "evm.bytecode.object", "evm.bytecode.opcodes" } } },
+            },
+        }, .{});
+        defer allocator.free(input);
+        for (std.enums.values(solidity.SolcVersion)) |target| {
+            var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+            defer output.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            const contracts = parsed.value.object.get("contracts").?.object;
+            const artifact = contracts.get("C.yul").?.object.get("C").?.object;
+            const bytecode = artifact.get("evm").?.object.get("bytecode").?.object;
+            try std.testing.expectEqualStrings("4b00", bytecode.get("object").?.string);
+            const expected = if (target.atLeast(.v0_8_37)) "SLOTNUM STOP " else "0x4B STOP ";
+            try std.testing.expectEqualStrings(expected, bytecode.get("opcodes").?.string);
+        }
+    }
+}
+
 test "constant helpers keep checked and wrapping arithmetic separate" {
     const input =
         \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { uint constant VALUE = uint(40) + uint(2); function checked() external pure returns (uint) { return VALUE; } function wrapping() external pure returns (uint) { unchecked { return VALUE; } } }"}},"settings":{"viaIR":true,"outputSelection":{"*":{"*":["ir"]}}}}
