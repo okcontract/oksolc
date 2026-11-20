@@ -3564,6 +3564,7 @@ fn generateSolidityYulCached(
         settings.optimizer.settings,
     );
     defer generator.deinit();
+    generator.context.solc_version = settings.frontend.solc_version;
     const ir = try generator.run(
         contract_source.tree,
         @constCast(contract),

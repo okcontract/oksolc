@@ -11,6 +11,10 @@ pub const SolcVersion = enum(u8) {
 
     pub const default: SolcVersion = .v0_8_36;
 
+    pub fn atLeast(self: SolcVersion, minimum: SolcVersion) bool {
+        return @backingInt(self) >= @backingInt(minimum);
+    }
+
     pub fn parse(text: []const u8) ?SolcVersion {
         for (std.enums.values(SolcVersion)) |version| {
             if (std.mem.eql(u8, text, version.number())) return version;

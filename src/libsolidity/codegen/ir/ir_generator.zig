@@ -347,7 +347,7 @@ pub const IRGenerator = struct {
             return error.FunctionQueueNotEmpty;
         if (self.context.functionCollector().generated.items.len != 0)
             return error.FunctionCollectorNotEmpty;
-        const next_context = try ContextModule.IRGenerationContext.init(
+        var next_context = try ContextModule.IRGenerationContext.init(
             self.allocator,
             self.type_provider,
             self.compatibility_ids,
@@ -358,6 +358,7 @@ pub const IRGenerator = struct {
             self.debug_info_selection,
             self.solidity_source_provider,
         );
+        next_context.solc_version = self.context.solc_version;
         self.context.deinit();
         self.context = next_context;
         self.context.functionCollector().output_arena = self.output_arena;
@@ -713,7 +714,11 @@ pub const IRGenerator = struct {
         if (functions.items.len != 0) {
             const shift = try utils.shiftRightFunction(224);
             defer self.allocator.free(shift);
-            var branch = try generator.ifStatement(try generator.expression("iszero(lt(calldatasize(), 4))", .{}), try generator.statements("let selector := @0(calldataload(0))", .{shift}));
+            const has_selector = if (self.context.solc_version.atLeast(.v0_8_38))
+                try generator.expression("gt(calldatasize(), 3)", .{})
+            else
+                try generator.expression("iszero(lt(calldatasize(), 4))", .{});
+            var branch = try generator.ifStatement(has_selector, try generator.statements("let selector := @0(calldataload(0))", .{shift}));
             var dispatch = try generator.switchStatement(try generator.identifier("selector"), &.{});
             try dispatch.switch_statement.cases.ensureTotalCapacityPrecise(generator.allocator(), functions.items.len + 1);
             for (functions.items) |function| {

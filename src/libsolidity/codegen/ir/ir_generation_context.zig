@@ -6,6 +6,7 @@
 //! `IRGenerationContext.cpp`.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("../../ast/ast.zig");
 const ASTAnnotations = @import("../../ast/ast_annotations.zig");
 const CompatibilityIdResolver = @import("../../ast/compatibility_id_resolver.zig").CompatibilityIdResolver;
@@ -83,6 +84,7 @@ pub const InternalDispatchMap = struct {
 };
 
 pub const IRGenerationContext = struct {
+    solc_version: SolcVersion = SolcVersion.default,
     allocator: std.mem.Allocator,
     type_provider: *TypeProviderModule.TypeProvider,
     compatibility_ids: CompatibilityIdResolver,

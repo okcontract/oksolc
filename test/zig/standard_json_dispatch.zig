@@ -44,6 +44,19 @@ test "compiler sessions isolate Solidity version targets" {
     try std.testing.expect(std.mem.find(u8, rejected.bytes, "\"errorCode\":\"5333\"") != null);
 }
 
+test "external dispatch uses the selected Solidity release" {
+    const input =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { function value() external pure returns (uint) { return 7; } }"}},"settings":{"viaIR":true,"outputSelection":{"*":{"*":["ir"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for (std.enums.values(solidity.SolcVersion)) |target| {
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input, .solc_version = target });
+        defer output.deinit();
+        const condition = if (target.atLeast(.v0_8_38)) "gt(calldatasize(), 3)" else "iszero(lt(calldatasize(), 4))";
+        try std.testing.expect(std.mem.find(u8, output.bytes, condition) != null);
+    }
+}
+
 test "tuple conversion cleanup matches solc with separately owned component types" {
     const cases = .{
         .{ @embedFile("standard-json/solidity-tuple-cleanup-optimized.json"), @embedFile("standard-json/expected/solidity-tuple-cleanup-optimized.json") },
