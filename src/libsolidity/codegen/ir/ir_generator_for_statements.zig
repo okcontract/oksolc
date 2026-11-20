@@ -5169,10 +5169,9 @@ pub const IRGeneratorForStatements = struct {
                     .constant => |constant| @as(?u32, constant),
                     .runtime => null,
                 };
-                const update = try self.utils.updateStorageValueAtLocationFunction(
+                const update = try self.utils.storageAssignmentFunction(
                     value.type_ref,
                     lvalue.type_ref,
-                    .Unspecified,
                     offset,
                 );
                 defer self.allocator.free(update);

@@ -3839,6 +3839,170 @@ pub const YulUtilFunctions = struct {
         return self.function_collector.copyFunctionName(name);
     }
 
+    pub fn storageAssignmentFunction(
+        self: *YulUtilFunctions,
+        from_type: *const Types.Type,
+        to_type: *const Types.Type,
+        offset: ?u32,
+    ) UtilError![]u8 {
+        if (from_type.category() == to_type.category() and
+            TypeBehavior.dataStoredIn(from_type, .Storage) and
+            TypeBehavior.dataStoredIn(to_type, .Storage) and
+            TypeBehavior.hasCyclicDefinition(from_type))
+            return self.copyToStorageWithOverlapGuardFunction(from_type, to_type, offset);
+        return self.updateStorageValueFunction(from_type, to_type, offset);
+    }
+
+    fn copyToStorageWithOverlapGuardFunction(
+        self: *YulUtilFunctions,
+        from_type: *const Types.Type,
+        to_type: *const Types.Type,
+        offset: ?u32,
+    ) UtilError![]u8 {
+        if (offset != null and offset.? != 0) return error.InvalidType;
+        const from_identifier = try TypeBehavior.compatibilityIdentifierAlloc(self.allocator, self.compatibility_ids, from_type);
+        defer self.allocator.free(from_identifier);
+        const to_identifier = try TypeBehavior.compatibilityIdentifierAlloc(self.allocator, self.compatibility_ids, to_type);
+        defer self.allocator.free(to_identifier);
+        const name = try self.allocator.print(
+            "storage_copy_with_overlap_guard_{s}{s}_to_{s}",
+            .{ if (offset == null) "" else "offset_0_", from_identifier, to_identifier },
+        );
+        defer self.allocator.free(name);
+        if (!(try self.function_collector.beginFunction(name)))
+            return self.function_collector.copyFunctionName(name);
+        errdefer self.function_collector.abortFunction(name);
+
+        const memory_type = try self.type_provider.withLocation(from_type, .Memory, true);
+        const load_to_memory = try self.readFromStorageReferenceType(memory_type);
+        defer self.allocator.free(load_to_memory);
+        const copy_from_memory = switch (from_type.payload) {
+            .Array => try self.copyArrayToStorageFunction(memory_type, to_type),
+            .Struct => try self.copyStructToStorageFunction(memory_type, to_type),
+            else => return error.InvalidType,
+        };
+        defer self.allocator.free(copy_from_memory);
+        const copy_directly = try self.updateStorageValueFunction(from_type, to_type, 0);
+        defer self.allocator.free(copy_directly);
+        const panic = try self.panicFunction(.generic);
+        defer self.allocator.free(panic);
+        const contains = try self.targetContainsSourceFunction(to_type, from_type);
+        defer self.allocator.free(contains);
+
+        const generator = try self.function_collector.generator(self.evm_version);
+        const offset_names: []const []const u8 = if (offset == null) &.{"offset"} else &.{};
+        const offset_check = if (offset == null)
+            try generator.statements("if offset { @0() }", .{panic})
+        else
+            Yul.Block{};
+        // The snapshot owns all its allocations, and copying it to storage
+        // leaves no memory references live. Reclaim its memory after the copy.
+        const code = try generator.functionDefinition(
+            \\function @0(targetSlot, @1, sourceSlot) {
+            \\    @2
+            \\    if eq(targetSlot, sourceSlot) { leave }
+            \\    switch @3(targetSlot, sourceSlot)
+            \\    case 0 { @4(targetSlot, sourceSlot) }
+            \\    default {
+            \\        let freeMemoryPointer := mload(64)
+            \\        let temporaryMemoryBuffer := @5(sourceSlot)
+            \\        @6(targetSlot, temporaryMemoryBuffer)
+            \\        mstore(64, freeMemoryPointer)
+            \\    }
+            \\}
+        , .{ name, offset_names, offset_check, contains, copy_directly, load_to_memory, copy_from_memory });
+        try self.function_collector.finishGeneratedFunction(name, code);
+        return self.function_collector.copyFunctionName(name);
+    }
+
+    fn containsStorageType(
+        self: *YulUtilFunctions,
+        type_ref: *const Types.Type,
+        source_type: *const Types.Type,
+    ) UtilError!bool {
+        if (type_ref.asReference() == null) return false;
+        const storage_type = try self.type_provider.withLocation(type_ref, .Storage, false);
+        const source_layout = try self.type_provider.withLocation(source_type, .Storage, false);
+        const types = try TypeBehavior.fullDecompositionAlloc(self.type_provider, self.allocator, storage_type);
+        defer self.allocator.free(types);
+        for (types) |member_type| {
+            if (TypeBehavior.equals(member_type, source_layout)) return true;
+        }
+        return false;
+    }
+
+    fn targetContainsSourceFunction(
+        self: *YulUtilFunctions,
+        target_type: *const Types.Type,
+        source_type: *const Types.Type,
+    ) UtilError![]u8 {
+        const target_identifier = try TypeBehavior.compatibilityIdentifierAlloc(self.allocator, self.compatibility_ids, target_type);
+        defer self.allocator.free(target_identifier);
+        const source_identifier = try TypeBehavior.compatibilityIdentifierAlloc(self.allocator, self.compatibility_ids, source_type);
+        defer self.allocator.free(source_identifier);
+        const name = try self.allocator.print("target_contains_source_{s}_in_{s}", .{ source_identifier, target_identifier });
+        defer self.allocator.free(name);
+        if (!(try self.function_collector.beginFunction(name)))
+            return self.function_collector.copyFunctionName(name);
+        errdefer self.function_collector.abortFunction(name);
+
+        const generator = try self.function_collector.generator(self.evm_version);
+        var body: Generated.Buffer = .{ .generator = generator };
+        // Wrapping subtraction also covers storage regions that cross slot zero.
+        switch (target_type.payload) {
+            .Array => |array| {
+                const length = try self.arrayLengthFunction(target_type);
+                defer self.allocator.free(length);
+                const data = try self.arrayDataAreaFunction(target_type);
+                defer self.allocator.free(data);
+                const element_size = try TypeBehavior.storageSize(array.base_type);
+                try body.add(
+                    \\let length := @0(targetSlot)
+                    \\let elementSlot := @1(targetSlot)
+                    \\if lt(sub(sourceSlot, elementSlot), mul(length, @2)) { sourceInTarget := true leave }
+                , .{ length, data, element_size });
+                if (try self.containsStorageType(array.base_type, source_type)) {
+                    const contains = try self.targetContainsSourceFunction(array.base_type, source_type);
+                    defer self.allocator.free(contains);
+                    try body.add(
+                        \\for { let i := 0 } lt(i, length) { i := add(i, 1) } {
+                        \\    if @0(elementSlot, sourceSlot) { sourceInTarget := true leave }
+                        \\    elementSlot := add(elementSlot, @1)
+                        \\}
+                    , .{ contains, element_size });
+                }
+            },
+            .Struct => |structure| {
+                const offsets = try TypeBehavior.structStorageOffsetsAlloc(self.allocator, structure);
+                defer self.allocator.free(offsets.offsets);
+                try body.add(
+                    "if lt(sub(sourceSlot, targetSlot), @0) { sourceInTarget := true leave }",
+                    .{offsets.storage_size},
+                );
+                var members = try TypeBehavior.nativeMembersAlloc(self.type_provider, self.allocator, target_type, null);
+                defer members.deinit();
+                for (members.items, offsets.offsets) |member, maybe_offset| {
+                    if (!try self.containsStorageType(member.type_ref, source_type)) continue;
+                    const member_offset = maybe_offset orelse return error.InvalidType;
+                    if (member_offset.byte_offset != 0) return error.InvalidType;
+                    const contains = try self.targetContainsSourceFunction(member.type_ref, source_type);
+                    defer self.allocator.free(contains);
+                    try body.add(
+                        "if @0(add(targetSlot, @1), sourceSlot) { sourceInTarget := true leave }",
+                        .{ contains, member_offset.slot },
+                    );
+                }
+            },
+            else => return error.InvalidType,
+        }
+        const code = try generator.functionDefinition(
+            "function @0(targetSlot, sourceSlot) -> sourceInTarget { @1 }",
+            .{ name, body.take() },
+        );
+        try self.function_collector.finishGeneratedFunction(name, code);
+        return self.function_collector.copyFunctionName(name);
+    }
+
     pub fn updateStorageValueFunction(
         self: *YulUtilFunctions,
         from_type: *const Types.Type,

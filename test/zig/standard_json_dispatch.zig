@@ -925,6 +925,45 @@ test "recursive memory copies distinguish cycles from nested mappings" {
     }
 }
 
+test "recursive storage assignments emit guarded copies" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\// SPDX-License-Identifier: UNLICENSED
+        \\pragma solidity 0.8.36;
+        \\contract C {
+        \\    struct Node { uint256 value; Node[] children; }
+        \\    Node source;
+        \\    Node destination;
+        \\    Node[1] forest;
+        \\    function copyTree() external { destination = source; }
+        \\    function copyChildren() external { destination.children = source.children; }
+        \\    function copyIntoForest() external { forest[0] = source; }
+        \\}
+    ;
+    const input = try std.json.Stringify.valueAlloc(allocator, .{
+        .language = "Solidity",
+        .sources = .{ .@"C.sol" = .{ .content = source } },
+        .settings = .{
+            .viaIR = true,
+            .optimizer = .{ .enabled = true },
+            .outputSelection = .{ .@"*" = .{ .C = &.{ "ir", "evm.bytecode.object" } } },
+        },
+    }, .{});
+    defer allocator.free(input);
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    defer output.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.contains("errors"));
+    const artifact = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object;
+    const ir = artifact.get("ir").?.string;
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, ir, "function storage_copy_with_overlap_guard_"));
+    try std.testing.expect(std.mem.find(u8, ir, "(targetSlot, offset, sourceSlot)") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "mstore(64, freeMemoryPointer)") != null);
+    try std.testing.expect(artifact.get("evm").?.object.get("bytecode").?.object.get("object").?.string.len > 0);
+}
+
 test "recursive struct diagnostics prefer a complete inner cycle" {
     const allocator = std.testing.allocator;
     const source =

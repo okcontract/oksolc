@@ -1792,6 +1792,14 @@ fn structRecursive(declaration: *const AST.Node) bool {
     };
 }
 
+pub fn hasCyclicDefinition(type_ref: *const Types.Type) bool {
+    return switch (type_ref.payload) {
+        .Array => |array| hasCyclicDefinition(array.base_type),
+        .Struct => |structure| structRecursive(structure.declaration),
+        else => false,
+    };
+}
+
 pub fn structIsRecursive(structure: Types.StructType) QueryError!bool {
     if (structure.declaration.nodeKind() != .struct_definition)
         return error.InvalidType;
