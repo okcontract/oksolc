@@ -23,9 +23,10 @@ def main():
         env = dict(os.environ, XDG_CONFIG_HOME=str(root / 'config'),
                    XDG_CACHE_HOME=str(root / 'cache'))
 
-        def command(*args, success=True):
+        def command(*args, success=True, input_text=None):
             result = subprocess.run([cli, *args], cwd=root, env=env,
-                                    capture_output=True, text=True, timeout=30)
+                                    input=input_text, capture_output=True, text=True,
+                                    timeout=30)
             if success:
                 assert result.returncode == 0, result.stderr
                 assert not result.stderr, result.stderr
@@ -49,11 +50,30 @@ def main():
         help_text = command('version', '--help')
         assert 'usage: oksolc version [--json]' in help_text
         assert '--json' in help_text
+        for target in ('0.8.36', '0.8.37', '0.8.38', '0.8.39'):
+            assert command('--solc-version', target, '--version').endswith(
+                f'Version: {target}+oksolc.{version}\n')
+            assert json.loads(command('version', '--solc-version', target, '--json'))[
+                'solidity_version'] == target
+        command('--solc-version', '0.8.35', '--version', success=False)
         command('version', '--unknown', success=False)
         command('version', 'extra', success=False)
         command('--version', '--json', success=False)
         command('--version', 'version', success=False)
         assert not (root / 'cache').exists()
+
+        (config / 'config.toml').unlink()
+        request = json.dumps({
+            'language': 'Solidity',
+            'sources': {'C.sol': {'content': '// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.39; contract C {}'}},
+            'settings': {'viaIR': True, 'outputSelection': {'*': {'*': ['evm.bytecode.object']}}},
+        })
+        selected = command('--standard-json', '--no-cache', '--solc-version', '0.8.39',
+                           input_text=request)
+        compiled = json.loads(selected)
+        assert compiled['contracts']['C.sol']['C']['evm']['bytecode']['object']
+        assert command('standard-json', '--no-cache', '--solc-version', '0.8.39',
+                       '--parallel', '--jobs', '6', '-', input_text=request) == selected
 
 
 if __name__ == '__main__':

@@ -11,6 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const clap = @import("clap");
 const solidity = @import("solidity");
+const SolcVersion = solidity.SolcVersion;
 const toml = @import("toml");
 const browser_enabled = @import("cli_options").browser_enabled;
 const ProjectSources = @import("project_sources.zig");
@@ -36,6 +37,7 @@ const project_config_filename = "oksolc.toml";
 const repository_marker = ".git";
 
 const main_params = clap.parseParamsComptime(
+    \\--solc-version <SOLC>          Target Solidity 0.8.36, 0.8.37, 0.8.38, or 0.8.39.
     \\-h, --help                       Display this help and exit.
     \\--version                        Display a solc-compatible version and exit.
     \\--standard-json                  Read Standard JSON from stdin (Foundry compatibility).
@@ -48,12 +50,14 @@ const main_params = clap.parseParamsComptime(
 );
 
 const main_parsers = .{
+    .SOLC = clap.parsers.string,
     .PATHS = clap.parsers.string,
     .PATH = clap.parsers.string,
     .COMMAND = clap.parsers.string,
 };
 
 const compile_params = clap.parseParamsComptime(
+    \\--solc-version <SOLC>          Target Solidity 0.8.36, 0.8.37, 0.8.38, or 0.8.39.
     \\-h, --help                      Display help for the compile command.
     \\-o, --output <FILE>             Write Standard JSON output to FILE instead of stdout.
     \\--parallel                      Compile independent contract backends in parallel.
@@ -66,6 +70,7 @@ const compile_params = clap.parseParamsComptime(
 );
 
 const compile_parsers = .{
+    .SOLC = clap.parsers.string,
     .PATH = clap.parsers.string,
     .FILE = clap.parsers.string,
     .JOBS = clap.parsers.int(usize, 10),
@@ -74,6 +79,7 @@ const compile_parsers = .{
 };
 
 const standard_json_params = clap.parseParamsComptime(
+    \\--solc-version <SOLC>          Target Solidity 0.8.36, 0.8.37, 0.8.38, or 0.8.39.
     \\-h, --help                      Display help for the standard-json command.
     \\-o, --output <FILE>             Write Standard JSON output to FILE instead of stdout.
     \\--parallel                      Compile independent contract backends in parallel.
@@ -89,6 +95,7 @@ const standard_json_params = clap.parseParamsComptime(
 );
 
 const standard_json_parsers = .{
+    .SOLC = clap.parsers.string,
     .FILE = clap.parsers.string,
     .JOBS = clap.parsers.int(usize, 10),
     .PATHS = clap.parsers.string,
@@ -98,6 +105,7 @@ const standard_json_parsers = .{
 };
 
 const browse_params = clap.parseParamsComptime(
+    \\--solc-version <SOLC>          Target Solidity 0.8.36, 0.8.37, 0.8.38, or 0.8.39.
     \\-h, --help                      Display browser help.
     \\--request <FILE>                Compile a Standard JSON request (or - for stdin).
     \\--import-output <FILE>          Browse existing output with --request, without recompiling.
@@ -114,6 +122,7 @@ const browse_params = clap.parseParamsComptime(
     \\
 );
 const browse_parsers = .{
+    .SOLC = clap.parsers.string,
     .FILE = clap.parsers.string,
     .PORT = clap.parsers.int(u16, 10),
     .JOBS = clap.parsers.int(usize, 10),
@@ -124,6 +133,7 @@ const browse_parsers = .{
 };
 
 const serve_params = clap.parseParamsComptime(
+    \\--solc-version <SOLC>          Target Solidity 0.8.36, 0.8.37, 0.8.38, or 0.8.39.
     \\-h, --help                      Display help for the serve command.
     \\--browse                        Serve the live compiler browser on localhost.
     \\--database <FILE>              Browser database (default: <project-root>/.oksolc/browser.sqlite).
@@ -141,6 +151,7 @@ const serve_params = clap.parseParamsComptime(
 );
 
 const serve_parsers = .{
+    .SOLC = clap.parsers.string,
     .PORT = clap.parsers.int(u16, 10),
     .JOBS = clap.parsers.int(usize, 10),
     .PATHS = clap.parsers.string,
@@ -151,6 +162,7 @@ const serve_parsers = .{
 };
 
 const watch_params = clap.parseParamsComptime(
+    \\--solc-version <SOLC>          Target Solidity 0.8.36, 0.8.37, 0.8.38, or 0.8.39.
     \\-h, --help                      Display help for the watch command.
     \\-o, --output <FILE>             Replace FILE with the latest Standard JSON output.
     \\--parallel                      Compile independent contract backends in parallel.
@@ -166,6 +178,7 @@ const watch_params = clap.parseParamsComptime(
 );
 
 const watch_parsers = .{
+    .SOLC = clap.parsers.string,
     .FILE = clap.parsers.string,
     .JOBS = clap.parsers.int(usize, 10),
     .MILLISECONDS = clap.parsers.int(u64, 10),
@@ -217,6 +230,7 @@ pub fn main(init: std.process.Init) !void {
     defer result.deinit();
 
     if (result.args.help != 0) return writeMainHelp(init.io);
+    const solc_version = try selectSolcVersion(init.io, result.args.@"solc-version", SolcVersion.default);
     if (result.args.version != 0) {
         if (result.args.@"standard-json" != 0 or
             result.args.@"no-cache" != 0 or
@@ -231,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
             );
             return error.InvalidArgument;
         }
-        return writeVersion(init, true);
+        return writeVersion(init, true, solc_version);
     }
     if (result.args.@"standard-json" != 0) {
         if (result.positionals[0] != null) {
@@ -247,6 +261,7 @@ pub fn main(init: std.process.Init) !void {
             result.args.@"include-path",
             result.args.@"allow-paths",
             result.args.@"no-cache" != 0,
+            solc_version,
         );
     }
     if (result.args.@"allow-paths" != null or
@@ -265,32 +280,40 @@ pub fn main(init: std.process.Init) !void {
             init,
             &iterator,
             result.args.@"no-cache" != 0,
+            solc_version,
         );
     if (std.mem.eql(u8, command, "standard-json"))
         return standardJsonCommand(
             init,
             &iterator,
             result.args.@"no-cache" != 0,
+            solc_version,
         );
     if (std.mem.eql(u8, command, "browse"))
-        return browseCommand(init, &iterator, result.args.@"no-cache" != 0);
+        return browseCommand(init, &iterator, result.args.@"no-cache" != 0, solc_version);
     if (std.mem.eql(u8, command, "serve"))
         return serveCommand(
             init,
             &iterator,
             result.args.@"no-cache" != 0,
+            solc_version,
         );
     if (std.mem.eql(u8, command, "watch"))
         return watchCommand(
             init,
             &iterator,
             result.args.@"no-cache" != 0,
+            solc_version,
         );
     if (result.args.@"no-cache" != 0) {
         try std.Io.File.stderr().writeStreamingAll(
             init.io,
             "--no-cache requires a compilation command\n",
         );
+        return error.InvalidArgument;
+    }
+    if (result.args.@"solc-version" != null and !std.mem.eql(u8, command, "version")) {
+        try std.Io.File.stderr().writeStreamingAll(init.io, "--solc-version requires a compilation or version command\n");
         return error.InvalidArgument;
     }
     if (std.mem.eql(u8, command, "cache"))
@@ -300,12 +323,19 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "install"))
         return installCommand(init, &iterator);
     if (std.mem.eql(u8, command, "version"))
-        return versionCommand(init, &iterator);
+        return versionCommand(init, &iterator, solc_version);
     if (std.mem.eql(u8, command, "help"))
         return writeMainHelp(init.io);
 
     try std.Io.File.stderr().writeStreamingAll(init.io, "unknown command; see `oksolc help`\n");
     return error.UnknownCommand;
+}
+
+fn selectSolcVersion(io: std.Io, value: ?[]const u8, fallback: SolcVersion) !SolcVersion {
+    const text = value orelse return fallback;
+    if (SolcVersion.parse(text)) |version| return version;
+    try std.Io.File.stderr().writeStreamingAll(io, "--solc-version must be 0.8.36, 0.8.37, 0.8.38, or 0.8.39\n");
+    return error.InvalidSolcVersion;
 }
 
 fn foundryStandardJsonCommand(
@@ -314,6 +344,7 @@ fn foundryStandardJsonCommand(
     include_paths: []const []const u8,
     allow_paths: ?[]const u8,
     no_cache: bool,
+    solc_version: SolcVersion,
 ) !void {
     // Forge finishes writing stdin before it collects our exit status/stderr.
     // Consume the request before fallible startup work so a configuration or
@@ -332,6 +363,7 @@ fn foundryStandardJsonCommand(
     try compileAndWrite(
         init,
         input,
+        solc_version,
         null,
         null,
         false,
@@ -352,6 +384,7 @@ fn compileCommand(
     init: std.process.Init,
     iterator: *std.process.Args.Iterator,
     global_no_cache: bool,
+    global_solc_version: SolcVersion,
 ) !void {
     var diagnostic: clap.Diagnostic = .{};
     var result = clap.parseEx(
@@ -367,6 +400,7 @@ fn compileCommand(
     defer result.deinit();
 
     if (result.args.help != 0) return writeCompileHelp(init.io);
+    const solc_version = try selectSolcVersion(init.io, result.args.@"solc-version", global_solc_version);
     const source_paths = result.positionals[0];
     if (source_paths.len == 0) {
         try std.Io.File.stderr().writeStreamingAll(init.io, "compile requires at least one Solidity source\n");
@@ -390,6 +424,7 @@ fn compileCommand(
     try compileAndWrite(
         init,
         input,
+        solc_version,
         result.args.output,
         result.args.@"profile-optimizer",
         result.args.progress != 0,
@@ -406,6 +441,7 @@ fn standardJsonCommand(
     init: std.process.Init,
     iterator: *std.process.Args.Iterator,
     global_no_cache: bool,
+    global_solc_version: SolcVersion,
 ) !void {
     var diagnostic: clap.Diagnostic = .{};
     var result = clap.parseEx(
@@ -421,6 +457,7 @@ fn standardJsonCommand(
     defer result.deinit();
 
     if (result.args.help != 0) return writeStandardJsonHelp(init.io);
+    const solc_version = try selectSolcVersion(init.io, result.args.@"solc-version", global_solc_version);
     try validateSourcePathArguments(
         result.args.@"base-path",
         result.args.@"include-path",
@@ -438,6 +475,7 @@ fn standardJsonCommand(
     try compileAndWrite(
         init,
         input,
+        solc_version,
         result.args.output,
         result.args.@"profile-optimizer",
         result.args.progress != 0,
@@ -461,7 +499,7 @@ fn browserDisabled(io: std.Io) !void {
     return error.BrowserDisabled;
 }
 
-fn browseCommand(init: std.process.Init, iterator: *std.process.Args.Iterator, global_no_cache: bool) !void {
+fn browseCommand(init: std.process.Init, iterator: *std.process.Args.Iterator, global_no_cache: bool, global_solc_version: SolcVersion) !void {
     if (!browser_enabled) return browserDisabled(init.io);
     const BrowserStore = @import("browser/store.zig").Store;
     const BrowserServer = @import("browser/server.zig");
@@ -476,6 +514,7 @@ fn browseCommand(init: std.process.Init, iterator: *std.process.Args.Iterator, g
         try std.Io.File.stdout().writeStreamingAll(init.io, "usage: oksolc browse [--request FILE | SOURCE...] [--database FILE] [--port 8080]\n\nCompile sources, import output with --request and --import-output, or reopen saved snapshots.\nDefaults to .oksolc/browser.sqlite in the nearest project root (oksolc.toml or .git).\nThe server binds only to 127.0.0.1. Browser compilation requests source ASTs for navigation.\n\n");
         return clap.helpToFile(init.io, .stdout(), clap.Help, &browse_params, .{});
     }
+    const solc_version = try selectSolcVersion(init.io, result.args.@"solc-version", global_solc_version);
     const paths = result.positionals[0];
     const has_input = result.args.request != null or paths.len != 0;
     if (result.args.request != null and paths.len != 0) return error.ConflictingBrowseInputs;
@@ -532,6 +571,7 @@ fn browseCommand(init: std.process.Init, iterator: *std.process.Args.Iterator, g
             session.setOptimizerProfiler(if (result.args.@"profile-optimizer" != null) &profiler else null);
             var output = try session.compiler().compile(init.gpa, .{
                 .input = request,
+                .solc_version = solc_version,
                 .io = compiler_io,
                 .source_loader = capture.interface(),
             });
@@ -568,6 +608,7 @@ fn serveCommand(
     init: std.process.Init,
     iterator: *std.process.Args.Iterator,
     global_no_cache: bool,
+    global_solc_version: SolcVersion,
 ) !void {
     var diagnostic: clap.Diagnostic = .{};
     var result = clap.parseEx(
@@ -583,6 +624,7 @@ fn serveCommand(
     defer result.deinit();
 
     if (result.args.help != 0) return writeServeHelp(init.io);
+    const solc_version = try selectSolcVersion(init.io, result.args.@"solc-version", global_solc_version);
     if (!browser_enabled and result.args.browse != 0) return browserDisabled(init.io);
     if (result.args.stdio != 0 and (result.args.@"source-path" != null or
         result.args.@"poll-ms" != null or result.args.browse != 0))
@@ -659,6 +701,7 @@ fn serveCommand(
             null;
         var service: SourceService = .{
             .allocator = init.gpa,
+            .solc_version = solc_version,
             .io = init.io,
             .compiler_io = compiler_io,
             .compiler = session.compiler(),
@@ -710,6 +753,7 @@ fn serveCommand(
         if (loader_state) |*loader| loader.reset();
         var output = try compileServeRequest(session.compiler(), init.gpa, .{
             .input = input,
+            .solc_version = solc_version,
             .io = compiler_io,
             .source_loader = if (loader_state) |*loader|
                 loader.interface()
@@ -731,6 +775,7 @@ const SourceService = struct {
     io: std.Io,
     compiler_io: ?std.Io,
     compiler: solidity.standard_json.Compiler,
+    solc_version: SolcVersion = SolcVersion.default,
     /// Created by this worker only after workspace publication and a snapshot
     /// miss. All borrowed process/configuration state outlives the worker join.
     deferred_session: ?struct {
@@ -783,6 +828,7 @@ const SourceService = struct {
         const fingerprint = solidity.incremental.CompilerFingerprint.current();
         const context = try std.json.Stringify.valueAlloc(allocator, .{
             .compiler = std.fmt.bytesToHex(fingerprint.bytes()[0..32].*, .lower),
+            .solc_version = self.solc_version.number(),
             .project = self.project_root,
             .source_path = self.directory_path,
             .roots = roots,
@@ -860,6 +906,7 @@ const SourceService = struct {
             self.loader.reset();
             const output = try self.compiler.compile(self.allocator, .{
                 .input = input,
+                .solc_version = self.solc_version,
                 .progress = if (self.live) |live| live.reporter() else null,
                 .io = self.compiler_io,
                 .source_loader = capture.interface(),
@@ -1064,6 +1111,7 @@ fn watchCommand(
     init: std.process.Init,
     iterator: *std.process.Args.Iterator,
     global_no_cache: bool,
+    global_solc_version: SolcVersion,
 ) !void {
     var diagnostic: clap.Diagnostic = .{};
     var result = clap.parseEx(
@@ -1079,6 +1127,7 @@ fn watchCommand(
     defer result.deinit();
 
     if (result.args.help != 0) return writeWatchHelp(init.io);
+    const solc_version = try selectSolcVersion(init.io, result.args.@"solc-version", global_solc_version);
     try validateSourcePathArguments(
         result.args.@"base-path",
         result.args.@"include-path",
@@ -1153,6 +1202,7 @@ fn watchCommand(
                     loader_state.reset();
                     var output = try session.compiler().compile(init.gpa, .{
                         .input = bytes,
+                        .solc_version = solc_version,
                         .io = compiler_io,
                         .source_loader = loader_state.interface(),
                     });
@@ -1431,8 +1481,10 @@ fn writeJsonLine(init: std.process.Init, value: anytype) !void {
 fn versionCommand(
     init: std.process.Init,
     iterator: *std.process.Args.Iterator,
+    global_solc_version: SolcVersion,
 ) !void {
     const params = comptime clap.parseParamsComptime(
+        \\--solc-version <SOLC>          Target Solidity 0.8.36, 0.8.37, 0.8.38, or 0.8.39.
         \\-h, --help  Display version-command help.
         \\--json      Display product, Solidity compatibility, and build identities as JSON.
         \\
@@ -1441,7 +1493,7 @@ fn versionCommand(
     var result = clap.parseEx(
         clap.Help,
         &params,
-        clap.parsers.default,
+        .{ .SOLC = clap.parsers.string },
         iterator,
         .{ .allocator = init.gpa, .diagnostic = &diagnostic },
     ) catch |err| {
@@ -1454,29 +1506,30 @@ fn versionCommand(
         try std.Io.File.stdout().writeStreamingAll(init.io, "usage: oksolc version [--json]\n\n");
         return clap.helpToFile(init.io, .stdout(), clap.Help, &params, .{});
     }
+    const solc_version = try selectSolcVersion(init.io, result.args.@"solc-version", global_solc_version);
     if (result.args.json != 0) {
         const version = solidity.libsolidity.@"interface/version";
         return writeJsonLine(init, .{
             .version = version.OksolcVersion,
-            .solidity_version = version.VersionNumber,
-            .compatibility_version = version.VersionString,
+            .solidity_version = solc_version.number(),
+            .compatibility_version = version.compatibilityString(solc_version),
             .build_identity = version.BuildIdentity,
         });
     }
-    try writeVersion(init, false);
+    try writeVersion(init, false, solc_version);
 }
 
-fn writeVersion(init: std.process.Init, solc_compatible: bool) !void {
+fn writeVersion(init: std.process.Init, solc_compatible: bool, solc_version: SolcVersion) !void {
     const version = solidity.libsolidity.@"interface/version";
     var buffer: [256]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);
     if (solc_compatible)
         try writer.interface.print(
             "oksolc, a solidity compiler commandline interface\nVersion: {s}\n",
-            .{version.VersionString},
+            .{version.compatibilityString(solc_version)},
         )
     else
-        try writer.interface.print("oksolc {s} (Solidity {s})\n", .{ version.OksolcVersion, version.VersionNumber });
+        try writer.interface.print("oksolc {s} (Solidity {s})\n", .{ version.OksolcVersion, solc_version.number() });
     try writer.interface.flush();
 }
 
@@ -1917,6 +1970,7 @@ fn writeServeFrame(writer: *std.Io.Writer, bytes: []const u8) !void {
 fn compileAndWrite(
     init: std.process.Init,
     input: []const u8,
+    solc_version: SolcVersion,
     output_path: ?[]const u8,
     profile_path: ?[]const u8,
     show_progress: bool,
@@ -1969,6 +2023,7 @@ fn compileAndWrite(
     session.setOptimizerProfiler(if (profile_path != null) &profiler else null);
     var output = try session.compiler().compile(init.gpa, .{
         .input = input,
+        .solc_version = solc_version,
         .io = compiler_io,
         .source_loader = loader_state.interface(),
         .progress = progress.reporter(),
