@@ -8,6 +8,7 @@
 //! unsupported errors.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AsmAnalysis = @import("asm_analysis.zig");
 const AssemblyItem = @import("../libevmasm/assembly_item.zig");
 const AssemblyModule = @import("../libevmasm/assembly.zig");
@@ -315,26 +316,14 @@ pub const YulStack = struct {
     }
 
     fn analyzeObjectTree(self: *YulStack, object: *Object) !bool {
-        try object.validateNames();
-        return self.analyzeObjectTreeWithValidatedNames(object);
-    }
-
-    fn analyzeObjectTreeWithValidatedNames(self: *YulStack, object: *Object) !bool {
         const evm_dialect = try EVMDialect.strictAssemblyForEVMObjects(self.evm_version);
-        var success = try AsmAnalysis.analyzeObjectWithValidatedNames(
+        return analyzeObjectTreeWithReporter(
             self.allocator,
             object,
             &self.error_reporter,
-            .{},
-            AsmAnalysis.instructionValidatorForEVMDialect(evm_dialect),
+            evm_dialect,
+            self.optimiser_settings.solc_version,
         );
-        for (object.sub_objects.items) |*node| switch (node.*) {
-            .object => |child| if (!try self.analyzeObjectTreeWithValidatedNames(child)) {
-                success = false;
-            },
-            .data => {},
-        };
-        return success;
     }
 
     pub fn optimize(self: *YulStack) !void {
@@ -420,6 +409,7 @@ pub const YulStack = struct {
             object,
             &temporary_reporter,
             evm_dialect,
+            self.optimiser_settings.solc_version,
         ) or temporary_reporter.hasErrors()) return error.InvalidOptimizedYul;
         self.stack_state = .analysis_successful;
     }
@@ -636,9 +626,10 @@ fn analyzeObjectTreeWithReporter(
     object: *Object,
     reporter: *Diagnostics.ErrorReporter,
     dialect: *const EVMDialect.EVMDialect,
+    solc_version: SolcVersion,
 ) !bool {
     try object.validateNames();
-    return analyzeObjectTreeWithValidatedNamesAndReporter(allocator, object, reporter, dialect);
+    return analyzeObjectTreeWithValidatedNamesAndReporter(allocator, object, reporter, dialect, solc_version);
 }
 
 fn analyzeObjectTreeWithValidatedNamesAndReporter(
@@ -646,6 +637,7 @@ fn analyzeObjectTreeWithValidatedNamesAndReporter(
     object: *Object,
     reporter: *Diagnostics.ErrorReporter,
     dialect: *const EVMDialect.EVMDialect,
+    solc_version: SolcVersion,
 ) !bool {
     var success = try AsmAnalysis.analyzeObjectWithValidatedNames(
         allocator,
@@ -653,6 +645,7 @@ fn analyzeObjectTreeWithValidatedNamesAndReporter(
         reporter,
         .{},
         AsmAnalysis.instructionValidatorForEVMDialect(dialect),
+        solc_version,
     );
     for (object.sub_objects.items) |*node| switch (node.*) {
         .object => |child| if (!try analyzeObjectTreeWithValidatedNamesAndReporter(
@@ -660,6 +653,7 @@ fn analyzeObjectTreeWithValidatedNamesAndReporter(
             child,
             reporter,
             dialect,
+            solc_version,
         )) {
             success = false;
         },
@@ -690,6 +684,7 @@ fn reparseForTest(self: *YulStack) !void {
         replacement,
         &temporary_reporter,
         evm_dialect,
+        self.optimiser_settings.solc_version,
     ) or temporary_reporter.hasErrors()) return error.InvalidOptimizedYul;
     if (self.parser_result) |old| old.destroy();
     self.parser_result = replacement;

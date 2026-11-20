@@ -1192,6 +1192,7 @@ fn analyzeSolidityFrontend(
             reporter,
         );
         checker.setCompatibilityIds(compatibility_ids);
+        checker.solc_version = settings.frontend.solc_version;
         if (!(try checker.checkTypeRequirements(root))) no_errors = false;
         try recordSemanticDiagnosticDelta(
             semantic,

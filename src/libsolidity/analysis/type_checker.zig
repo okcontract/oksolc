@@ -8,6 +8,7 @@
 //! Unsupported expression families report a diagnostic.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("../ast/ast.zig");
 const ASTAnnotations = @import("../ast/ast_annotations.zig");
 const ASTImplementation = @import("../ast/ast.zig");
@@ -46,6 +47,7 @@ pub const TypeChecker = struct {
     tree: *AST.Tree,
     type_provider: *TypeProviderModule.TypeProvider,
     evm_version: EVMVersion,
+    solc_version: SolcVersion = SolcVersion.default,
     reporter: *Diagnostics.ErrorReporter,
     compatibility_ids: CompatibilityIdResolver = .legacyNodeIds(),
     current_source_unit: ?*const AST.Node = null,
@@ -1685,6 +1687,7 @@ pub const TypeChecker = struct {
             .{},
         );
         defer analyzer.deinit();
+        analyzer.solc_version = self.solc_version;
         _ = analyzer.analyze(operations.root()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.FatalDiagnostic => return error.FatalDiagnostic,

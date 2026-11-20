@@ -101,6 +101,37 @@ test "experimental Solidity pragma is removed from Solidity 0.8.37" {
     }
 }
 
+test "future Yul stack instruction identifiers warn from Solidity 0.8.38" {
+    const allocator = std.testing.allocator;
+    const standalone =
+        \\{"language":"Yul","sources":{"C.yul":{"content":"object \"C\" { code { let swapn := 1 let dupn := 2 let exchange := 3 mstore(0, add(swapn, add(dupn, exchange))) return(0, 32) } }"}},"settings":{"evmVersion":"osaka","outputSelection":{"*":{"C":["evm.bytecode.object"]}}}}
+    ;
+    const inline_assembly =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { function read() external pure returns (uint n) { assembly { let swapn := 1 let dupn := 2 let exchange := 3 n := add(swapn, add(dupn, exchange)) } } }"}},"settings":{"evmVersion":"osaka","viaIR":true,"outputSelection":{"*":{"C":["evm.bytecode.object"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for ([_][]const u8{ standalone, inline_assembly }) |input| {
+        for (std.enums.values(solidity.SolcVersion)) |target| {
+            var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+            defer output.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expect(parsed.value.object.contains("contracts"));
+            const diagnostics = if (parsed.value.object.get("errors")) |errors| errors.array.items else &.{};
+            if (target.atLeast(.v0_8_38)) {
+                const names = [_][]const u8{ "swapn", "dupn", "exchange" };
+                try std.testing.expectEqual(names.len, diagnostics.len);
+                for (names, diagnostics) |name, diagnostic| {
+                    try std.testing.expectEqualStrings("warning", diagnostic.object.get("severity").?.string);
+                    const message = diagnostic.object.get("message").?.string;
+                    try std.testing.expect(std.mem.find(u8, message, name) != null);
+                    try std.testing.expect(std.mem.find(u8, message, "Yul reserved identifier") != null);
+                }
+            } else try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+        }
+    }
+}
+
 test "constant helpers keep checked and wrapping arithmetic separate" {
     const input =
         \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { uint constant VALUE = uint(40) + uint(2); function checked() external pure returns (uint) { return VALUE; } function wrapping() external pure returns (uint) { unchecked { return VALUE; } } }"}},"settings":{"viaIR":true,"outputSelection":{"*":{"*":["ir"]}}}}
