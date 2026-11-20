@@ -2341,7 +2341,7 @@ fn appendSolidityViaIRArtifacts(
             };
             defer assembly_pair.deinit();
             if (wants_bytecode or wants_assembly or wants_legacy_assembly or wants_gas_estimates)
-                try CodeSizeDiagnostics.report(scratch_allocator, reporter, contract.location, settings.frontend.evm_version, .{
+                try CodeSizeDiagnostics.report(scratch_allocator, reporter, contract.location, settings.frontend.evm_version, settings.frontend.solc_version, "Contract", .{
                     .creation = assembly_pair.creation.bytecode.?.bytecode.items.len,
                     .deployed = assembly_pair.deployed.bytecode.?.bytecode.items.len,
                 });
@@ -3314,7 +3314,7 @@ fn appendSolidityViaIRArtifactsParallel(
 
     for (jobs.items) |*job| {
         if (job.bytecode_sizes) |sizes|
-            try CodeSizeDiagnostics.report(scratch_allocator, reporter, job.contract.location, settings.frontend.evm_version, sizes);
+            try CodeSizeDiagnostics.report(scratch_allocator, reporter, job.contract.location, settings.frontend.evm_version, settings.frontend.solc_version, "Contract", sizes);
         try artifact_arenas.append(scratch_allocator, job.artifact_arena);
         job.artifact_arena_transferred = true;
         const contract_output = try ensureArtifactContract(
@@ -4172,6 +4172,16 @@ pub fn compileYulStandardJsonAlloc(
             try appendError(arena, errors_value, .YulException, message, message, null, null);
             return finishOutput(allocator, &output);
         };
+    }
+
+    if (solc_version.atLeast(.v0_8_39)) {
+        if (assembly_pair.creation.bytecode) |*creation| {
+            const deployed_size = if (assembly_pair.deployed.bytecode) |*deployed| deployed.bytecode.items.len else 0;
+            try CodeSizeDiagnostics.report(allocator, &stack.error_reporter, .{ .source_name = source_name }, settings.frontend.evm_version, solc_version, "Yul object", .{
+                .creation = creation.bytecode.items.len,
+                .deployed = deployed_size,
+            });
+        }
     }
 
     for (stack.errors()) |*diagnostic| {
