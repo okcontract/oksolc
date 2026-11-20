@@ -35,6 +35,15 @@ solc `0.8.37` through `0.8.39` (`SOL-2026-4`, `SOL-2026-6`, `SOL-2026-7`, and
 `SOL-2026-8`).
 [Solidity compiler bug list](https://docs.soliditylang.org/en/latest/bugs.html)
 
+A single pass over the 17 local and bundled external workloads matched the
+complete Standard JSON output of solc `0.8.37`, `0.8.38`, and `0.8.39` with
+both one and six jobs. Fifteen workloads produced exact creation and deployed
+bytecode, and Farcaster and Seaport returned identical compilation diagnostics.
+For the `0.8.36` target, 13 of the 15 bytecode-producing workloads matched
+exactly. Sablier v2 and the 2022 Uniswap v4 fixture differed in bytecode, and
+four other workloads differed only in source maps. One-job and six-job outputs
+were identical for all workloads at all four targets.
+
 Intentional exceptions:
 
 - Named custom-error arguments in `require` encode in declaration order.
