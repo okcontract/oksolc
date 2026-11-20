@@ -11,7 +11,7 @@ const Diagnostics = @import("../liblangutil/diagnostics.zig");
 const ObjectModule = @import("object.zig");
 const ParserBase = @import("../liblangutil/parser_base.zig");
 const ScannerModule = @import("../liblangutil/scanner.zig");
-const SolcVersion = @import("../common/solc_version.zig").SolcVersion;
+const SolcVersion = @import("common").SolcVersion;
 const StringUtils = @import("../libsolutil/string_utils.zig");
 
 pub const ParseError = AsmParser.ParseError || ParserBase.ParserFailure || error{
