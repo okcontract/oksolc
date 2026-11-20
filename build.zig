@@ -323,6 +323,7 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "build_options", .module = build_options_module },
             .{ .name = "big_int", .module = big_int_module },
+            .{ .name = "common", .module = common_module },
             .{ .name = "cxx_compat", .module = cxx_compat_module },
         },
     });
