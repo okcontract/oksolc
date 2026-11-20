@@ -6,7 +6,6 @@
 //! invokes StackToMemoryMover, and advances matching `memoryguard` calls.
 
 const std = @import("std");
-const ordered = @import("cxx_compat");
 const AST = @import("../ast.zig");
 const AsmAnalysis = @import("../asm_analysis.zig");
 const CallGraphModule = @import("call_graph_generator.zig");
@@ -22,47 +21,73 @@ const StackLayout = @import("../backends/evm/stack_layout_generator.zig");
 const StackToMemory = @import("stack_to_memory_mover.zig");
 const YulName = @import("../yul_name.zig").YulName;
 
-fn lessFunctionHandle(left: AST.FunctionHandle, right: AST.FunctionHandle) bool {
-    const left_tag = @backingInt(left);
-    const right_tag = @backingInt(right);
-    if (left_tag != right_tag) return left_tag < right_tag;
-    return switch (left) {
-        .user => |name| name.lessThan(right.user),
-        .builtin => |handle| handle.id < right.builtin.id,
-    };
-}
-
-const SlotsRequiredMap = ordered.OrderedMap(AST.FunctionHandle, u64, lessFunctionHandle);
-
-pub const MemoryOffsetAllocator = struct {
+const MemoryOffsetAllocator = struct {
     allocator: std.mem.Allocator,
     unreachable_variables: *const Compilability.UnreachableVariables,
     call_graph: *const CallGraphModule.FunctionCalls,
+    components: *const CallGraphModule.Components,
     function_definitions: *const NameCollector.FunctionDefinitionMap,
     reachable_stack_depth: usize,
     slot_allocations: StackToMemory.MemorySlotMap = .{},
-    slots_required_for_function: SlotsRequiredMap = .{},
 
-    pub fn deinit(self: *MemoryOffsetAllocator) void {
+    fn deinit(self: *MemoryOffsetAllocator) void {
         self.slot_allocations.deinit(self.allocator);
-        self.slots_required_for_function.deinit(self.allocator);
         self.* = undefined;
     }
 
-    pub fn run(self: *MemoryOffsetAllocator, function: AST.FunctionHandle) !u64 {
-        if (self.slots_required_for_function.get(function)) |required| return required.*;
-        _ = try self.slots_required_for_function.insert(self.allocator, function, 0);
+    const Requirement = struct {
+        reachable: bool = false,
+        slots: u64 = 0,
+    };
 
-        const function_name = switch (function) {
-            .builtin => return 0,
-            .user => |name| name,
-        };
-        var required_slots: u64 = 0;
-        if (self.call_graph.get(function)) |children| {
-            for (children.items) |child|
-                required_slots = @max(required_slots, try self.run(child));
+    fn run(self: *MemoryOffsetAllocator, function: AST.FunctionHandle) !u64 {
+        const components = self.components;
+        const root = components.component_of.get(function) orelse return error.MissingCallGraphNode;
+        const requirements = try self.allocator.alloc(Requirement, root + 1);
+        defer self.allocator.free(requirements);
+        @memset(requirements, .{});
+
+        // Tarjan emits callees before callers. Walk backwards to mark the
+        // closure of the entry point so uncalled functions receive no slots.
+        requirements[root].reachable = true;
+        var remaining = requirements.len;
+        while (remaining != 0) {
+            remaining -= 1;
+            if (!requirements[remaining].reachable) continue;
+            for (components.groups.items[remaining]) |node| {
+                const children = self.call_graph.get(components.handles[node]) orelse continue;
+                for (children.items) |child| {
+                    const child_id = components.component_of.get(child) orelse return error.MissingCallGraphNode;
+                    if (child_id > remaining) return error.InvalidComponentOrder;
+                    requirements[child_id].reachable = true;
+                }
+            }
         }
 
+        // Every member of a recursive component has the same reachable
+        // callees. Propagate their completed slot requirements as one value.
+        for (requirements, 0..) |*requirement, component_id| {
+            if (!requirement.reachable) continue;
+            const members = components.groups.items[component_id];
+            var required_slots: u64 = 0;
+            for (members) |node| {
+                const children = self.call_graph.get(components.handles[node]) orelse continue;
+                for (children.items) |child| {
+                    const child_id = components.component_of.get(child).?;
+                    if (child_id != component_id)
+                        required_slots = @max(required_slots, requirements[child_id].slots);
+                }
+            }
+            if (!components.recursive[component_id]) switch (components.handles[members[0]]) {
+                .user => |name| try self.allocateFunction(name, &required_slots),
+                .builtin => {},
+            };
+            requirement.slots = required_slots;
+        }
+        return requirements[root].slots;
+    }
+
+    fn allocateFunction(self: *MemoryOffsetAllocator, function_name: YulName, required_slots: *u64) !void {
         if (self.unreachable_variables.get(function_name)) |unreachables| {
             if (self.function_definitions.get(function_name)) |definition_pointer| {
                 const definition = definition_pointer.*;
@@ -72,28 +97,21 @@ pub const MemoryOffsetAllocator = struct {
                     var remaining = total_arg_count - self.reachable_stack_depth;
                     for (definition.parameters.items) |parameter| {
                         if (remaining == 0) break;
-                        try self.allocate(parameter.name, &required_slots);
+                        try self.allocate(parameter.name, required_slots);
                         remaining -= 1;
                     }
                     for (definition.return_variables.items) |return_variable| {
                         if (remaining == 0) break;
-                        try self.allocate(return_variable.name, &required_slots);
+                        try self.allocate(return_variable.name, required_slots);
                         remaining -= 1;
                     }
                 }
             }
             for (unreachables.items) |variable| {
                 if (!variable.empty() and !self.slot_allocations.contains(variable))
-                    try self.allocate(variable, &required_slots);
+                    try self.allocate(variable, required_slots);
             }
         }
-
-        _ = try self.slots_required_for_function.fetchPut(
-            self.allocator,
-            function,
-            required_slots,
-        );
-        return required_slots;
     }
 
     fn allocate(self: *MemoryOffsetAllocator, variable: YulName, next_slot: *u64) !void {
@@ -267,12 +285,14 @@ pub const StackLimitEvader = struct {
 
         var call_graph = try CallGraphModule.CallGraphGenerator.callGraph(allocator, ast_root);
         defer call_graph.deinit();
-        var recursive_functions = try call_graph.recursiveFunctions();
-        defer recursive_functions.deinit(allocator);
-        for (0..recursive_functions.len()) |index| switch (recursive_functions.at(index)) {
-            .builtin => return error.BuiltinCannotBeRecursive,
-            .user => |function_name| if (unreachable_variables.contains(function_name)) return,
-        };
+        var components = try call_graph.stronglyConnectedComponents();
+        defer components.deinit();
+        for (components.groups.items, components.recursive) |members, is_recursive| {
+            if (!is_recursive) continue;
+            // Each invocation of a recursive function needs its own locals.
+            for (members) |node|
+                if (unreachable_variables.contains(components.handles[node].user)) return;
+        }
 
         var function_definitions = try NameCollector.allFunctionDefinitions(allocator, ast_root);
         defer function_definitions.deinit(allocator);
@@ -280,6 +300,7 @@ pub const StackLimitEvader = struct {
             .allocator = allocator,
             .unreachable_variables = unreachable_variables,
             .call_graph = &call_graph.function_calls,
+            .components = &components,
             .function_definitions = &function_definitions,
             .reachable_stack_depth = evm_dialect.reachableStackDepth(),
         };
@@ -337,6 +358,53 @@ fn literalArgumentValue(call: *const AST.FunctionCall) !u256 {
     const literal = &call.arguments.items[0].literal;
     if (literal.kind != .Number) return error.InvalidMemoryGuardCall;
     return literal.value.value() catch error.InvalidMemoryGuardCall;
+}
+
+test "stack limit evader propagates callee slots across a recursive component" {
+    const allocator = std.testing.allocator;
+    const first = try YulName.init("first");
+    const second = try YulName.init("second");
+    const callee = try YulName.init("callee");
+    const caller = try YulName.init("caller");
+    const callee_local = try YulName.init("callee_local");
+    const caller_local = try YulName.init("caller_local");
+    var graph: CallGraphModule.CallGraph = .{ .allocator = allocator };
+    defer graph.deinit();
+    for ([_]struct { name: YulName, children: []const AST.FunctionHandle }{
+        .{ .name = .{}, .children = &.{ .{ .user = first }, .{ .user = caller } } },
+        .{ .name = first, .children = &.{ .{ .user = second }, .{ .user = callee } } },
+        .{ .name = second, .children = &.{.{ .user = first }} },
+        .{ .name = caller, .children = &.{.{ .user = second }} },
+    }) |entry| {
+        var children: std.ArrayList(AST.FunctionHandle) = .empty;
+        errdefer children.deinit(allocator);
+        try children.appendSlice(allocator, entry.children);
+        _ = try graph.function_calls.insert(allocator, .{ .user = entry.name }, children);
+    }
+    var unreachable_variables: Compilability.UnreachableVariables = .{};
+    defer deinitUnreachableVariables(allocator, &unreachable_variables);
+    for ([_]YulName{ callee, caller }, [_]YulName{ callee_local, caller_local }) |name, local| {
+        var variables: std.ArrayList(YulName) = .empty;
+        errdefer variables.deinit(allocator);
+        try variables.append(allocator, local);
+        _ = try unreachable_variables.insert(allocator, name, variables);
+    }
+
+    var components = try graph.stronglyConnectedComponents();
+    defer components.deinit();
+    const definitions: NameCollector.FunctionDefinitionMap = .{};
+    var memory_allocator: MemoryOffsetAllocator = .{
+        .allocator = allocator,
+        .unreachable_variables = &unreachable_variables,
+        .call_graph = &graph.function_calls,
+        .components = &components,
+        .function_definitions = &definitions,
+        .reachable_stack_depth = 16,
+    };
+    defer memory_allocator.deinit();
+    try std.testing.expectEqual(@as(u64, 2), try memory_allocator.run(.{ .user = .{} }));
+    try std.testing.expectEqual(@as(u64, 0), memory_allocator.slot_allocations.get(callee_local).?.*);
+    try std.testing.expectEqual(@as(u64, 1), memory_allocator.slot_allocations.get(caller_local).?.*);
 }
 
 fn containsName(names: []const YulName, needle: YulName) bool {
