@@ -138,11 +138,12 @@ const SyntaxChecker = struct {
     fn endSourceUnit(self: *SyntaxChecker, node: *AST.Node) CheckError!void {
         if (self.source_unit != node) return error.InvalidAst;
         const annotation = try sourceUnitAnnotation(self.tree, node);
-        if (!self.version_pragma_found) try self.reporter.warning(
-            errorId(3420),
-            .{ .source_name = node.location.source_name },
-            "Source file does not specify required compiler version! Consider adding \"pragma solidity ^0.8.36;\"",
-        );
+        if (!self.version_pragma_found) {
+            const message = switch (self.options.solc_version) {
+                inline else => |version| comptime "Source file does not specify required compiler version! Consider adding \"pragma solidity ^" ++ version.number() ++ ";\"",
+            };
+            try self.reporter.warning(errorId(3420), .{ .source_name = node.location.source_name }, message);
+        }
         if (!annotation.use_abi_coder_v2.isSet())
             try annotation.use_abi_coder_v2.assign(true);
         self.source_unit = null;
