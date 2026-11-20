@@ -350,7 +350,6 @@ pub fn DataFlowAnalyzer(
                     allocator,
                     .{ .context = null, .get_value = knowledgeValue },
                     dialect,
-                    false,
                 ),
             };
             if (comptime memory_and_storage == .analyze) {
@@ -714,6 +713,7 @@ pub fn DataFlowAnalyzer(
         ) anyerror!void {
             const id = self.state.getId(variable) orelse return error.UnknownDataFlowVariable;
             const state = self.state.variable(id);
+            self.knowledge_base.variableChanged(variable);
             state.version +%= 1;
             state.assigned = .{
                 .value = value,
@@ -1083,6 +1083,7 @@ pub fn DataFlowAnalyzer(
             const scope = self.variable_scopes.pop().?;
             while (self.declared_variables.items.len > scope.declaration_mark) {
                 const declaration = self.declared_variables.pop().?;
+                self.knowledge_base.variableChanged(self.state.name(declaration.id));
                 self.removeValueById(declaration.id);
                 const variable = self.state.variable(declaration.id);
                 variable.reverse_head = invalid_pool_index;
@@ -1102,6 +1103,7 @@ pub fn DataFlowAnalyzer(
                 self.state.variables.items.len,
             );
             for (ids) |id| {
+                self.knowledge_base.variableChanged(self.state.name(id));
                 try self.clear_scratch.insert(self.allocator, id);
                 try self.addDirectDependentsToClear(id);
             }
@@ -1120,7 +1122,9 @@ pub fn DataFlowAnalyzer(
                 self.state.variables.items.len,
             );
             for (0..variables_to_clear.len()) |index| {
-                const id = self.state.getId(variables_to_clear.at(index)) orelse continue;
+                const name = variables_to_clear.at(index);
+                self.knowledge_base.variableChanged(name);
+                const id = self.state.getId(name) orelse continue;
                 try self.clear_scratch.insert(self.allocator, id);
                 try self.addDirectDependentsToClear(id);
             }
@@ -1564,6 +1568,41 @@ test "scope generations restore while variable versions advance" {
     analyzer.popScope();
     try std.testing.expectEqual(@as(?u32, null), analyzer.activeScopeGeneration(name));
     try std.testing.expectEqual(@as(?u64, 3), analyzer.variableVersion(name));
+}
+
+test "Yul simplification separates versions of unknown assigned values" {
+    const allocator = std.testing.allocator;
+    const Analyzer = DataFlowAnalyzer(NoObserver, .ignore);
+    var analyzer = Analyzer.init(allocator, .{}, null);
+    defer analyzer.deinit();
+    var observer: NoObserver = .{};
+    analyzer.bind(&observer);
+    try analyzer.pushScope(false);
+
+    const basis = try YulName.init("basis");
+    const first = try YulName.init("first");
+    const second = try YulName.init("second");
+    const basis_id = try analyzer.declareVariable(basis);
+    const first_id = try analyzer.declareVariable(first);
+    const second_id = try analyzer.declareVariable(second);
+    const expression: AST.Expression = .{ .identifier = .{ .name = basis } };
+    const knowledge = analyzer.knowledgeBase();
+    try analyzer.baseAssignValue(first, &expression);
+    try analyzer.setReferences(&.{first_id}, &.{basis_id});
+    try std.testing.expectEqual(@as(?u256, 0), try knowledge.differenceIfKnownConstant(first, basis));
+
+    try analyzer.clearVariableIds(&.{basis_id});
+    try std.testing.expectEqual(@as(?u256, null), try knowledge.differenceIfKnownConstant(first, basis));
+    try analyzer.baseAssignValue(second, &expression);
+    try analyzer.setReferences(&.{second_id}, &.{basis_id});
+    try std.testing.expectEqual(@as(?u256, 0), try knowledge.differenceIfKnownConstant(second, basis));
+
+    var branch_assignments: NameCollector.NameSet = .{};
+    defer branch_assignments.deinit(allocator);
+    _ = try branch_assignments.insert(allocator, basis);
+    try analyzer.clearValues(&branch_assignments);
+    try std.testing.expectEqual(@as(?u256, null), try knowledge.differenceIfKnownConstant(second, basis));
+    try std.testing.expectEqual(@as(?u256, null), try knowledge.differenceIfKnownConstant(first, second));
 }
 
 test "versioned reverse edges ignore stale dependency generations" {

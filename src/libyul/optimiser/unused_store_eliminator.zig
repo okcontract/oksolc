@@ -101,7 +101,6 @@ pub const UnusedStoreEliminator = struct {
                 scratch_allocator,
                 provider,
                 context.dialect,
-                true,
             ),
         };
         defer eliminator.deinit();
