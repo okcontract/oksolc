@@ -9,7 +9,6 @@ const AST = @import("../ast.zig");
 const ControlFlowCollector = @import("../control_flow_side_effects_collector.zig").ControlFlowSideEffectsCollector;
 const ControlFlowSideEffects = @import("../control_flow_side_effects.zig").ControlFlowSideEffects;
 const EVMDialectModule = @import("../backends/evm/evm_dialect.zig");
-const Instruction = @import("../../libevmasm/instruction.zig").Instruction;
 const KnowledgeBaseModule = @import("knowledge_base.zig");
 const OptimiserStepContext = @import("optimiser_step.zig").OptimiserStepContext;
 const OptimizerUtilities = @import("optimizer_utilities.zig");
@@ -241,19 +240,17 @@ pub const UnusedStoreEliminator = struct {
         };
 
         const is_storage_write = instruction == .SSTORE;
+        // RETURNDATACOPY can revert independently of its memory writes.
         const is_memory_write = switch (instruction) {
             .EXTCODECOPY,
             .CODECOPY,
             .CALLDATACOPY,
-            .RETURNDATACOPY,
             .MSTORE,
             .MSTORE8,
             => true,
             else => false,
         };
         if (!is_storage_write and (self.ignore_memory or !is_memory_write)) return;
-
-        if (instruction == .RETURNDATACOPY and !try self.safeReturndataCopy(call)) return;
 
         const operations = try self.operationsFromFunctionCall(call);
         if (operations.len != 1) return error.InvalidStoreOperation;
@@ -265,20 +262,6 @@ pub const UnusedStoreEliminator = struct {
             .TransientStorage => return error.InvalidStoreLocation,
         }
         try self.store_operations.put(statement, operation);
-    }
-
-    fn safeReturndataCopy(self: *UnusedStoreEliminator, call: *const AST.FunctionCall) anyerror!bool {
-        if (call.arguments.items.len != 3) return false;
-        const start_offset = self.identifierNameIfSSA(&call.arguments.items[1]) orelse return false;
-        const length = self.identifierNameIfSSA(&call.arguments.items[2]) orelse return false;
-        const length_expression = self.ssa_values.get(length) orelse return false;
-        const length_call = switch (length_expression.*) {
-            .function_call => |*value| value,
-            else => return false,
-        };
-        return try self.knowledge_base.knownToBeZero(start_offset) and
-            OptimizerUtilities.toEVMInstruction(self.base.dialect, &length_call.function_name) ==
-                Instruction.RETURNDATASIZE;
     }
 
     fn operationsFromFunctionCall(
