@@ -13,7 +13,7 @@ import tempfile
 def main():
     cli = str(Path(sys.argv[1]).resolve())
     version, build_identity = sys.argv[2:]
-    compatibility = f'0.8.36+oksolc.{version}'
+    compatibility = f'0.8.39+oksolc.{version}'
     with tempfile.TemporaryDirectory(prefix='oksolc-version-') as directory:
         root = Path(directory)
         config = root / 'config' / 'oksolc'
@@ -35,7 +35,7 @@ def main():
                 assert not result.stdout, result.stdout
             return result.stdout
 
-        assert command('version') == f'oksolc {version} (Solidity 0.8.36)\n'
+        assert command('version') == f'oksolc {version} (Solidity 0.8.39)\n'
         output = command('--version')
         assert output == ('oksolc, a solidity compiler commandline interface\n'
                           f'Version: {compatibility}\n')
@@ -43,7 +43,7 @@ def main():
         assert output.strip().splitlines()[-1] == f'Version: {compatibility}'
         assert json.loads(command('version', '--json')) == {
             'version': version,
-            'solidity_version': '0.8.36',
+            'solidity_version': '0.8.39',
             'compatibility_version': compatibility,
             'build_identity': build_identity or None,
         }
@@ -70,6 +70,7 @@ def main():
         })
         selected = command('--standard-json', '--no-cache', '--solc-version', '0.8.39',
                            input_text=request)
+        assert command('--standard-json', '--no-cache', input_text=request) == selected
         compiled = json.loads(selected)
         assert compiled['contracts']['C.sol']['C']['evm']['bytecode']['object']
         assert command('standard-json', '--no-cache', '--solc-version', '0.8.39',

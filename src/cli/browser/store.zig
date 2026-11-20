@@ -470,7 +470,7 @@ test "SQL snapshots index actual compiler symbols and references without changin
     ;
     var session = solidity.CompilerSession.init(std.testing.allocator);
     defer session.deinit();
-    var output = try session.compile(std.testing.allocator, .{ .input = request });
+    var output = try session.compile(std.testing.allocator, .{ .input = request, .solc_version = .v0_8_36 });
     defer output.deinit();
     var store = try Store.open(std.testing.allocator, std.testing.io, ":memory:");
     defer store.deinit();

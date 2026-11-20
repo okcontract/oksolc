@@ -39,9 +39,9 @@ test "compiler version constants distinguish oksolc from its compatibility targe
     const compatibility = try std.SemanticVersion.parse(VersionString);
     try std.testing.expect(compatibility.pre == null);
     try std.testing.expectEqualStrings("oksolc." ++ OksolcVersion, compatibility.build.?);
-    try std.testing.expectEqualStrings("0.8.36", VersionNumber);
+    try std.testing.expectEqualStrings("0.8.39", VersionNumber);
     try std.testing.expectEqual(std.math.Order.eq, compatibility.order(try std.SemanticVersion.parse(VersionNumber)));
-    try std.testing.expectEqualStrings("0.8.36+commit.8a079791", MetadataVersion);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 8, 36 }, &VersionCompactBytes);
+    try std.testing.expectEqualStrings("0.8.39+commit.ce47f2c8", MetadataVersion);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 8, 39 }, &VersionCompactBytes);
     try std.testing.expect(VersionIsRelease);
 }

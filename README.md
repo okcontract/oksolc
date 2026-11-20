@@ -22,19 +22,18 @@ and controls that we used.
 
 ## Status and compatibility
 
-The compatibility target is the original Solidity `0.8.36` compiler for Standard
-JSON, creation bytecode, diagnostics, and deterministic output.
+The optimized via-IR pipeline supports Solidity `0.8.36`, `0.8.37`, `0.8.38`,
+and `0.8.39` compatibility targets for Standard JSON, bytecode, and diagnostics.
+The default is `0.8.39`. Use `--solc-version` to select a different release.
 
-The via-IR pipeline includes the applicable compiler security fixes from solc
-`0.8.37` through `0.8.39` (`SOL-2026-4`, `SOL-2026-6`, `SOL-2026-7`, and `SOL-2026-8`).
+```sh
+oksolc standard-json --solc-version 0.8.36 request.json
+```
+
+All four targets include the applicable via-IR compiler security fixes from
+solc `0.8.37` through `0.8.39` (`SOL-2026-4`, `SOL-2026-6`, `SOL-2026-7`, and
+`SOL-2026-8`).
 [Solidity compiler bug list](https://docs.soliditylang.org/en/latest/bugs.html)
-
-A comparison with solc `0.8.39` found ABI parity across 59 Standard JSON
-fixtures compiled via IR with 200 optimizer runs and version pragmas accepted
-by both compilers. With CBOR metadata disabled, creation and runtime bytecode
-both matched on one fixture. The external dispatch optimization in solc
-`0.8.38` accounts for some of the bytecode differences.
-[Solidity 0.8.38 release notes](https://github.com/argotorg/solidity/releases/tag/v0.8.38)
 
 Intentional exceptions:
 
@@ -64,15 +63,15 @@ when exact control of compiler settings or output selection is required.
 
 ## Versions and releases
 
-oksolc has an independent product version; the Solidity version identifies its
-compatibility target. See [CHANGELOG.md](CHANGELOG.md) for release history.
+oksolc has an independent product version. The Solidity version identifies its
+compatibility target. See the [changelog](CHANGELOG.md) for release history.
 
 ```console
 $ oksolc version
-oksolc 0.2.4 (Solidity 0.8.36)
+oksolc 0.2.4 (Solidity 0.8.39)
 $ oksolc --version
 oksolc, a solidity compiler commandline interface
-Version: 0.8.36+oksolc.0.2.4
+Version: 0.8.39+oksolc.0.2.4
 ```
 
 `oksolc version --json` returns `version` (the product version),
@@ -80,14 +79,14 @@ Version: 0.8.36+oksolc.0.2.4
 Solidity SemVer with oksolc build metadata), and `build_identity` (the compiler
 content identity, or `null` if unavailable). Include this output in bug reports.
 The public Zig module exposes the product version as `solidity.version` and the
-Solidity target as `solidity.baseline.version`.
+default Solidity target as `solidity.baseline.version`. Zig callers can select
+a release from `solidity.SolcVersion` through `solidity.standard_json.Request.solc_version`.
 
 `--version` and the C ABI's `solidity_version()` retain a Solidity-compatible
-SemVer for tools such as Foundry. Even development releases put the oksolc
-version after `+`, so the Solidity target is still treated as a release.
-Contract metadata and CBOR keep the pinned reference compiler identity to
-preserve output and bytecode compatibility. Use the product version for upgrade
-comparisons; SemVer precedence ignores the build metadata after `+`.
+SemVer for tools such as Foundry. The CLI accepts `--solc-version` with version
+reporting and `--standard-json`. The C ABI uses the default target. Contract
+metadata and CBOR use the selected reference compiler identity. Use the product
+version for upgrade comparisons because SemVer precedence ignores build metadata.
 
 ## Zig API migration for 0.2.0
 

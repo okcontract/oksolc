@@ -99,10 +99,11 @@ test "reference corpus is valid JSON pinned to Solidity 0.8.36" {
     defer corpus.deinit();
 
     try std.testing.expectEqual(@as(u32, 6), corpus.value.schema_version);
-    try std.testing.expectEqualStrings(solidity.baseline.version, corpus.value.baseline.version);
+    const reference_version = solidity.SolcVersion.v0_8_36.number();
+    try std.testing.expectEqualStrings(reference_version, corpus.value.baseline.version);
     try std.testing.expectEqualStrings("solc --standard-json", corpus.value.reference.command);
     try std.testing.expectEqualStrings(
-        solidity.baseline.version,
+        reference_version,
         corpus.value.reference.required_version,
     );
     try std.testing.expectEqualStrings("keccak256", corpus.value.merkle.algorithm);
@@ -158,7 +159,7 @@ test "clean compiler matches frozen solc 0.8.36 outputs with structural unoptimi
         var dispatcher: solidity.StandardJsonDispatcher = .{};
         var actual = try dispatcher.compiler().compile(
             std.testing.allocator,
-            .{ .input = input.contents },
+            .{ .solc_version = .v0_8_36, .input = input.contents },
         );
         defer actual.deinit();
         @import("ir_comparison.zig").compare(std.testing.allocator, reference_output.contents, actual.bytes) catch |err| {
@@ -174,12 +175,12 @@ fn expectCorpusMatchesClean(session: *solidity.incremental.CompilerSession) !voi
         var dispatcher: solidity.StandardJsonDispatcher = .{};
         var expected = try dispatcher.compiler().compile(
             std.testing.allocator,
-            .{ .input = input.contents },
+            .{ .solc_version = .v0_8_36, .input = input.contents },
         );
         defer expected.deinit();
         var actual = try session.compiler().compile(
             std.testing.allocator,
-            .{ .input = input.contents },
+            .{ .solc_version = .v0_8_36, .input = input.contents },
         );
         defer actual.deinit();
         try solidity.standard_json.compareExact(expected.bytes, actual.bytes);
@@ -193,13 +194,13 @@ fn expectEachCorpusCaseMatchesCleanTwice(
         var dispatcher: solidity.StandardJsonDispatcher = .{};
         var expected = try dispatcher.compiler().compile(
             std.testing.allocator,
-            .{ .input = input.contents },
+            .{ .solc_version = .v0_8_36, .input = input.contents },
         );
         defer expected.deinit();
         for (0..2) |_| {
             var actual = try session.compiler().compile(
                 std.testing.allocator,
-                .{ .input = input.contents },
+                .{ .solc_version = .v0_8_36, .input = input.contents },
             );
             defer actual.deinit();
             try solidity.standard_json.compareExact(expected.bytes, actual.bytes);

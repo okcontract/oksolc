@@ -97,10 +97,10 @@ def main():
         if not manifest["requests"]:
             raise RuntimeError("CI benchmark manifest contains no requests")
         compiler = compare.resolve_executable(options.zig_solc)
-        version = compare.compiler_version((str(compiler), "--version"))
+        version = compare.compiler_version((str(compiler), "--solc-version", compare.EXPECTED_REFERENCE_VERSION, "--version"))
         if compare.EXPECTED_ZIG_VERSION not in version:
             raise RuntimeError(f"unexpected compiler version: {version}")
-        command = [str(compiler), "standard-json", "--no-cache"]
+        command = [str(compiler), "standard-json", "--no-cache", "--solc-version", compare.EXPECTED_REFERENCE_VERSION]
         if options.jobs > 1:
             command.extend(("--parallel", "--jobs", str(options.jobs)))
         command.append("-")

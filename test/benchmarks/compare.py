@@ -861,7 +861,7 @@ def main() -> int:
             if options.zig_parallel
             else 1
         )
-        zig_version = compiler_version((str(zig), "--version"))
+        zig_version = compiler_version((str(zig), "--solc-version", EXPECTED_REFERENCE_VERSION, "--version"))
         reference = (
             None if options.zig_only else resolve_executable(options.reference_solc)
         )
@@ -886,7 +886,7 @@ def main() -> int:
         reference_command = (
             None if reference is None else (str(reference), "--standard-json")
         )
-        zig_command_parts = [str(zig), "standard-json", "--no-cache"]
+        zig_command_parts = [str(zig), "standard-json", "--no-cache", "--solc-version", EXPECTED_REFERENCE_VERSION]
         if options.zig_parallel:
             zig_command_parts.extend(("--parallel", "--jobs", str(zig_jobs)))
         zig_command_parts.append("-")

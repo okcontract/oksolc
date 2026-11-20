@@ -870,7 +870,7 @@ pub fn build(b: *std.Build) !void {
     const cli_serve_command = b.addRunArtifact(cli);
     isolateCliSmokeEnvironment(b, cli_serve_command);
     dependOnValidation(&cli_serve_command.step, cli_identity_validation);
-    cli_serve_command.addArgs(&.{ "serve", "--stdio" });
+    cli_serve_command.addArgs(&.{ "serve", "--stdio", "--solc-version", "0.8.36" });
     // Legal recursion and a rejected fixed-size cycle must both leave the
     // persistent service available for the valid requests queued after them.
     cli_serve_command.setStdIn(.{
@@ -950,6 +950,8 @@ pub fn build(b: *std.Build) !void {
         dependOnValidation(&cli_parallel_command.step, cli_identity_validation);
         cli_parallel_command.addArgs(&.{
             "standard-json",
+            "--solc-version",
+            "0.8.36",
             "--parallel",
             "--jobs",
             jobs,
@@ -1013,7 +1015,8 @@ pub fn build(b: *std.Build) !void {
     });
     libsolc_c_smoke_module.linkLibrary(libsolc_library);
     const run_libsolc_c_smoke = b.addRunArtifact(libsolc_c_smoke);
-    run_libsolc_c_smoke.addArg(b.fmt("0.8.36+oksolc.{s}", .{package.version}));
+    const default_solc_version = @import("src/common/solc_version.zig").SolcVersion.default.number();
+    run_libsolc_c_smoke.addArg(b.fmt("{s}+oksolc.{s}", .{ default_solc_version, package.version }));
     dependOnValidation(&run_libsolc_c_smoke.step, libsolc_identity_validation);
     const libsolc_c_smoke_step = b.step(
         "libsolc-c-smoke",

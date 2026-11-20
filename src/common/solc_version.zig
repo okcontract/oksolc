@@ -9,7 +9,7 @@ pub const SolcVersion = enum(u8) {
     v0_8_38 = 38,
     v0_8_39 = 39,
 
-    pub const default: SolcVersion = .v0_8_36;
+    pub const default: SolcVersion = .v0_8_39;
 
     pub fn atLeast(self: SolcVersion, minimum: SolcVersion) bool {
         return @backingInt(self) >= @backingInt(minimum);

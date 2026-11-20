@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Compatibility
+
+- Default to Solidity `0.8.39` and support `--solc-version` for selecting
+  `0.8.36`, `0.8.37`, `0.8.38`, or `0.8.39`. The target determines pragma
+  checks, supported version-specific code generation, diagnostics, and metadata.
+
 ### Security
 
 - Reserve distinct spill slots across mutually recursive Yul calls (`SOL-2026-4`).
