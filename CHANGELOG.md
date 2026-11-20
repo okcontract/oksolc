@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Reserve distinct spill slots across mutually recursive Yul calls (`SOL-2026-4`).
+- Invalidate Yul optimizer alias facts when a variable's value changes (`SOL-2026-7`).
+- In via-IR code generation, snapshot the source of a recursive storage copy
+  when the destination contains it (`SOL-2026-8`).
+
 ## 0.2.4 - 2026-11-03
 
 Solidity compatibility target: `0.8.36`.

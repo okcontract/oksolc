@@ -25,6 +25,17 @@ and controls that we used.
 The compatibility target is the original Solidity `0.8.36` compiler for Standard
 JSON, creation bytecode, diagnostics, and deterministic output.
 
+The via-IR pipeline includes the applicable compiler security fixes from solc
+`0.8.37` through `0.8.39` (`SOL-2026-4`, `SOL-2026-6`, `SOL-2026-7`, and `SOL-2026-8`).
+[Solidity compiler bug list](https://docs.soliditylang.org/en/latest/bugs.html)
+
+A comparison with solc `0.8.39` found ABI parity across 59 Standard JSON
+fixtures compiled via IR with 200 optimizer runs and version pragmas accepted
+by both compilers. With CBOR metadata disabled, creation and runtime bytecode
+both matched on one fixture. The external dispatch optimization in solc
+`0.8.38` accounts for some of the bytecode differences.
+[Solidity 0.8.38 release notes](https://github.com/argotorg/solidity/releases/tag/v0.8.38)
+
 Intentional exceptions:
 
 - Named custom-error arguments in `require` encode in declaration order.
