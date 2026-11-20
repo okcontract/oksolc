@@ -536,7 +536,7 @@ test "CBOR metadata encodes the compatibility version" {
     );
     defer std.testing.allocator.free(hex);
     try std.testing.expect(std.mem.startsWith(u8, hex, "a2646970667358221220"));
-    try std.testing.expect(std.mem.endsWith(u8, hex, "64736f6c63430008240033"));
+    try std.testing.expect(std.mem.endsWith(u8, hex, "64736f6c63430008270033"));
     try std.testing.expectEqual(@as(usize, 106), hex.len);
 }
 

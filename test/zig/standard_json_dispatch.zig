@@ -1428,6 +1428,7 @@ test "invalid missing-language request preserves solc empty-source validation or
 test "valid source input matches solc after the frontend became available" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input =
         \\{"language":"Solidity","sources":{"A.sol":{"content":"contract A {}"}}}
         ,
@@ -4004,6 +4005,7 @@ test "URL callbacks consume and release owned failure and content results" {
     };
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input =
         \\{"language":"Solidity","sources":{"A.sol":{"urls":["missing.sol","A.sol"]}}}
         ,
@@ -4024,6 +4026,7 @@ test "source callbacks follow nlohmann lexicographic object order" {
     var loader_state: RecordingLoaderState = .{};
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input =
         \\{"language":"Solidity","sources":{"Z.sol":{"urls":["z.url"]},"A.sol":{"urls":["a.url"]}}}
         ,
@@ -4089,6 +4092,7 @@ test "duplicate source fields select the last URL array" {
     var loader_state: RecordingLoaderState = .{};
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input =
         \\{"language":"Solidity","sources":{"A.sol":{"urls":["bad.url"],"urls":["good.url"]}}}
         ,
