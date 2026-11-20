@@ -16,8 +16,10 @@ const Diagnostics = @import("../../liblangutil/diagnostics.zig");
 const UTF8 = @import("../../libsolutil/utf8.zig");
 const SetOnceError = @import("../../libsolutil/set_once.zig").SetOnceError;
 const YulSemantics = @import("../../libyul/optimiser/semantics.zig");
+const SolcVersion = @import("common").SolcVersion;
 
 pub const Options = struct {
+    solc_version: SolcVersion = SolcVersion.default,
     use_yul_optimizer: bool = false,
     experimental: bool = false,
 };
@@ -230,6 +232,11 @@ const SyntaxChecker = struct {
         }
 
         if (feature == .ABIEncoderV2) {
+            if (self.options.solc_version.atLeast(.v0_8_37)) try self.reporter.warning(
+                errorId(8506),
+                node.location,
+                "Experimental pragma ABIEncoderV2 is deprecated and will be removed in a future release.",
+            );
             if (annotation.use_abi_coder_v2.isSet()) {
                 if (!(try annotation.use_abi_coder_v2.get()).*)
                     try self.reporter.syntaxError(

@@ -57,6 +57,19 @@ test "external dispatch uses the selected Solidity release" {
     }
 }
 
+test "ABIEncoderV2 warning starts at Solidity 0.8.37" {
+    const input =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; pragma experimental ABIEncoderV2; contract C {}"}},"settings":{"outputSelection":{"*":{"*":["abi"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for (std.enums.values(solidity.SolcVersion)) |target| {
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input, .solc_version = target });
+        defer output.deinit();
+        const has_warning = std.mem.find(u8, output.bytes, "\"errorCode\":\"8506\"") != null;
+        try std.testing.expectEqual(target.atLeast(.v0_8_37), has_warning);
+    }
+}
+
 test "tuple conversion cleanup matches solc with separately owned component types" {
     const cases = .{
         .{ @embedFile("standard-json/solidity-tuple-cleanup-optimized.json"), @embedFile("standard-json/expected/solidity-tuple-cleanup-optimized.json") },

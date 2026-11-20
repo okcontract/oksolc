@@ -964,6 +964,7 @@ fn analyzeSolidityFrontend(
             root,
             reporter,
             .{
+                .solc_version = settings.frontend.solc_version,
                 .use_yul_optimizer = settings.optimizer.settings.run_yul_optimiser,
                 .experimental = settings.frontend.experimental,
             },
