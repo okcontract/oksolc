@@ -10,16 +10,12 @@ const CompilerIdentity = @import("build_support/compiler_identity.zig");
 const CompilerNative = @import("build_support/compiler_native.zig");
 const package = @import("build.zig.zon");
 
-const required_zig_version: std.SemanticVersion = .{
-    .major = 0,
-    .minor = 17,
-    .patch = 0,
-};
-
 comptime {
+    const required_zig_version = std.SemanticVersion.parse(package.minimum_zig_version) catch
+        @compileError("Invalid minimum_zig_version in build.zig.zon");
     if (builtin.zig_version.order(required_zig_version) != .eq) {
         @compileError(
-            "oksolc requires Zig 0.17.0; found " ++
+            "oksolc requires Zig " ++ package.minimum_zig_version ++ "; found " ++
                 builtin.zig_version_string,
         );
     }

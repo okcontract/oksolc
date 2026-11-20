@@ -16,7 +16,7 @@ MIT-licensed components
 The following components use the MIT License. The copyright notice listed
 for each component and the license text below apply to that component.
 
-* Zig 0.17 standard library
+* Zig 0.17.1 standard library
   Copyright (c) Zig contributors
 
 * translate-c 2.0.2 at c11030012dc325d446474d17b78c242fd1d622ec (build-only dependency)
@@ -29,7 +29,7 @@ for each component and the license text below apply to that component.
   Copyright (c) 2024 Karl Seguin.
   The Zig wrapper uses this repository's pinned SQLite amalgamation.
 
-* http.zig at e8272bfd5727aade0dcee3e2aba6c50f57c374b6
+* http.zig at faffd9f4cf6e0ea0a63428a52d8762dfd55d7c7f
   Copyright (c) 2024 Karl Seguin.
 
 * metrics.zig at ac167295b6a8fd84ca7af852c1032e6b246101f0
@@ -44,13 +44,13 @@ for each component and the license text below apply to that component.
 * zig-toml 0.3.0 at c661327bd9f02f774426c4fe78f60621411b7173
   Copyright (c) 2022-present Alexei Samokvalov & Contributors
 
-* yyjson 0.12.0
+* yyjson 0.13.0
   Copyright (c) 2020 YaoYuan <ibireme@gmail.com>
 
 * zBench 0.14.1 (benchmark-only dependency)
   Copyright (c) 2023 hndrk
 
-* zlinter 0.17.x at 06dd3de40c2b69294376fe960844203dabbbc996
+* zlinter 0.17.x at 85e4417cabe720f36ceb34942293be0671dfe56e
   Copyright (c) 2025 zlinter contributors
 
 * zlinter 0.16.x at 8b10b45d33c684be4f869baf95a37c282e9db750 (legacy vendored snapshot)
@@ -90,7 +90,7 @@ THE SOFTWARE.
 Public-domain components
 ------------------------
 
-* SQLite 3.53.4 amalgamation
+* SQLite 3.54.1 amalgamation
 
   SQLite is in the public domain. The official project dedication and blessing
   are available at https://www.sqlite.org/copyright.html. Vendored provenance

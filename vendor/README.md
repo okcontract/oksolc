@@ -36,14 +36,14 @@ Each package retains its upstream `LICENSE`; consolidated notices are in
 
 ## SQLite provenance
 
-SQLite 3.53.4 was downloaded from the official project over HTTPS on
-2026-08-25:
+SQLite 3.54.1 was downloaded from the official project over HTTPS on
+2026-11-20.
 
-- archive: `https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip`;
-- archive SHA3-256: `628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e`;
-- `sqlite3.c` SHA3-256: `67f423e9ebbbdc473cbc4772c872ee6b89f31fde4ed0279a5c25d5f65c043a16`.
+- Archive URL `https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip`
+- Archive SHA3-256 `92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30`
+- `sqlite3.c` SHA3-256 `e2b869d3003b33c942b7dd7063604fbc53553e1b66609570df39b9b7b558ee81`
 
-The archive hash and source-file hash match SQLite's download and 3.53.4
-release pages. Only `sqlite3.c`, `sqlite3.h`, and `sqlite3ext.h` are retained;
-the command-line shell is not vendored. SQLite is dedicated to the public
-domain; see `https://www.sqlite.org/copyright.html`.
+The archive hash and source-file hash match SQLite's download and 3.54.1
+release pages. The vendored amalgamation consists of `sqlite3.c`,
+`sqlite3.h`, and `sqlite3ext.h`. SQLite is dedicated to the public domain.
+[SQLite copyright](https://www.sqlite.org/copyright.html)
