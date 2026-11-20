@@ -391,6 +391,7 @@ pub const YulStack = struct {
         self.stack_state = .parsed;
         try self.object_optimizer.optimize(object, .{
             .evm_version = self.evm_version,
+            .solc_version = self.optimiser_settings.solc_version,
             .optimize_stack_allocation = optimize_stack_allocation,
             .yul_optimiser_steps = yul_optimiser_steps,
             .yul_optimiser_cleanup_steps = yul_optimiser_cleanup_steps,

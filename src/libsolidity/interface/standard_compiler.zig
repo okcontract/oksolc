@@ -4227,6 +4227,7 @@ fn parseSettings(
 ) !CompilationOptionsResult {
     var result = CompilationOptions.init(allocator);
     result.frontend.solc_version = solc_version;
+    result.optimizer.settings.solc_version = solc_version;
     var result_transferred = false;
     defer if (!result_transferred) result.deinit();
 

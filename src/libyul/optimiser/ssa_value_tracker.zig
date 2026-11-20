@@ -10,11 +10,12 @@ const AST = @import("../ast.zig");
 const NameCollector = @import("name_collector.zig");
 const YulName = @import("../yul_name.zig").YulName;
 
-pub const ValueMap = std.AutoHashMapUnmanaged(YulName, *const AST.Expression);
+pub const ValueMap = std.AutoHashMapUnmanaged(YulName, ?*const AST.Expression);
 
 pub const SSAValueTracker = struct {
     allocator: std.mem.Allocator,
     values_map: ValueMap = .{},
+    include_parameters: bool = false,
     zero: AST.Expression = .{ .literal = .{
         .kind = .Number,
         .value = .{ .numeric_value = 0 },
@@ -39,15 +40,17 @@ pub const SSAValueTracker = struct {
     }
 
     pub fn value(self: *const SSAValueTracker, name: YulName) error{UnknownSSAValue}!*const AST.Expression {
-        return self.values_map.get(name) orelse error.UnknownSSAValue;
+        return (self.values_map.get(name) orelse null) orelse error.UnknownSSAValue;
     }
 
     pub fn ssaVariables(
         allocator: std.mem.Allocator,
         block: *const AST.Block,
+        include_parameters: bool,
     ) anyerror!NameCollector.NameSet {
         var tracker = SSAValueTracker.init(allocator);
         defer tracker.deinit();
+        tracker.include_parameters = include_parameters;
         try tracker.run(block);
         var result: NameCollector.NameSet = .{};
         errdefer result.deinit(allocator);
@@ -71,7 +74,7 @@ pub const SSAValueTracker = struct {
         expression: ?*const AST.Expression,
     ) anyerror!void {
         if (self.values_map.contains(name)) return error.SourceNotDisambiguated;
-        try self.values_map.putNoClobber(self.allocator, name, expression orelse &self.zero);
+        try self.values_map.putNoClobber(self.allocator, name, expression);
     }
 
     fn visitBlock(self: *SSAValueTracker, block: *const AST.Block) anyerror!void {
@@ -86,13 +89,16 @@ pub const SSAValueTracker = struct {
             },
             .variable_declaration => |*declaration| {
                 if (declaration.value == null) {
-                    for (declaration.variables.items) |variable| try self.setValue(variable.name, null);
+                    for (declaration.variables.items) |variable| try self.setValue(variable.name, &self.zero);
                 } else if (declaration.variables.items.len == 1) {
                     try self.setValue(declaration.variables.items[0].name, declaration.value);
                 }
             },
             .function_definition => |*function| {
-                for (function.return_variables.items) |variable| try self.setValue(variable.name, null);
+                if (self.include_parameters) {
+                    for (function.parameters.items) |parameter| try self.setValue(parameter.name, null);
+                }
+                for (function.return_variables.items) |variable| try self.setValue(variable.name, &self.zero);
                 try self.visitBlock(&function.body);
             },
             .if_statement => |*if_statement| try self.visitBlock(&if_statement.body),
@@ -153,15 +159,22 @@ test "SSA value tracker bulk set matches ordered insertion across allocation fai
         try std.testing.expect(expected.contains(try YulName.init(name)));
     for ([_][]const u8{ "z", "b", "d", "e", "p", "s", "i" }) |name|
         try std.testing.expect(!expected.contains(try YulName.init(name)));
+    var with_parameters = SSAValueTracker.init(allocator);
+    defer with_parameters.deinit();
+    with_parameters.include_parameters = true;
+    try with_parameters.run(ast.root());
+    const parameter = try YulName.init("p");
+    try std.testing.expect(with_parameters.values().contains(parameter));
+    try std.testing.expectError(error.UnknownSSAValue, with_parameters.value(parameter));
     const Check = struct {
         fn run(failing: std.mem.Allocator, block: *const AST.Block, reference: *const NameCollector.NameSet) !void {
-            var actual = try SSAValueTracker.ssaVariables(failing, block);
+            var actual = try SSAValueTracker.ssaVariables(failing, block, false);
             defer actual.deinit(failing);
             try std.testing.expectEqualDeep(reference.map.items(), actual.map.items());
         }
     };
     try std.testing.checkAllAllocationFailures(allocator, Check.run, .{ ast.root(), &expected });
-    var empty = try SSAValueTracker.ssaVariables(allocator, &.{});
+    var empty = try SSAValueTracker.ssaVariables(allocator, &.{}, false);
     defer empty.deinit(allocator);
     try std.testing.expect(empty.isEmpty());
 }

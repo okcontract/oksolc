@@ -339,6 +339,7 @@ fn metadataOptimiserSettings(
     );
 
     var without_runs = settings;
+    without_runs.solc_version = Version.SolcVersion.default;
     without_runs.expected_executions_per_deployment =
         OptimiserSettings.minimal().expected_executions_per_deployment;
     if (without_runs.eql(OptimiserSettings.minimal())) {

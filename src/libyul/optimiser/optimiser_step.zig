@@ -5,6 +5,7 @@
 //! Type-erased optimizer-step dispatch and the shared execution context.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("../ast.zig");
 const CallGraphModule = @import("call_graph_generator.zig");
 const NameCollectorModule = @import("name_collector.zig");
@@ -114,6 +115,7 @@ pub const OptimiserStepContext = struct {
     dialect: AST.Dialect,
     dispenser: *NameDispenser,
     reserved_identifiers: *const NameCollectorModule.NameSet,
+    solc_version: SolcVersion = SolcVersion.default,
     expected_executions_per_deployment: ?usize = null,
     profiler: ?*Profiler = null,
     scratch_arena: ?*std.heap.ArenaAllocator = null,

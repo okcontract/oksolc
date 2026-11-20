@@ -386,7 +386,9 @@ pub const CompilationOptions = struct {
         self: *CompilationOptions,
         settings: OptimiserSettings,
     ) std.mem.Allocator.Error!void {
-        return self.optimizer.assignOwned(self.allocator, settings);
+        var versioned_settings = settings;
+        versioned_settings.solc_version = self.frontend.solc_version;
+        return self.optimizer.assignOwned(self.allocator, versioned_settings);
     }
 
     pub fn addLibrary(

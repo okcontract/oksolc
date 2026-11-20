@@ -76,6 +76,7 @@ pub const UnusedStoreEliminator = struct {
 
         var tracker = SSAValueTrackerModule.SSAValueTracker.init(scratch_allocator);
         defer tracker.deinit();
+        tracker.include_parameters = context.solc_version.atLeast(.v0_8_37);
         try tracker.run(ast);
 
         const ignore_memory = try Semantics.MSizeFinder.containsMSize(context.dialect, ast);
@@ -146,7 +147,7 @@ pub const UnusedStoreEliminator = struct {
 
     fn valueProvider(context: ?*const anyopaque, variable_name: YulName) ?*const AST.Expression {
         const values: *const ValueMap = @ptrCast(@alignCast(context.?));
-        return values.get(variable_name);
+        return values.get(variable_name) orelse null;
     }
 
     fn visitFunctionCall(

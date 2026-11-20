@@ -6,6 +6,7 @@
 //! execution, and whole-object Yul optimization orchestration.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("../ast.zig");
 const AsmAnalysis = @import("../asm_analysis.zig");
 const AsmPrinter = @import("../asm_printer.zig").AsmPrinter;
@@ -377,6 +378,7 @@ pub const OptimiserSuite = struct {
             expected_executions_per_deployment,
             externally_used_identifiers,
             profiler,
+            SolcVersion.default,
         );
     }
 
@@ -391,6 +393,7 @@ pub const OptimiserSuite = struct {
         expected_executions_per_deployment: ?usize,
         externally_used_identifiers: ?*const NameCollector.NameSet,
         profiler: ?*Profiler,
+        solc_version: SolcVersion,
     ) anyerror!void {
         const allocator = object.allocator;
         const code = object.code() orelse return error.MissingObjectCode;
@@ -438,6 +441,7 @@ pub const OptimiserSuite = struct {
         defer function_analysis_cache.deinit();
         var context: OptimiserStepContext = .{
             .dialect = dialect,
+            .solc_version = solc_version,
             .dispenser = &dispenser,
             .reserved_identifiers = &reserved_identifiers,
             .expected_executions_per_deployment = expected_executions_per_deployment,

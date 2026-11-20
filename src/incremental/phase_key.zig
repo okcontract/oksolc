@@ -280,6 +280,7 @@ fn fingerprintOptimizer(options: *const CompilationOptions) H256 {
     hasher.addBytes(11, settings.yul_optimiser_steps);
     hasher.addBytes(12, settings.yul_optimiser_cleanup_steps);
     hasher.addU64(13, settings.expected_executions_per_deployment);
+    hasher.addU64(14, @backingInt(settings.solc_version));
     return hasher.finish();
 }
 

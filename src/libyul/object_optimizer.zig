@@ -5,6 +5,7 @@
 //! Recursive Yul optimization with sharded, portable, persistent caching.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("ast.zig");
 const AsmAnalysis = @import("asm_analysis.zig");
 const AsmPrinter = @import("asm_printer.zig").AsmPrinter;
@@ -26,6 +27,7 @@ const SolidityDebugNormalizer = @import("solidity_debug_normalizer.zig");
 
 pub const Settings = struct {
     evm_version: EVMVersion,
+    solc_version: SolcVersion = SolcVersion.default,
     optimize_stack_allocation: bool,
     yul_optimiser_steps: []const u8,
     yul_optimiser_cleanup_steps: []const u8,
@@ -391,6 +393,7 @@ pub const ObjectOptimizer = struct {
             if (is_creation) null else settings.expected_executions_per_deployment,
             null,
             settings.profiler,
+            settings.solc_version,
         );
         // Freeze private names once. Memory hits copy the existing AST; only
         // persistent storage serializes it, using the shared structural codec.
@@ -591,7 +594,7 @@ pub const ObjectOptimizer = struct {
         settings: Settings,
         is_creation: bool,
     ) !CacheKey {
-        var raw_key: [195]u8 = undefined;
+        var raw_key: [196]u8 = undefined;
         var cursor: usize = 0;
         appendHash(&raw_key, &cursor, try ASTEncoding.hashBlock(ast));
         appendHash(&raw_key, &cursor, try ASTEncoding.hashSources(debug_data));
@@ -612,6 +615,8 @@ pub const ObjectOptimizer = struct {
         appendHash(&raw_key, &cursor, Keccak.keccak256(settings.yul_optimiser_steps));
         appendHash(&raw_key, &cursor, Keccak.keccak256(settings.yul_optimiser_cleanup_steps));
         raw_key[cursor] = @intFromBool(settings.typed_solidity);
+        cursor += 1;
+        raw_key[cursor] = @backingInt(settings.solc_version);
         cursor += 1;
         std.debug.assert(cursor == raw_key.len);
         return Keccak.keccak256(&raw_key);
@@ -648,7 +653,7 @@ fn replaceAnalyzedCode(object: *ObjectModule.Object, replacement_input: AST.AST,
     object.replaceCode(replacement, analysis);
 }
 
-fn appendHash(output: *[195]u8, cursor: *usize, hash: CacheKey) void {
+fn appendHash(output: []u8, cursor: *usize, hash: CacheKey) void {
     @memcpy(output[cursor.*..][0..hash.storage.len], &hash.storage);
     cursor.* += hash.storage.len;
 }

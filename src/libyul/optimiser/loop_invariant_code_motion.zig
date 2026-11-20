@@ -28,7 +28,7 @@ pub const LoopInvariantCodeMotion = struct {
         const scratch_allocator = context.scratchAllocator();
         var function_analysis = try context.functionAnalysis(ast);
         defer function_analysis.deinit();
-        var ssa_variables = try SSAValueTracker.ssaVariables(scratch_allocator, ast);
+        var ssa_variables = try SSAValueTracker.ssaVariables(scratch_allocator, ast, context.solc_version.atLeast(.v0_8_37));
         defer ssa_variables.deinit(scratch_allocator);
         var mover: LoopInvariantCodeMotion = .{
             .allocator = allocator,
