@@ -40,9 +40,9 @@ complete Standard JSON output of solc `0.8.37`, `0.8.38`, and `0.8.39` with
 both one and six jobs. Fifteen workloads produced exact creation and deployed
 bytecode, and Farcaster and Seaport returned identical compilation diagnostics.
 For the `0.8.36` target, 13 of the 15 bytecode-producing workloads matched
-exactly. Sablier v2 and the 2022 Uniswap v4 fixture differed in bytecode, and
-four other workloads differed only in source maps. One-job and six-job outputs
-were identical for all workloads at all four targets.
+exactly. Sablier v2 and the 2022 Uniswap v4 fixture differed in bytecode because
+oksolc applies a fix that separates constant helpers for checked and unchecked
+arithmetic. Four other workloads differed only in source maps. 
 
 Intentional exceptions:
 
