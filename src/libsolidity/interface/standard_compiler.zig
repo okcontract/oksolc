@@ -207,6 +207,18 @@ const CompilationOptionsResult = union(enum) {
     fatal: Fatal,
 };
 
+fn evmDeprecationCutoff(solc_version: SolcVersion) EVMVersion {
+    return EVMVersion.init(if (solc_version.atLeast(.v0_8_37)) .London else .Constantinople);
+}
+
+fn appendEvmDeprecationWarning(allocator: std.mem.Allocator, errors: *Json, solc_version: SolcVersion) !void {
+    const message = try allocator.print(
+        "Support for EVM versions older than {s} is deprecated and will be removed in the future.",
+        .{evmDeprecationCutoff(solc_version).name()},
+    );
+    try appendError(allocator, errors, .Warning, message, message, null, null);
+}
+
 inline fn reportProgress(
     progress: ?StandardJson.ProgressReporter,
     update: StandardJson.ProgressUpdate,
@@ -318,10 +330,8 @@ pub fn compileSolidityStandardJsonAlloc(
     defer settings.deinit();
     const frontend_fingerprint = PhaseKey.frontendFingerprint(&settings);
 
-    if (settings.frontend.evm_version_deprecation_warning) {
-        const message = "Support for EVM versions older than constantinople is deprecated and will be removed in the future.";
-        try appendError(arena, errors_value, .Warning, message, message, null, null);
-    }
+    if (settings.frontend.evm_version_deprecation_warning)
+        try appendEvmDeprecationWarning(arena, errors_value, solc_version);
 
     if (requestsSolidityEvmOutput(&settings.projection.output_selection) and !settings.ir.via_ir) {
         const message = "Zig port: Solidity EVM output requires \"settings.viaIR\": true; the legacy direct-codegen pipeline is unsupported.";
@@ -4039,10 +4049,8 @@ pub fn compileYulStandardJsonAlloc(
     };
     defer settings.deinit();
 
-    if (settings.frontend.evm_version_deprecation_warning) {
-        const message = "Support for EVM versions older than constantinople is deprecated and will be removed in the future.";
-        try appendError(arena, errors_value, .Warning, message, message, null, null);
-    }
+    if (settings.frontend.evm_version_deprecation_warning)
+        try appendEvmDeprecationWarning(arena, errors_value, solc_version);
 
     const sources_value = objectMember(input, "sources") orelse {
         try appendError(arena, errors_value, .JSONError, "No input sources specified.", "No input sources specified.", null, null);
@@ -4281,9 +4289,7 @@ fn parseSettings(
             return .{ .fatal = .{ .message = "evmVersion must be a string." } };
         result.frontend.evm_version = EVMVersion.fromString(version_name) orelse
             return .{ .fatal = .{ .message = "Invalid EVM version requested." } };
-        result.frontend.evm_version_deprecation_warning = result.frontend.evm_version.before(
-            EVMVersion.init(.Constantinople),
-        );
+        result.frontend.evm_version_deprecation_warning = result.frontend.evm_version.before(evmDeprecationCutoff(solc_version));
         if (result.frontend.evm_version.isExperimental() and !result.frontend.experimental) {
             const message = try allocator.print(
                 "EVM version '{s}' is experimental and can only be used with the 'settings.experimental' option enabled.",
