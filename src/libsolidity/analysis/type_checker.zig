@@ -6161,7 +6161,14 @@ const InlineAssemblyResolverContext = struct {
                 }
             }
 
-            if (type_ref.category() == .FixedPoint) return error.InvalidAst;
+            if (type_ref.category() == .FixedPoint) {
+                try self.checker.reporter.unimplementedFeatureError(
+                    errorId(5016),
+                    location,
+                    "Fixed point types are not implemented.",
+                );
+                return false;
+            }
             const suffix = reference.info.suffix;
             if (suffix.len != 0) {
                 if (declaration.payload.variable_declaration.mutability != .Constant and
