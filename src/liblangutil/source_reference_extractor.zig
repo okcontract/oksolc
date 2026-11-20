@@ -65,6 +65,12 @@ pub const Message = struct {
     }
 };
 
+fn utf8SequenceStart(text: []const u8, position: usize) usize {
+    var start = position;
+    while (start > 0 and start < text.len and (text[start] & 0xc0) == 0x80) start -= 1;
+    return start;
+}
+
 pub fn extractReference(
     allocator: std.mem.Allocator,
     provider: providers.CharStreamProvider,
@@ -103,7 +109,7 @@ pub fn extractReference(
         const right_start = source_end - 35;
         const replacement = try allocator.print(
             "{s} ... {s}",
-            .{ line[0..left_end], line[right_start..] },
+            .{ line[0..utf8SequenceStart(line, left_end)], line[utf8SequenceStart(line, right_start)..] },
         );
         allocator.free(line);
         line = replacement;
@@ -124,7 +130,9 @@ pub fn extractReference(
         }
         var replacement: std.ArrayList(u8) = .empty;
         errdefer replacement.deinit(allocator);
-        try replacement.appendSlice(allocator, line[slice_start..][0..slice_length]);
+        const cut_start = utf8SequenceStart(line, slice_start);
+        const cut_end = utf8SequenceStart(line, slice_start + slice_length);
+        try replacement.appendSlice(allocator, line[cut_start..cut_end]);
         if (start.column + location_length + 35 < line_length) {
             try replacement.appendSlice(allocator, " ...");
         }
