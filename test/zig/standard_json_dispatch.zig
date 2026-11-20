@@ -70,6 +70,18 @@ test "ABIEncoderV2 warning starts at Solidity 0.8.37" {
     }
 }
 
+test "constant helpers keep checked and wrapping arithmetic separate" {
+    const input =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { uint constant VALUE = uint(40) + uint(2); function checked() external pure returns (uint) { return VALUE; } function wrapping() external pure returns (uint) { unchecked { return VALUE; } } }"}},"settings":{"viaIR":true,"outputSelection":{"*":{"*":["ir"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input, .solc_version = .v0_8_37 });
+    defer output.deinit();
+    try std.testing.expect(std.mem.find(u8, output.bytes, "function constant_VALUE_") != null);
+    try std.testing.expect(std.mem.find(u8, output.bytes, "_checked() ->") != null);
+    try std.testing.expect(std.mem.find(u8, output.bytes, "_wrapping() ->") != null);
+}
+
 test "tuple conversion cleanup matches solc with separately owned component types" {
     const cases = .{
         .{ @embedFile("standard-json/solidity-tuple-cleanup-optimized.json"), @embedFile("standard-json/expected/solidity-tuple-cleanup-optimized.json") },

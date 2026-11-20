@@ -219,6 +219,7 @@ pub const IRGeneratorForStatements = struct {
             self.allocator,
             self.context.compatibility_ids,
             declaration,
+            try self.context.constantArithmeticSuffix(declaration),
         );
         errdefer self.allocator.free(name);
         if (!(try self.context.functionCollector().beginFunction(name))) return name;
