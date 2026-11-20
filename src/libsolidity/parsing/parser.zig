@@ -425,6 +425,7 @@ pub const Parser = struct {
             tokens,
             literals,
         ) catch return error.InvalidParserState;
+        parser.unsigned_comparison = self.solc_version.atLeast(.v0_8_38);
         var expression = parser.parse() catch |parse_error| switch (parse_error) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {

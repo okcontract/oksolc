@@ -103,6 +103,7 @@ pub const MatchComponent = struct {
     prefix: Token = .Illegal,
     version: SemVerVersion = .{},
     levels_present: u32 = 1,
+    unsigned_comparison: bool = false,
 
     pub fn matches(self: MatchComponent, candidate: SemVerVersion) bool {
         if (self.prefix == .BitNot) {
@@ -130,8 +131,12 @@ pub const MatchComponent = struct {
             const expected = self.version.numbers[index];
             if (expected == wildcard) continue;
             did_compare = true;
-            // solc 0.8.36 compares components by signed 32-bit subtraction.
-            comparison = @bitCast(candidate.numbers[index] -% expected);
+            const actual = candidate.numbers[index];
+            comparison = if (self.unsigned_comparison) switch (std.math.order(actual, expected)) {
+                .lt => -1,
+                .eq => 0,
+                .gt => 1,
+            } else @bitCast(actual -% expected);
         }
         if (comparison == 0 and candidate.prerelease.len != 0 and did_compare) {
             comparison = -1;
@@ -195,6 +200,7 @@ pub const SemVerMatchExpressionParser = struct {
     position: usize = 0,
     position_inside: usize = 0,
     failure_character: ?u8 = null,
+    unsigned_comparison: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -252,7 +258,7 @@ pub const SemVerMatchExpressionParser = struct {
     fn parseMatchComponent(
         self: *SemVerMatchExpressionParser,
     ) SemVerError!MatchComponent {
-        var component: MatchComponent = .{};
+        var component: MatchComponent = .{ .unsigned_comparison = self.unsigned_comparison };
         switch (self.currentToken()) {
             .BitXor,
             .BitNot,
@@ -426,6 +432,15 @@ test "large pragma components preserve solc 0.8.36 comparison boundaries" {
         };
         try std.testing.expectEqual(expected, expression.matches(candidate));
     };
+}
+
+test "unsigned pragma comparison orders large version components" {
+    const component: MatchComponent = .{
+        .prefix = .LessThan,
+        .version = .{ .numbers = .{ 3_000_000_000, 0, 0 } },
+        .unsigned_comparison = true,
+    };
+    try std.testing.expect(component.matches(.{ .numbers = .{ 0, 8, 38 } }));
 }
 
 test "version pragma failures retain the upstream diagnostic reason" {
