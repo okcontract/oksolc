@@ -139,8 +139,8 @@ same revision. Standard JSON and C ABI callers need no migration.
 - Clang with ASan/UBSan runtimes for `fuzz-json-adapter` and `fuzz` (limited to
   the yyjson adapter for now)
 - Python 3 for tests and benchmark orchestration
-- `solc` version `0.8.36` for optional reference audits and benchmark
-  comparisons
+- `solc` version `0.8.36` for optional reference audits and local benchmark
+  comparisons, and `0.8.39` for external benchmark comparisons by default
 - `zstd` to replay the bundled external benchmarks; Forge and Git to capture
   fresh requests, plus Node.js/npm for old Uniswap and Node.js for Pendle setup
 
@@ -532,14 +532,19 @@ compatibility and record cache metrics:
 zig build benchmark-incremental -Doptimize=ReleaseFast
 ```
 
-The external suite compares oksolc with original `solc 0.8.36`. Replay the
-imported Standard JSON requests without project downloads or Forge:
+The external suite compares both compilers at Solidity 0.8.39 by default.
+Replay the imported Standard JSON requests without project downloads or Forge:
 
 ```sh
 zig build benchmark-external -Doptimize=ReleaseFast \
   -Dbenchmark-reference-solc=solc -Dbenchmark-runs=3 -Dbenchmark-warmups=1 \
   -- --bundled-requests
 ```
+
+To select a different release, pass `--solc-version VERSION` to the launcher
+and supply that release’s solc binary via `-Dbenchmark-reference-solc`. The
+launcher requires matching bytecode, so the documented 0.8.36 backport
+differences cause those fixtures to fail preflight.
 
 Select projects with repeated `--project NAME` flags. For example, to compare
 only Pendle, including all its production contracts and imported dependencies:

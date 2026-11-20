@@ -102,11 +102,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Benchmark oksolc with via-IR Standard JSON requests, with an "
-            "optional exact comparison against system solc 0.8.36."
+            "optional exact comparison against system solc."
         )
     )
     parser.add_argument("--reference-solc", default="solc")
     parser.add_argument("--zig-solc", default="zig-out/bin/oksolc")
+    parser.add_argument(
+        "--solc-version",
+        choices=("0.8.36", "0.8.37", "0.8.38", "0.8.39"),
+        default=EXPECTED_REFERENCE_VERSION,
+        help="Solidity version for both compilers (default: %(default)s).",
+    )
     parser.add_argument(
         "--zig-parallel",
         action="store_true",
@@ -861,7 +867,8 @@ def main() -> int:
             if options.zig_parallel
             else 1
         )
-        zig_version = compiler_version((str(zig), "--solc-version", EXPECTED_REFERENCE_VERSION, "--version"))
+        target = options.solc_version
+        zig_version = compiler_version((str(zig), "--solc-version", target, "--version"))
         reference = (
             None if options.zig_only else resolve_executable(options.reference_solc)
         )
@@ -871,22 +878,22 @@ def main() -> int:
             else compiler_version((str(reference), "--version"))
         )
         if not options.skip_version_check:
-            if (
-                reference_version is not None
-                and EXPECTED_REFERENCE_VERSION not in reference_version
+            if reference_version is not None and not any(
+                line.removeprefix("Version: ").partition("+")[0] == target
+                for line in reference_version.splitlines()
             ):
-                raise RuntimeError(
-                    f"system solc is not version {EXPECTED_REFERENCE_VERSION}"
-                )
-            if EXPECTED_ZIG_VERSION not in zig_version:
-                raise RuntimeError(
-                    f"oksolc does not report version {EXPECTED_ZIG_VERSION}"
-                )
+                raise RuntimeError(f"system solc is not version {target}")
+            expected_zig_version = f"{target}+oksolc."
+            if not any(
+                line.removeprefix("Version: ").startswith(expected_zig_version)
+                for line in zig_version.splitlines()
+            ):
+                raise RuntimeError(f"oksolc does not report version {expected_zig_version}")
 
         reference_command = (
             None if reference is None else (str(reference), "--standard-json")
         )
-        zig_command_parts = [str(zig), "standard-json", "--no-cache", "--solc-version", EXPECTED_REFERENCE_VERSION]
+        zig_command_parts = [str(zig), "standard-json", "--no-cache", "--solc-version", target]
         if options.zig_parallel:
             zig_command_parts.extend(("--parallel", "--jobs", str(zig_jobs)))
         zig_command_parts.append("-")

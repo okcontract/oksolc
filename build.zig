@@ -64,7 +64,7 @@ pub fn build(b: *std.Build) !void {
     const reference_solc = b.option(
         []const u8,
         "benchmark-reference-solc",
-        "System-installed solc 0.8.36 executable used for parity comparisons",
+        "System solc executable (0.8.39 by default for external benchmarks, 0.8.36 for frozen comparisons)",
     ) orelse "solc";
     const reference_fuzz_runs = b.option(
         u32,

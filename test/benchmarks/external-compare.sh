@@ -3,7 +3,7 @@
 # Copyright (C) 2014-2026 The Solidity Authors.
 # Copyright (C) 2026 OKcontract Pte. Ltd.
 
-# Compare oksolc with the original solc 0.8.36 on external via-IR requests.
+# Compare oksolc with a matching solc release on external via-IR requests.
 
 set -euo pipefail
 
@@ -11,11 +11,12 @@ repo_root=$(cd "$(dirname "$0")/../../" && pwd)
 benchmark_dir="${BENCHMARK_DIR:-${repo_root}/benchmarks}"
 zig_parallel=false
 zig_jobs=
+solc_version=0.8.39
 reuse_requests=
 bundled_requests=false
 selected_projects=()
 function usage {
-    echo "Usage: external-compare.sh [--bundled-requests | --reuse-captured-requests DIR] [--zig-parallel] [--zig-jobs N] [--project NAME]... [<reference-solc>] [<oksolc>] [<runs>]"
+    echo "Usage: external-compare.sh [--bundled-requests | --reuse-captured-requests DIR] [--solc-version VERSION] [--zig-parallel] [--zig-jobs N] [--project NAME]... [<reference-solc>] [<oksolc>] [<runs>]"
 }
 while (( $# != 0 )); do
     case "$1" in
@@ -38,6 +39,14 @@ while (( $# != 0 )); do
             }
             zig_parallel=true
             zig_jobs="$2"
+            shift 2
+            ;;
+        --solc-version)
+            [[ $# -ge 2 ]] || {
+                echo "--solc-version requires a Solidity version" >&2
+                exit 2
+            }
+            solc_version="$2"
             shift 2
             ;;
         --project)
@@ -95,6 +104,13 @@ if [[ -n $zig_jobs && ! $zig_jobs =~ ^[1-9][0-9]*$ ]]; then
     echo "zig jobs must be a positive integer" >&2
     exit 2
 fi
+case "$solc_version" in
+    0.8.36|0.8.37|0.8.38|0.8.39) ;;
+    *)
+        echo "unsupported Solidity version: $solc_version" >&2
+        exit 2
+        ;;
+esac
 
 function resolve_executable {
     local value="$1"
@@ -251,6 +267,7 @@ for project in "${benchmarks[@]}"; do
         ${compare_mode[@]+"${compare_mode[@]}"} \
         --reference-solc "$reference_solc" \
         --zig-solc "$zig_solc" \
+        --solc-version "$solc_version" \
         --runs "$runs" \
         --warmups "$warmups" \
         --aggregate "$project" \

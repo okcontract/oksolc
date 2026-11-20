@@ -74,9 +74,12 @@ class LauncherTests(unittest.TestCase):
         self.compiler = self.root / "compiler"
         self.compiler.write_text(
             f"#!{sys.executable}\n"
-            "import json, sys\n"
+            "import json, os, sys\n"
+            "version = os.environ.get('BENCHMARK_TEST_VERSION', '0.8.36')\n"
+            "if '--solc-version' in sys.argv:\n"
+            "    assert sys.argv[sys.argv.index('--solc-version') + 1] == version\n"
             "if '--version' in sys.argv:\n"
-            "    print('Version: 0.8.36+oksolc.0.1.4')\n"
+            "    print(f'Version: {version}+oksolc.0.1.4')\n"
             "else:\n"
             "    if 'standard-json' in sys.argv:\n"
             "        assert '--no-cache' in sys.argv\n"
@@ -117,22 +120,28 @@ class LauncherTests(unittest.TestCase):
         request = b'{"language":"Solidity","sources":{}}'
         (requests / "input.json").write_bytes(request)
         report_dir = self.root / "reports"
-        result = subprocess.run([
-            "bash", str(compare.REPO_ROOT / "test/benchmarks/external-compare.sh"),
-            "--reuse-captured-requests", str(self.root / "retained"),
-            "--project", project, str(self.compiler), str(self.compiler), "1",
-        ], env={**os.environ, "BENCHMARK_REPORT_DIR": str(report_dir),
-                "BENCHMARK_WARMUPS": "0"}, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        report = json.loads((report_dir / f"{project}.json").read_text())
-        benchmark = report["benchmarks"][project]
-        self.assertTrue(benchmark["preflight"]["bytecode_match"])
-        self.assertEqual(set(benchmark["compilers"]),
-                         {"system-solc-via-ir", "zig-via-ir"})
-        self.assertIn("--no-cache", report["configuration"]["zig_command"])
-        self.assertEqual(report["provenance"]["requests"][0]["sha256"],
-                         hashlib.sha256(request).hexdigest())
-        self.assertTrue((report_dir / f"{project}-summary.json").is_file())
+        for version, version_args in (("0.8.39", []), ("0.8.38", ["--solc-version", "0.8.38"])):
+            with self.subTest(version=version):
+                result = subprocess.run([
+                    "bash", str(compare.REPO_ROOT / "test/benchmarks/external-compare.sh"),
+                    "--reuse-captured-requests", str(self.root / "retained"),
+                    *version_args,
+                    "--project", project, str(self.compiler), str(self.compiler), "1",
+                ], env={**os.environ, "BENCHMARK_REPORT_DIR": str(report_dir),
+                        "BENCHMARK_WARMUPS": "0", "BENCHMARK_TEST_VERSION": version},
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads((report_dir / f"{project}.json").read_text())
+                benchmark = report["benchmarks"][project]
+                self.assertTrue(benchmark["preflight"]["bytecode_match"])
+                self.assertEqual(set(benchmark["compilers"]),
+                                 {"system-solc-via-ir", "zig-via-ir"})
+                zig_command = report["configuration"]["zig_command"]
+                self.assertIn("--no-cache", zig_command)
+                self.assertEqual(zig_command[zig_command.index("--solc-version") + 1], version)
+                self.assertEqual(report["provenance"]["requests"][0]["sha256"],
+                                 hashlib.sha256(request).hexdigest())
+                self.assertTrue((report_dir / f"{project}-summary.json").is_file())
 
 
 if __name__ == "__main__":
