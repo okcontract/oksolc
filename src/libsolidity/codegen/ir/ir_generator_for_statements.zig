@@ -3175,9 +3175,10 @@ pub const IRGeneratorForStatements = struct {
             const message_node = call.arguments[1];
             const message_type = try expressionType(message_node);
             if (message_type.asMagic()) |magic| if (magic.kind == .Error) {
-                if (message_node.nodeKind() != .function_call)
+                const constructor = ASTUtils.resolveOuterUnaryTuples(message_node) orelse return error.InvalidAst;
+                if (constructor.nodeKind() != .function_call)
                     return error.InvalidAst;
-                const error_call = message_node.payload.function_call;
+                const error_call = constructor.payload.function_call;
                 const error_function = (try expressionType(error_call.expression)).asFunction() orelse
                     return error.InvalidAst;
                 if (error_function.kind != .Error or
@@ -3190,7 +3191,7 @@ pub const IRGeneratorForStatements = struct {
                 const sorted_error_arguments = try ASTImplementation.sortedFunctionCallArgumentsAlloc(
                     self.context.type_provider,
                     self.allocator,
-                    message_node,
+                    constructor,
                 );
                 defer self.allocator.free(sorted_error_arguments);
                 if (sorted_error_arguments.len != error_function.parameterTypes().len)
