@@ -3848,7 +3848,8 @@ pub const YulUtilFunctions = struct {
         if (from_type.category() == to_type.category() and
             TypeBehavior.dataStoredIn(from_type, .Storage) and
             TypeBehavior.dataStoredIn(to_type, .Storage) and
-            TypeBehavior.hasCyclicDefinition(from_type))
+            TypeBehavior.hasCyclicDefinition(from_type) and
+            try self.containsStorageDescendant(to_type, from_type))
             return self.copyToStorageWithOverlapGuardFunction(from_type, to_type, offset);
         return self.updateStorageValueFunction(from_type, to_type, offset);
     }
@@ -3913,6 +3914,26 @@ pub const YulUtilFunctions = struct {
         , .{ name, offset_names, offset_check, contains, copy_directly, load_to_memory, copy_from_memory });
         try self.function_collector.finishGeneratedFunction(name, code);
         return self.function_collector.copyFunctionName(name);
+    }
+
+    fn containsStorageDescendant(
+        self: *YulUtilFunctions,
+        target_type: *const Types.Type,
+        source_type: *const Types.Type,
+    ) UtilError!bool {
+        // Begin with the immediate children so an equal root type only counts
+        // when it is also reachable through an element or member.
+        switch (target_type.payload) {
+            .Array => |array| return self.containsStorageType(array.base_type, source_type),
+            .Struct => {
+                var members = try TypeBehavior.nativeMembersAlloc(self.type_provider, self.allocator, target_type, null);
+                defer members.deinit();
+                for (members.items) |member|
+                    if (try self.containsStorageType(member.type_ref, source_type)) return true;
+                return false;
+            },
+            else => return false,
+        }
     }
 
     fn containsStorageType(

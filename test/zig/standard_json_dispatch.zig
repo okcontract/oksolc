@@ -1038,9 +1038,12 @@ test "recursive storage assignments emit guarded copies" {
         \\    Node source;
         \\    Node destination;
         \\    Node[1] forest;
+        \\    Node[2] fixedSource;
+        \\    Node[2] fixedDestination;
         \\    function copyTree() external { destination = source; }
         \\    function copyChildren() external { destination.children = source.children; }
         \\    function copyIntoForest() external { forest[0] = source; }
+        \\    function copyFixedArrays() external { fixedDestination = fixedSource; }
         \\}
     ;
     const input = try std.json.Stringify.valueAlloc(allocator, .{
