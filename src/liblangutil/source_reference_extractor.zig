@@ -107,8 +107,17 @@ pub fn extractReference(
         if (left_end > line.len or source_end < 35 or source_end - 35 > line.len) {
             return error.InvalidSourceLocation;
         }
-        const cut_left = utf8SequenceStart(line, left_end);
-        const cut_right = utf8SequenceStart(line, source_end - 35);
+        const right_start = source_end - 35;
+        var cut_left = utf8SequenceStart(line, left_end);
+        var cut_right = utf8SequenceStart(line, right_start);
+        // Malformed continuation runs can move the cuts outside the span or
+        // make them coincide. Use the original byte cuts in that case.
+        if (cut_left < @as(usize, @intCast(start.column)) or
+            cut_right <= cut_left or cut_right - cut_left <= ellipsis.len)
+        {
+            cut_left = left_end;
+            cut_right = right_start;
+        }
         const replacement = try allocator.print(
             "{s}{s}{s}",
             .{ line[0..cut_left], ellipsis, line[cut_right..] },

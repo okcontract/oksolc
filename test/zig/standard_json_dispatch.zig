@@ -4164,6 +4164,36 @@ test "URL callbacks consume and release owned failure and content results" {
     try std.testing.expect(loader_state.saw_loaded_url);
 }
 
+test "URL sources with long malformed UTF-8 literals report a syntax error" {
+    const Loader = struct {
+        fn read(_: ?*anyopaque, allocator: std.mem.Allocator, kind: []const u8, url: []const u8) standard_json.SourceReadError!standard_json.SourceReadResult {
+            if (!std.mem.eql(u8, kind, "source") or !std.mem.eql(u8, url, "C.sol")) return .unsupported;
+            const prefix = "// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36;\ncontract C {\n    string value = unicode\"";
+            const invalid: [180]u8 = @splat(0x80);
+            const suffix = "\";\n}\n";
+            return .{ .contents = try std.mem.concat(allocator, u8, &.{ prefix, &invalid, suffix }) };
+        }
+    };
+    const allocator = std.testing.allocator;
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(allocator, .{
+        .input =
+        \\{"language":"Solidity","sources":{"C.sol":{"urls":["C.sol"]}}}
+        ,
+        .source_loader = .{ .context = null, .read_fn = Loader.read },
+    });
+    defer output.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+    defer parsed.deinit();
+    const diagnostics = parsed.value.object.get("errors").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    const diagnostic = diagnostics[0].object;
+    try std.testing.expectEqualStrings("8452", diagnostic.get("errorCode").?.string);
+    try std.testing.expectEqualStrings("Contains invalid UTF-8 sequence at position 0.", diagnostic.get("message").?.string);
+    const formatted = diagnostic.get("formattedMessage").?.string;
+    try std.testing.expect(std.mem.find(u8, formatted, "C.sol:4:") != null);
+}
+
 test "source callbacks follow nlohmann lexicographic object order" {
     var loader_state: RecordingLoaderState = .{};
     var dispatcher: libsolc.Dispatcher = .{};

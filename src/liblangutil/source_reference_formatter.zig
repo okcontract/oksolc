@@ -104,7 +104,7 @@ fn appendSourceLocation(
     try output.appendSlice(allocator, column);
 
     const stream = try provider.charStream(reference.source_name);
-    if (stream.isImportedFromAST()) return;
+    if (stream.isImportedFromAST() or !std.unicode.utf8ValidateSlice(reference.text)) return;
     const start = std.math.cast(usize, reference.start_column) orelse return error.InvalidSourceReference;
     const end = if (reference.multiline)
         reference.text.len
