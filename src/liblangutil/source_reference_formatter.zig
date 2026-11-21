@@ -68,6 +68,36 @@ fn replaceNonTabsAlloc(
     return output.toOwnedSlice(allocator);
 }
 
+fn elideInvalidUtf8Alloc(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    start: *usize,
+    end: *usize,
+) std.mem.Allocator.Error![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    var removed_before_start: usize = 0;
+    var removed_before_end: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const remaining = text[index..];
+        const width = std.unicode.utf8ByteSequenceLength(remaining[0]) catch 0;
+        if (width != 0 and width <= remaining.len and std.unicode.utf8ValidateSlice(remaining[0..width])) {
+            try output.appendSlice(allocator, remaining[0..width]);
+            index += width;
+        } else {
+            removed_before_start += @intFromBool(index < start.*);
+            removed_before_end += @intFromBool(index < end.*);
+            index += 1;
+        }
+    }
+    const sanitized = try output.toOwnedSlice(allocator);
+    // The caret uses offsets into the displayed excerpt.
+    start.* -= removed_before_start;
+    end.* -= removed_before_end;
+    return sanitized;
+}
+
 fn appendSourceLocation(
     output: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -104,13 +134,19 @@ fn appendSourceLocation(
     try output.appendSlice(allocator, column);
 
     const stream = try provider.charStream(reference.source_name);
-    if (stream.isImportedFromAST() or !std.unicode.utf8ValidateSlice(reference.text)) return;
-    const start = std.math.cast(usize, reference.start_column) orelse return error.InvalidSourceReference;
-    const end = if (reference.multiline)
+    if (stream.isImportedFromAST()) return;
+    var start = std.math.cast(usize, reference.start_column) orelse return error.InvalidSourceReference;
+    var end = if (reference.multiline)
         reference.text.len
     else
         std.math.cast(usize, reference.end_column) orelse return error.InvalidSourceReference;
     if (start > end or end > reference.text.len) return error.InvalidSourceReference;
+    const sanitized = if (std.unicode.utf8ValidateSlice(reference.text))
+        null
+    else
+        try elideInvalidUtf8Alloc(allocator, reference.text, &start, &end);
+    defer if (sanitized) |owned| allocator.free(owned);
+    const text: []const u8 = sanitized orelse reference.text;
 
     try appendRepeated(output, allocator, ' ', line_number.len);
     try output.append(allocator, ' ');
@@ -121,26 +157,26 @@ fn appendSourceLocation(
     defer allocator.free(numbered_frame);
     try appendColorized(output, allocator, colored, frame_codes, numbered_frame);
     try output.append(allocator, ' ');
-    try output.appendSlice(allocator, reference.text[0..start]);
+    try output.appendSlice(allocator, text[0..start]);
     if (!reference.multiline) {
         try appendColorized(
             output,
             allocator,
             colored,
             highlight_codes,
-            reference.text[start..end],
+            text[start..end],
         );
-        try output.appendSlice(allocator, reference.text[end..]);
+        try output.appendSlice(allocator, text[end..]);
         try output.append(allocator, '\n');
 
         try appendRepeated(output, allocator, ' ', line_number.len);
         try output.append(allocator, ' ');
         try appendColorized(output, allocator, colored, frame_codes, "|");
         try output.append(allocator, ' ');
-        const prefix = try replaceNonTabsAlloc(allocator, reference.text[0..start], ' ');
+        const prefix = try replaceNonTabsAlloc(allocator, text[0..start], ' ');
         defer allocator.free(prefix);
         try output.appendSlice(allocator, prefix);
-        const selected = reference.text[start..end];
+        const selected = text[start..end];
         if (selected.len == 0) {
             try appendColorized(output, allocator, colored, diagnostic_codes, "^");
         } else {
@@ -155,14 +191,14 @@ fn appendSourceLocation(
             allocator,
             colored,
             highlight_codes,
-            reference.text[start..],
+            text[start..],
         );
         try output.append(allocator, '\n');
         try appendRepeated(output, allocator, ' ', line_number.len);
         try output.append(allocator, ' ');
         try appendColorized(output, allocator, colored, frame_codes, "|");
         try output.append(allocator, ' ');
-        const prefix = try replaceNonTabsAlloc(allocator, reference.text[0..start], ' ');
+        const prefix = try replaceNonTabsAlloc(allocator, text[0..start], ' ');
         defer allocator.free(prefix);
         try output.appendSlice(allocator, prefix);
         try appendColorized(
@@ -319,6 +355,39 @@ test "diagnostic formatter emits the upstream source frame layout" {
     try std.testing.expect(std.mem.startsWith(u8, formatted, "Error (1234): expected token\n"));
     try std.testing.expect(std.mem.find(u8, formatted, "--> a.sol:2:2:") != null);
     try std.testing.expect(std.mem.findScalar(u8, formatted, '^') != null);
+}
+
+test "diagnostic frames elide malformed UTF-8 and keep the highlight aligned" {
+    const allocator = std.testing.allocator;
+    const prefix = "\tp\xffé ";
+    const suffix = "\xff;\n";
+    const cases = .{
+        .{ .span = "\xe2\x82word\x80", .visible = "word", .carets = "^^^^" },
+        .{ .span = "\x80\xff", .visible = "", .carets = "^" },
+    };
+    inline for (cases) |case| {
+        const stream = @import("char_stream.zig").CharStream.initBorrowed(prefix ++ case.span ++ suffix, "a.sol");
+        const singleton = providers.SingletonCharStreamProvider.init(&stream);
+        var diagnostic = try Diagnostics.Diagnostic.init(
+            allocator,
+            .{ .value = 8452 },
+            .SyntaxError,
+            "invalid UTF-8",
+            .{ .start = prefix.len, .end = prefix.len + case.span.len, .source_name = "a.sol" },
+            null,
+        );
+        defer diagnostic.deinit();
+        const formatted = try formatTypedDiagnosticAlloc(allocator, singleton.provider(), &diagnostic, false, false);
+        defer allocator.free(formatted);
+        try std.testing.expectEqualStrings(
+            "SyntaxError: invalid UTF-8\n" ++
+                " --> a.sol:1:7:\n" ++
+                "  |\n" ++
+                "1 | \tpé " ++ case.visible ++ ";\n" ++
+                "  | \t   " ++ case.carets ++ "\n\n",
+            formatted,
+        );
+    }
 }
 
 test "multiline diagnostic frames ignore closing-line indentation" {

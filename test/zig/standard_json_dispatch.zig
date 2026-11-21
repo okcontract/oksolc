@@ -4219,8 +4219,14 @@ test "URL sources with long malformed UTF-8 literals report a syntax error" {
     const diagnostic = diagnostics[0].object;
     try std.testing.expectEqualStrings("8452", diagnostic.get("errorCode").?.string);
     try std.testing.expectEqualStrings("Contains invalid UTF-8 sequence at position 0.", diagnostic.get("message").?.string);
-    const formatted = diagnostic.get("formattedMessage").?.string;
-    try std.testing.expect(std.mem.find(u8, formatted, "C.sol:4:") != null);
+    try std.testing.expectEqualStrings(
+        "SyntaxError: Contains invalid UTF-8 sequence at position 0.\n" ++
+            " --> C.sol:4:20:\n" ++
+            "  |\n" ++
+            "4 |     string value = unicode\" ... \";\n" ++
+            "  |                    ^^^^^^^^^^^^^^\n\n",
+        diagnostic.get("formattedMessage").?.string,
+    );
 }
 
 test "source callbacks follow nlohmann lexicographic object order" {
