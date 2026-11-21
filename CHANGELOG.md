@@ -1,19 +1,56 @@
 # Changelog
 
-## Unreleased
+## 0.2.5 - 2026-11-21
+
+The default Solidity compatibility target is `0.8.39`.
 
 ### Compatibility
 
-- Default to Solidity `0.8.39` and support `--solc-version` for selecting
-  `0.8.36`, `0.8.37`, `0.8.38`, or `0.8.39`. The target determines pragma
-  checks, supported version-specific code generation, diagnostics, and metadata.
+- Select Solidity `0.8.36` through `0.8.39` with `--solc-version` or the
+  `solc_version` field on Zig Standard JSON requests. The selected release
+  controls pragma checks, code generation, diagnostics, and metadata.
+- Support `block.slotnum` and Yul `slotnum()` on Amsterdam from Solidity
+  `0.8.37`. Bytecode listings recognize `SLOTNUM` from the same release.
+- From Solidity `0.8.37`, accept in-range signed storage layout bases, reject
+  `pragma experimental solidity`, and warn about
+  `pragma experimental ABIEncoderV2`.
+- From Solidity `0.8.38`, compare large pragma version components as unsigned,
+  require decimal Yul `@use-src` indices, retire `yulCFGJson` output selection,
+  and warn about `swapn`, `dupn`, and `exchange` as Yul identifiers.
+- Use release-specific external dispatch, Yul parameter analysis, EVM
+  deprecation warnings, and code-size limits.
 
 ### Security
 
-- Reserve distinct spill slots across mutually recursive Yul calls (`SOL-2026-4`).
-- Invalidate Yul optimizer alias facts when a variable's value changes (`SOL-2026-7`).
-- In via-IR code generation, snapshot the source of a recursive storage copy
-  when the destination contains it (`SOL-2026-8`).
+- Reserve distinct spill slots across mutually recursive Yul calls
+  (`SOL-2026-4`).
+- Encode named custom-error arguments in declaration order in `require`
+  (`SOL-2026-6`).
+- Invalidate Yul optimizer alias facts when a variable's value changes
+  (`SOL-2026-7`).
+- Snapshot overlapping sources during recursive storage copies (`SOL-2026-8`).
+  Generate the overlap guard only when the destination type can contain the
+  source.
+
+### Changed
+
+- Require Zig `0.17.1` and update SQLite to `3.54.1`, yyjson to `0.13.0`,
+  and the optional browser's Bun requirement to `1.4.5`. Refresh the pinned
+  http.zig and zlinter revisions.
+- Compare bundled external benchmarks against solc `0.8.39` by default.
+  Pass `--solc-version` and a matching reference compiler to compare another
+  release.
+
+### Fixed
+
+- Generate separate constant helpers for checked and unchecked arithmetic.
+- Preserve bounds checks for Yul `returndatacopy` calls that can revert.
+- Handle parenthesized custom errors passed to `require` and report diagnostics
+  for fixed-point references in inline assembly.
+- Clip diagnostic excerpts at UTF-8 boundaries and align highlights with the
+  displayed text. Elide malformed bytes while preserving the source frame and
+  caret.
+- Restore the standalone parser fuzz build.
 
 ## 0.2.4 - 2026-11-03
 
