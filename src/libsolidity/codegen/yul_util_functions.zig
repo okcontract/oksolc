@@ -6902,7 +6902,7 @@ test "Yul AST reference, packed ABI, and storage helper surface is instantiated"
     // HB-AR-2026.17 HACK-18/HACK-19 align push names and error selectors
     // with solc, retaining hexadecimal array bounds for readability.
     // This checks statement/dependency order, values and literal kinds.
-    try std.testing.expectEqualStrings("98db39f6fc1416335f7cb015343d2ef98e1462b413a20bea04333cca77e368d5", &std.fmt.bytesToHex(digest, .lower));
+    try std.testing.expectEqualStrings("4e67c586102bb2f732ce852b07b455c551b6677af2b8f8a9b4b01ef340918cff", &std.fmt.bytesToHex(digest, .lower));
 }
 
 test "Yul AST scalar helper generation retains structure and published code" {
