@@ -1021,12 +1021,18 @@ pub const YulUtilFunctions = struct {
             if (!from_calldata and !from_memory and !from_storage)
                 return error.InvalidType;
             const dynamic_calldata = from_calldata and from.isDynamicallySized();
-            const length = try self.arrayLengthFunction(from_type);
-            defer self.allocator.free(length);
-            const resize = try self.resizeArrayFunction(to_type);
-            defer self.allocator.free(resize);
+            // Keep helper declarations in solc's order for bytecode compatibility.
             const src_data = try self.arrayDataAreaFunction(from_type);
             defer self.allocator.free(src_data);
+            const calldata_tail = if (from_calldata and TypeBehavior.isDynamicallyEncoded(from.base_type))
+                try self.accessCalldataTailFunction(from.base_type)
+            else
+                null;
+            defer if (calldata_tail) |access| self.allocator.free(access);
+            const resize = try self.resizeArrayFunction(to_type);
+            defer self.allocator.free(resize);
+            const length = try self.arrayLengthFunction(from_type);
+            defer self.allocator.free(length);
             const dst_data = try self.arrayDataAreaFunction(to_type);
             defer self.allocator.free(dst_data);
             const generator = try self.function_collector.generator(self.evm_version);
@@ -1036,26 +1042,9 @@ pub const YulUtilFunctions = struct {
                 stack_size,
             );
 
-            const update = try self.updateStorageValueFunction(
-                from.base_type,
-                to.base_type,
-                0,
-            );
-            defer self.allocator.free(update);
-            const source_read = if (from_calldata) calldata: {
-                if (TypeBehavior.isDynamicallyEncoded(from.base_type)) {
-                    const access = try self.accessCalldataTailFunction(from.base_type);
-                    defer self.allocator.free(access);
-                    break :calldata try generator.statements(
-                        "let @0 := @1(value, srcPtr)",
-                        .{ stack_items, access },
-                    );
-                }
-                break :calldata try generator.statements(
-                    "let @0 := srcPtr",
-                    .{stack_items},
-                );
-            } else if (from_memory) memory: {
+            const source_read = if (calldata_tail) |access|
+                try generator.statements("let @0 := @1(value, srcPtr)", .{ stack_items, access })
+            else if (from_memory) memory: {
                 const read = try self.readFromMemoryOrCalldata(
                     from.base_type,
                     false,
@@ -1069,6 +1058,8 @@ pub const YulUtilFunctions = struct {
                 "let @0 := srcPtr",
                 .{stack_items},
             );
+            const update = try self.updateStorageValueFunction(from.base_type, to.base_type, 0);
+            defer self.allocator.free(update);
 
             const src_stride: u256 = if (from_calldata)
                 try TypeBehavior.calldataStride(from.*)
@@ -3644,9 +3635,8 @@ pub const YulUtilFunctions = struct {
             .{identifier},
         );
         defer self.allocator.free(name);
-        if (!(try self.function_collector.beginFunction(name)))
+        if (self.function_collector.contains(name))
             return self.function_collector.copyFunctionName(name);
-        errdefer self.function_collector.abortFunction(name);
         const members = try TypeBehavior.structMemoryMemberTypesAlloc(
             self.type_provider,
             self.allocator,
@@ -3691,8 +3681,12 @@ pub const YulUtilFunctions = struct {
                 try TypeBehavior.memoryHeadSize(member),
             ) catch return error.Overflow;
         }
-        // solc requests member read/write helpers before the allocator.
-        // This declaration order affects optimizer naming and inlining.
+        // solc builds the member expressions before registering the struct reader.
+        // A recursive array copy registers itself first, so its element conversion
+        // can finish this reader while the outer call is still visiting members.
+        if (!(try self.function_collector.beginFunction(name)))
+            return self.function_collector.copyFunctionName(name);
+        errdefer self.function_collector.abortFunction(name);
         const allocate = try self.allocateMemoryStructFunction(type_ref);
         defer self.allocator.free(allocate);
         const code = try generator.functionDefinition(

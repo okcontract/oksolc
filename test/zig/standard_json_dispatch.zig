@@ -1207,6 +1207,19 @@ test "recursive storage assignments emit guarded copies" {
     try std.testing.expect(artifact.get("evm").?.object.get("bytecode").?.object.get("object").?.string.len > 0);
 }
 
+test "overlapping recursive storage assignment matches solc 0.8.39 bytecode" {
+    inline for (.{ "optimized", "unoptimized" }) |mode| {
+        const fixture = "solidity-recursive-storage-snapshot-" ++ mode ++ ".json";
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_39,
+            .input = @embedFile("standard-json/" ++ fixture),
+        });
+        defer output.deinit();
+        try standard_json.compareExact(@embedFile("standard-json/expected/" ++ fixture), output.bytes);
+    }
+}
+
 test "recursive struct diagnostics prefer a complete inner cycle" {
     const allocator = std.testing.allocator;
     const source =
