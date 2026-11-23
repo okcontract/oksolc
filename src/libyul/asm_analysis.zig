@@ -8,6 +8,7 @@
 //! validator used by `EVMDialect`.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("ast.zig");
 const AsmAnalysisInfo = @import("asm_analysis_info.zig").AsmAnalysisInfo;
 const Diagnostics = @import("../liblangutil/diagnostics.zig");
@@ -112,6 +113,7 @@ pub const AsmAnalyzer = struct {
     dialect: AST.Dialect,
     object_structure: ObjectStructure,
     instruction_validator: InstructionValidator,
+    solc_version: SolcVersion = SolcVersion.default,
     current_scope: ?*ScopeModule.Scope = null,
     active_variables: std.AutoHashMap(*const ScopeModule.Variable, void),
     current_for_loop: ?*const AST.ForLoop = null,
@@ -656,7 +658,8 @@ pub const AsmAnalyzer = struct {
                 .{label},
             );
         }
-        if (self.dialect.reservedIdentifier(label)) {
+        const reserved_identifier = self.dialect.reservedIdentifier(label);
+        if (reserved_identifier) {
             try self.reportFormat(
                 .DeclarationError,
                 5017,
@@ -665,13 +668,18 @@ pub const AsmAnalyzer = struct {
                 .{label},
             );
         }
-        if (Token.isFutureYulKeyword(label) or Token.isFutureYulReservedIdentifier(label)) {
+        const future_keyword = Token.isFutureYulKeyword(label);
+        const future_slotnum = self.solc_version.atLeast(.v0_8_37) and
+            !reserved_identifier and std.mem.eql(u8, label, "slotnum");
+        const future_stack_instruction = self.solc_version.atLeast(.v0_8_38) and
+            (std.mem.eql(u8, label, "swapn") or std.mem.eql(u8, label, "dupn") or std.mem.eql(u8, label, "exchange"));
+        if (future_keyword or Token.isFutureYulReservedIdentifier(label) or future_slotnum or future_stack_instruction) {
             try self.reportFormat(
                 .Warning,
                 5470,
                 location,
                 "\"{s}\" will be promoted to Yul {s} in the future and will not be allowed anymore as an identifier.",
-                .{ label, if (Token.isFutureYulKeyword(label)) "keyword" else "reserved identifier" },
+                .{ label, if (future_keyword) "keyword" else "reserved identifier" },
             );
         }
     }
@@ -720,7 +728,7 @@ pub fn analyzeObject(
     instruction_validator: InstructionValidator,
 ) AnalyzeError!bool {
     try object.validateNames();
-    return analyzeObjectWithValidatedNames(allocator, object, error_reporter, resolver, instruction_validator);
+    return analyzeObjectWithValidatedNames(allocator, object, error_reporter, resolver, instruction_validator, SolcVersion.default);
 }
 
 /// Requires namespace validation of the whole tree since its last structural
@@ -731,6 +739,7 @@ pub fn analyzeObjectWithValidatedNames(
     error_reporter: *Diagnostics.ErrorReporter,
     resolver: Resolver,
     instruction_validator: InstructionValidator,
+    solc_version: SolcVersion,
 ) AnalyzeError!bool {
     const code = object.code() orelse return error.MissingObjectCode;
     var structure = try object.summarizeStructureWithValidatedNames();
@@ -747,6 +756,7 @@ pub fn analyzeObjectWithValidatedNames(
         instruction_validator,
     );
     defer analyzer.deinit();
+    analyzer.solc_version = solc_version;
     return analyzer.analyze(code.root());
 }
 

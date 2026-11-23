@@ -5,6 +5,7 @@
 //! Header-only optimizer settings shared by Solidity orchestration and Yul.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const Assembly = @import("../../libevmasm/assembly.zig");
 
 pub const default_yul_optimiser_steps =
@@ -35,6 +36,7 @@ pub const OptimiserSettings = struct {
     pub const DefaultYulOptimiserCleanupSteps = default_yul_optimiser_cleanup_steps;
     pub const ExecutionCount = u64;
 
+    solc_version: SolcVersion = SolcVersion.default,
     run_order_literals: bool = false,
     run_inliner: bool = false,
     run_jumpdest_remover: bool = false,
@@ -90,7 +92,8 @@ pub const OptimiserSettings = struct {
     }
 
     pub fn eql(self: OptimiserSettings, other: OptimiserSettings) bool {
-        return self.run_order_literals == other.run_order_literals and
+        return self.solc_version == other.solc_version and
+            self.run_order_literals == other.run_order_literals and
             self.run_inliner == other.run_inliner and
             self.run_jumpdest_remover == other.run_jumpdest_remover and
             self.run_peephole == other.run_peephole and

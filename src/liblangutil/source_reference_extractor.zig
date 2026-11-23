@@ -65,6 +65,12 @@ pub const Message = struct {
     }
 };
 
+fn utf8SequenceStart(text: []const u8, position: usize) usize {
+    var start = position;
+    while (start > 0 and start < text.len and (text[start] & 0xc0) == 0x80) start -= 1;
+    return start;
+}
+
 pub fn extractReference(
     allocator: std.mem.Allocator,
     provider: providers.CharStreamProvider,
@@ -94,6 +100,7 @@ pub fn extractReference(
         end.column - start.column;
     if (location_length < 0) return error.InvalidSourceLocation;
 
+    const ellipsis = " ... ";
     if (location_length > 150) {
         const left_end: usize = @intCast(start.column + 35);
         const source_end: usize = if (is_multiline) line.len else @intCast(end.column);
@@ -101,14 +108,24 @@ pub fn extractReference(
             return error.InvalidSourceLocation;
         }
         const right_start = source_end - 35;
+        var cut_left = utf8SequenceStart(line, left_end);
+        var cut_right = utf8SequenceStart(line, right_start);
+        // Malformed continuation runs can move the cuts outside the span or
+        // make them coincide. Use the original byte cuts in that case.
+        if (cut_left < @as(usize, @intCast(start.column)) or
+            cut_right <= cut_left or cut_right - cut_left <= ellipsis.len)
+        {
+            cut_left = left_end;
+            cut_right = right_start;
+        }
         const replacement = try allocator.print(
-            "{s} ... {s}",
-            .{ line[0..left_end], line[right_start..] },
+            "{s}{s}{s}",
+            .{ line[0..cut_left], ellipsis, line[cut_right..] },
         );
         allocator.free(line);
         line = replacement;
-        end.column = start.column + 75;
-        location_length = 75;
+        location_length -= @intCast(cut_right - cut_left - ellipsis.len);
+        end.column = start.column + location_length;
     }
 
     if (line.len > 150) {
@@ -124,17 +141,20 @@ pub fn extractReference(
         }
         var replacement: std.ArrayList(u8) = .empty;
         errdefer replacement.deinit(allocator);
-        try replacement.appendSlice(allocator, line[slice_start..][0..slice_length]);
+        const cut_start = utf8SequenceStart(line, slice_start);
+        const cut_end = utf8SequenceStart(line, slice_start + slice_length);
+        try replacement.appendSlice(allocator, line[cut_start..cut_end]);
         if (start.column + location_length + 35 < line_length) {
             try replacement.appendSlice(allocator, " ...");
         }
-        if (start.column > 35) {
-            try replacement.insertSlice(allocator, 0, " ... ");
-            start.column = 40;
-        }
+        const prefix_length: i32 = if (slice_start > 0) ellipsis.len else 0;
+        if (prefix_length != 0) try replacement.insertSlice(allocator, 0, ellipsis);
+        const excerpt = try replacement.toOwnedSlice(allocator);
         allocator.free(line);
-        line = try replacement.toOwnedSlice(allocator);
-        end.column = start.column + location_length;
+        line = excerpt;
+        const excerpt_end = prefix_length + @as(i32, @intCast(cut_end - cut_start));
+        start.column = @min(prefix_length + start.column - @as(i32, @intCast(cut_start)), excerpt_end);
+        end.column = @min(start.column + location_length, excerpt_end);
     }
 
     const owned_message = try allocator.dupe(u8, message);
@@ -226,4 +246,35 @@ test "source extraction truncates long context while preserving highlight" {
     try std.testing.expect(reference.text.len <= 155);
     try std.testing.expect(reference.start_column >= 0);
     try std.testing.expect(reference.end_column >= reference.start_column);
+}
+
+test "source extraction preserves the highlight across UTF-8 cuts" {
+    const context = "0123456789012345678901234567890123";
+    const long_context = context ++ context ++ context;
+    const cases = [_]struct { before: []const u8, span: []const u8, after: []const u8, highlighted: []const u8 }{
+        .{
+            .before = long_context ++ "é" ++ context,
+            .span = "identifier",
+            .after = long_context,
+            .highlighted = "identifier",
+        },
+        .{
+            .before = "return ",
+            .span = context ++ "é" ++ long_context ++ "€" ++ context,
+            .after = ";",
+            .highlighted = context ++ " ... €" ++ context,
+        },
+    };
+    inline for (cases) |case| {
+        const stream = @import("char_stream.zig").CharStream.initBorrowed(case.before ++ case.span ++ case.after, "a.sol");
+        const singleton = providers.SingletonCharStreamProvider.init(&stream);
+        const location: locations.SourceLocation = .{
+            .start = @intCast(case.before.len),
+            .end = @intCast(case.before.len + case.span.len),
+            .source_name = "a.sol",
+        };
+        var reference = try extractReference(std.testing.allocator, singleton.provider(), &location, "message");
+        defer reference.deinit();
+        try std.testing.expectEqualStrings(case.highlighted, reference.text[@intCast(reference.start_column)..@intCast(reference.end_column)]);
+    }
 }

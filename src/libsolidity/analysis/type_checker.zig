@@ -8,6 +8,7 @@
 //! Unsupported expression families report a diagnostic.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("../ast/ast.zig");
 const ASTAnnotations = @import("../ast/ast_annotations.zig");
 const ASTImplementation = @import("../ast/ast.zig");
@@ -46,6 +47,7 @@ pub const TypeChecker = struct {
     tree: *AST.Tree,
     type_provider: *TypeProviderModule.TypeProvider,
     evm_version: EVMVersion,
+    solc_version: SolcVersion = SolcVersion.default,
     reporter: *Diagnostics.ErrorReporter,
     compatibility_ids: CompatibilityIdResolver = .legacyNodeIds(),
     current_source_unit: ?*const AST.Node = null,
@@ -1685,6 +1687,7 @@ pub const TypeChecker = struct {
             .{},
         );
         defer analyzer.deinit();
+        analyzer.solc_version = self.solc_version;
         _ = analyzer.analyze(operations.root()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.FatalDiagnostic => return error.FatalDiagnostic,
@@ -4520,6 +4523,13 @@ pub const TypeChecker = struct {
                             node.location,
                             "\"blobbasefee\" is not supported by the VM version.",
                         )
+                    else if (std.mem.eql(u8, value.member_name, "slotnum") and
+                        !self.evm_version.hasSlotNum())
+                        try self.reporter.typeError(
+                            errorId(1048),
+                            node.location,
+                            "\"slotnum\" is not supported by the VM version.",
+                        )
                     else if (std.mem.eql(u8, value.member_name, "prevrandao") and
                         !self.evm_version.hasPrevRandao())
                         try self.reporter.warning(
@@ -5072,7 +5082,9 @@ pub const TypeChecker = struct {
                     null,
                     .{},
                 );
-            } else if (std.mem.eql(u8, name, "difficulty") or
+            } else if (self.solc_version.atLeast(.v0_8_37) and std.mem.eql(u8, name, "slotnum"))
+                try self.type_provider.uint(64)
+            else if (std.mem.eql(u8, name, "difficulty") or
                 std.mem.eql(u8, name, "prevrandao") or
                 std.mem.eql(u8, name, "gaslimit") or
                 std.mem.eql(u8, name, "number") or
@@ -6161,7 +6173,14 @@ const InlineAssemblyResolverContext = struct {
                 }
             }
 
-            if (type_ref.category() == .FixedPoint) return error.InvalidAst;
+            if (type_ref.category() == .FixedPoint) {
+                try self.checker.reporter.unimplementedFeatureError(
+                    errorId(5016),
+                    location,
+                    "Fixed point types are not implemented.",
+                );
+                return false;
+            }
             const suffix = reference.info.suffix;
             if (suffix.len != 0) {
                 if (declaration.payload.variable_declaration.mutability != .Constant and

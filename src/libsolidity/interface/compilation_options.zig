@@ -16,8 +16,10 @@ const CompilerStack = @import("compiler_stack.zig");
 const DebugSettings = @import("debug_settings.zig");
 const ImportRemapper = @import("import_remapper.zig");
 const OptimiserSettings = @import("optimiser_settings.zig").OptimiserSettings;
+const SolcVersion = @import("common").SolcVersion;
 
 pub const FrontendOptions = struct {
+    solc_version: SolcVersion = SolcVersion.default,
     evm_version: EVMVersion = EVMVersion.current(),
     remappings: std.ArrayList(ImportRemapper.NormalizedRemapping) = .empty,
     experimental: bool = false,
@@ -384,7 +386,9 @@ pub const CompilationOptions = struct {
         self: *CompilationOptions,
         settings: OptimiserSettings,
     ) std.mem.Allocator.Error!void {
-        return self.optimizer.assignOwned(self.allocator, settings);
+        var versioned_settings = settings;
+        versioned_settings.solc_version = self.frontend.solc_version;
+        return self.optimizer.assignOwned(self.allocator, versioned_settings);
     }
 
     pub fn addLibrary(

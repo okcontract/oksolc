@@ -6,6 +6,7 @@
 //! `IRGenerationContext.cpp`.
 
 const std = @import("std");
+const SolcVersion = @import("common").SolcVersion;
 const AST = @import("../../ast/ast.zig");
 const ASTAnnotations = @import("../../ast/ast_annotations.zig");
 const CompatibilityIdResolver = @import("../../ast/compatibility_id_resolver.zig").CompatibilityIdResolver;
@@ -83,6 +84,7 @@ pub const InternalDispatchMap = struct {
 };
 
 pub const IRGenerationContext = struct {
+    solc_version: SolcVersion = SolcVersion.default,
     allocator: std.mem.Allocator,
     type_provider: *TypeProviderModule.TypeProvider,
     compatibility_ids: CompatibilityIdResolver,
@@ -102,6 +104,7 @@ pub const IRGenerationContext = struct {
     functions: CollectorModule.MultiUseYulFunctionCollector,
     variable_counter: usize = 0,
     arithmetic: AST.Arithmetic = .Checked,
+    legacy_constant_arithmetic: std.AutoHashMapUnmanaged(*const AST.Node, AST.Arithmetic) = .empty,
     memory_unsafe_inline_assembly_seen: bool = false,
     function_generation_queue: DispatchQueue = .empty,
     internal_dispatch_map: InternalDispatchMap,
@@ -157,6 +160,7 @@ pub const IRGenerationContext = struct {
         self.local_variables.deinit(self.allocator);
         self.immutable_variables.deinit(self.allocator);
         self.state_variables.deinit(self.allocator);
+        self.legacy_constant_arithmetic.deinit(self.allocator);
         self.functions.deinit();
         self.function_generation_queue.deinit(self.allocator);
         self.internal_dispatch_map.deinit();
@@ -430,6 +434,20 @@ pub const IRGenerationContext = struct {
 
     pub fn setArithmetic(self: *IRGenerationContext, arithmetic: AST.Arithmetic) void {
         self.arithmetic = arithmetic;
+    }
+
+    pub fn constantArithmeticSuffix(self: *IRGenerationContext, declaration: *const AST.Node) std.mem.Allocator.Error![]const u8 {
+        if (!self.solc_version.atLeast(.v0_8_37)) {
+            // Keep the historical name for the first mode while giving any
+            // later use in a different arithmetic mode its own helper.
+            const mode = try self.legacy_constant_arithmetic.getOrPut(self.allocator, declaration);
+            if (!mode.found_existing) mode.value_ptr.* = self.arithmetic;
+            if (mode.value_ptr.* == self.arithmetic) return "";
+        }
+        return switch (self.arithmetic) {
+            .Checked => "_checked",
+            .Wrapping => "_wrapping",
+        };
     }
 
     pub fn addSubObject(

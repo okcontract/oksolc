@@ -184,15 +184,17 @@ pub fn constantValueFunctionAlloc(
     allocator: std.mem.Allocator,
     compatibility_ids: CompatibilityIdResolver,
     variable: *const AST.Node,
+    arithmetic_suffix: []const u8,
 ) CommonError![]u8 {
     if (variable.nodeKind() != .variable_declaration or
         variable.payload.variable_declaration.mutability != .Constant)
         return error.InvalidAst;
     return allocator.print(
-        "constant_{s}_{d}",
+        "constant_{s}_{d}{s}",
         .{
             variable.payload.variable_declaration.declaration.name,
             try compatibilityId(compatibility_ids, variable),
+            arithmetic_suffix,
         },
     );
 }

@@ -10,6 +10,7 @@ const FixedHash = @import("../libsolutil/fixed_hash.zig");
 const Parser = @import("../libsolidity/parsing/parser.zig");
 const Identity = @import("identity.zig");
 const SemanticFingerprint = @import("semantic_fingerprint.zig");
+const SolcVersion = @import("common").SolcVersion;
 
 pub const SourceId = Identity.SourceId;
 pub const H256 = FixedHash.H256;
@@ -102,10 +103,12 @@ pub const SyntaxSource = struct {
         self: *const SyntaxSource,
         content_digest: *const H256,
         evm_version: EVMVersion,
+        solc_version: SolcVersion,
     ) bool {
         return self.completeness == .parsed and
             self.content_digest.eql(content_digest) and
-            self.evm_version.eql(evm_version);
+            self.evm_version.eql(evm_version) and
+            self.parsed.solc_version == solc_version;
     }
 };
 
@@ -205,5 +208,5 @@ test "syntax revisions retain reused trees and release candidates transactionall
     candidate.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), source.reference_count);
-    try std.testing.expect(source.reusableFor(&digest, EVMVersion.current()));
+    try std.testing.expect(source.reusableFor(&digest, EVMVersion.current(), SolcVersion.default));
 }

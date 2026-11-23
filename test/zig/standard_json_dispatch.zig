@@ -10,6 +10,246 @@ const standard_json = solidity.standard_json;
 const Profiler = solidity.libsolutil.profiler.Profiler;
 const ObjectOptimizer = solidity.libyul.object_optimizer.ObjectOptimizer;
 
+test "compiler sessions isolate Solidity version targets" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C {}"}},"settings":{"viaIR":true,"metadata":{"bytecodeHash":"none"},"outputSelection":{"*":{"*":["metadata","evm.deployedBytecode.object"]}}}}
+    ;
+    var session = solidity.CompilerSession.init(allocator);
+    defer session.deinit();
+    for (std.enums.values(solidity.SolcVersion)) |target| {
+        var response = try session.compile(allocator, .{ .input = input, .solc_version = target });
+        defer response.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.bytes, .{});
+        defer parsed.deinit();
+        const contract = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object;
+        const metadata = try std.json.parseFromSlice(std.json.Value, allocator, contract.get("metadata").?.string, .{});
+        defer metadata.deinit();
+        try std.testing.expectEqualStrings(target.metadataVersion(), metadata.value.object.get("compiler").?.object.get("version").?.string);
+        const bytecode = contract.get("evm").?.object.get("deployedBytecode").?.object.get("object").?.string;
+        const version_hex = std.fmt.bytesToHex(target.compactBytes(), .lower);
+        const trailer = try allocator.print("a164736f6c6343{s}000a", .{version_hex});
+        defer allocator.free(trailer);
+        try std.testing.expect(std.mem.endsWith(u8, bytecode, trailer));
+    }
+
+    const exact_pragma =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.39; contract C {}"}},"settings":{"outputSelection":{"*":{"*":["abi"]}}}}
+    ;
+    var accepted = try session.compile(allocator, .{ .input = exact_pragma, .solc_version = .v0_8_39 });
+    defer accepted.deinit();
+    try std.testing.expect(std.mem.find(u8, accepted.bytes, "\"abi\":[]") != null);
+    var rejected = try session.compile(allocator, .{ .input = exact_pragma, .solc_version = .v0_8_36 });
+    defer rejected.deinit();
+    try std.testing.expect(std.mem.find(u8, rejected.bytes, "\"errorCode\":\"5333\"") != null);
+}
+
+test "external dispatch uses the selected Solidity release" {
+    const input =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { function value() external pure returns (uint) { return 7; } }"}},"settings":{"viaIR":true,"outputSelection":{"*":{"*":["ir"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for (std.enums.values(solidity.SolcVersion)) |target| {
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input, .solc_version = target });
+        defer output.deinit();
+        const condition = if (target.atLeast(.v0_8_38)) "gt(calldatasize(), 3)" else "iszero(lt(calldatasize(), 4))";
+        try std.testing.expect(std.mem.find(u8, output.bytes, condition) != null);
+    }
+}
+
+test "ABIEncoderV2 warning starts at Solidity 0.8.37" {
+    const input =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; pragma experimental ABIEncoderV2; contract C {}"}},"settings":{"outputSelection":{"*":{"*":["abi"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for (std.enums.values(solidity.SolcVersion)) |target| {
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input, .solc_version = target });
+        defer output.deinit();
+        const has_warning = std.mem.find(u8, output.bytes, "\"errorCode\":\"8506\"") != null;
+        try std.testing.expectEqual(target.atLeast(.v0_8_37), has_warning);
+    }
+}
+
+test "experimental Solidity pragma is removed from Solidity 0.8.37" {
+    const allocator = std.testing.allocator;
+    const prefix = "// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; ";
+    var dispatcher: libsolc.Dispatcher = .{};
+    for ([_][]const u8{ "pragma experimental solidity; contract C {}", "contract C {} pragma experimental solidity;" }, 0..) |source, index| {
+        const content = try std.mem.concat(allocator, u8, &.{ prefix, source });
+        defer allocator.free(content);
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Solidity",
+            .sources = .{ .@"C.sol" = .{ .content = content } },
+            .settings = .{
+                .experimental = true,
+                .viaIR = true,
+                .outputSelection = .{ .@"*" = .{ .C = &.{"evm.bytecode.object"} } },
+            },
+        }, .{});
+        defer allocator.free(input);
+        for (std.enums.values(solidity.SolcVersion)) |target| {
+            var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+            defer output.deinit();
+            const expected = if (target.atLeast(.v0_8_37)) "3332" else if (index == 0) "2264" else "8185";
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            const diagnostics = parsed.value.object.get("errors").?.array.items;
+            try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try std.testing.expectEqualStrings(expected, diagnostics[0].object.get("errorCode").?.string);
+            try std.testing.expectEqual(target == .v0_8_36 and index == 0, parsed.value.object.contains("contracts"));
+        }
+    }
+}
+
+test "future Yul stack instruction identifiers warn from Solidity 0.8.38" {
+    const allocator = std.testing.allocator;
+    const standalone =
+        \\{"language":"Yul","sources":{"C.yul":{"content":"object \"C\" { code { let swapn := 1 let dupn := 2 let exchange := 3 mstore(0, add(swapn, add(dupn, exchange))) return(0, 32) } }"}},"settings":{"evmVersion":"osaka","outputSelection":{"*":{"C":["evm.bytecode.object"]}}}}
+    ;
+    const inline_assembly =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { function read() external pure returns (uint n) { assembly { let swapn := 1 let dupn := 2 let exchange := 3 n := add(swapn, add(dupn, exchange)) } } }"}},"settings":{"evmVersion":"osaka","viaIR":true,"outputSelection":{"*":{"C":["evm.bytecode.object"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for ([_][]const u8{ standalone, inline_assembly }) |input| {
+        for (std.enums.values(solidity.SolcVersion)) |target| {
+            var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+            defer output.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expect(parsed.value.object.contains("contracts"));
+            const diagnostics = if (parsed.value.object.get("errors")) |errors| errors.array.items else &.{};
+            if (target.atLeast(.v0_8_38)) {
+                const names = [_][]const u8{ "swapn", "dupn", "exchange" };
+                try std.testing.expectEqual(names.len, diagnostics.len);
+                for (names, diagnostics) |name, diagnostic| {
+                    try std.testing.expectEqualStrings("warning", diagnostic.object.get("severity").?.string);
+                    const message = diagnostic.object.get("message").?.string;
+                    try std.testing.expect(std.mem.find(u8, message, name) != null);
+                    try std.testing.expect(std.mem.find(u8, message, "Yul reserved identifier") != null);
+                }
+            } else try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+        }
+    }
+}
+
+test "slot number reads require Solidity 0.8.37 and Amsterdam" {
+    const allocator = std.testing.allocator;
+    const prefix = "// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; ";
+    const cases = [_]struct { language: []const u8, source: []const u8 }{
+        .{ .language = "Solidity", .source = prefix ++ "contract C { function read() external view returns (uint64) { return block.slotnum; } }" },
+        .{ .language = "Solidity", .source = prefix ++ "contract C { function read() external view returns (uint64 n) { assembly { n := slotnum() } } }" },
+        .{ .language = "Yul", .source = "object \"C\" { code { mstore(0, slotnum()) return(0, 32) } }" },
+    };
+    var dispatcher: libsolc.Dispatcher = .{};
+    for (cases, 0..) |case, index| {
+        for ([_][]const u8{ "amsterdam", "osaka" }) |fork| {
+            const amsterdam = std.mem.eql(u8, fork, "amsterdam");
+            const input = try std.json.Stringify.valueAlloc(allocator, .{
+                .language = case.language,
+                .sources = .{ .@"test" = .{ .content = case.source } },
+                .settings = .{
+                    .experimental = true,
+                    .evmVersion = fork,
+                    .viaIR = @as(?bool, if (index < 2) true else null),
+                    .optimizer = .{ .enabled = true },
+                    .outputSelection = .{ .@"*" = .{ .C = &.{"evm.bytecode.opcodes"} } },
+                },
+            }, .{ .emit_null_optional_fields = false });
+            defer allocator.free(input);
+            for (std.enums.values(solidity.SolcVersion)) |target| {
+                var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+                defer output.deinit();
+                const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+                defer parsed.deinit();
+                const diagnostics = if (parsed.value.object.get("errors")) |errors| errors.array.items else &.{};
+                if (amsterdam and target.atLeast(.v0_8_37)) {
+                    try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+                    const artifact = parsed.value.object.get("contracts").?.object.get("test").?.object.get("C").?.object;
+                    const opcodes = artifact.get("evm").?.object.get("bytecode").?.object.get("opcodes").?.string;
+                    try std.testing.expect(std.mem.find(u8, opcodes, "SLOTNUM") != null);
+                } else {
+                    try std.testing.expect(!parsed.value.object.contains("contracts"));
+                    try std.testing.expect(diagnostics.len > 0);
+                    const diagnostic = diagnostics[0].object;
+                    try std.testing.expectEqualStrings("error", diagnostic.get("severity").?.string);
+                    if (index == 0) {
+                        const expected = if (target.atLeast(.v0_8_37)) "1048" else "9582";
+                        try std.testing.expectEqualStrings(expected, diagnostic.get("errorCode").?.string);
+                    } else {
+                        try std.testing.expectEqualStrings("Function \"slotnum\" not found.", diagnostic.get("message").?.string);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "SLOTNUM only reserves its Yul name when available" {
+    const input =
+        \\{"language":"Yul","sources":{"C.yul":{"content":"object \"C\" { code { let slotnum := 7 mstore(0, slotnum) return(0, 32) } }"}},"settings":{"experimental":true,"evmVersion":"amsterdam","optimizer":{"enabled":true},"outputSelection":{"*":{"C":["evm.bytecode.object"]}}}}
+    ;
+    const allocator = std.testing.allocator;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for ([_]solidity.SolcVersion{ .v0_8_39, .v0_8_36 }) |target| {
+        var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+        defer output.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(target == .v0_8_36, parsed.value.object.contains("contracts"));
+        const diagnostics = parsed.value.object.get("errors").?.array.items;
+        if (target == .v0_8_36) {
+            try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+        } else {
+            try std.testing.expect(diagnostics.len > 0);
+            try std.testing.expectEqualStrings(
+                "Cannot use builtin function name \"slotnum\" as identifier name.",
+                diagnostics[0].object.get("message").?.string,
+            );
+        }
+    }
+}
+
+test "SLOTNUM opcode rendering follows the selected Solidity release" {
+    const allocator = std.testing.allocator;
+    var dispatcher: libsolc.Dispatcher = .{};
+    for ([_][]const u8{ "osaka", "amsterdam" }) |fork| {
+        const input = try std.json.Stringify.valueAlloc(allocator, .{
+            .language = "Yul",
+            .sources = .{ .@"C.yul" = .{ .content = "object \"C\" { code { verbatim_0i_0o(hex\"4b00\") } }" } },
+            .settings = .{
+                .experimental = true,
+                .evmVersion = fork,
+                .outputSelection = .{ .@"*" = .{ .C = &.{ "evm.bytecode.object", "evm.bytecode.opcodes" } } },
+            },
+        }, .{});
+        defer allocator.free(input);
+        for (std.enums.values(solidity.SolcVersion)) |target| {
+            var output = try dispatcher.compiler().compile(allocator, .{ .input = input, .solc_version = target });
+            defer output.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+            defer parsed.deinit();
+            const contracts = parsed.value.object.get("contracts").?.object;
+            const artifact = contracts.get("C.yul").?.object.get("C").?.object;
+            const bytecode = artifact.get("evm").?.object.get("bytecode").?.object;
+            try std.testing.expectEqualStrings("4b00", bytecode.get("object").?.string);
+            const expected = if (target.atLeast(.v0_8_37)) "SLOTNUM STOP " else "0x4B STOP ";
+            try std.testing.expectEqualStrings(expected, bytecode.get("opcodes").?.string);
+        }
+    }
+}
+
+test "constant helpers keep checked and wrapping arithmetic separate" {
+    const input =
+        \\{"language":"Solidity","sources":{"C.sol":{"content":"// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36; contract C { uint constant VALUE = uint(40) + uint(2); function checked() external pure returns (uint) { return VALUE; } function wrapping() external pure returns (uint) { unchecked { return VALUE; } } }"}},"settings":{"viaIR":true,"outputSelection":{"*":{"*":["ir"]}}}}
+    ;
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input, .solc_version = .v0_8_37 });
+    defer output.deinit();
+    try std.testing.expect(std.mem.find(u8, output.bytes, "function constant_VALUE_") != null);
+    try std.testing.expect(std.mem.find(u8, output.bytes, "_checked() ->") != null);
+    try std.testing.expect(std.mem.find(u8, output.bytes, "_wrapping() ->") != null);
+}
+
 test "tuple conversion cleanup matches solc with separately owned component types" {
     const cases = .{
         .{ @embedFile("standard-json/solidity-tuple-cleanup-optimized.json"), @embedFile("standard-json/expected/solidity-tuple-cleanup-optimized.json") },
@@ -17,7 +257,7 @@ test "tuple conversion cleanup matches solc with separately owned component type
     };
     inline for (cases) |case| {
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = case[0] });
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = case[0] });
         defer output.deinit();
         try standard_json.compareExact(case[1], output.bytes);
     }
@@ -49,7 +289,7 @@ test "tuple conversion accepts equivalent dynamic fixed and nested calldata arra
         }, .{});
         defer allocator.free(request);
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(allocator, .{ .input = request });
+        var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = request });
         defer output.deinit();
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
         defer parsed.deinit();
@@ -75,7 +315,7 @@ fn compileTestContract(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -250,7 +490,7 @@ test "deep inheritance preserves callable collection and ambiguity diagnostics" 
         }, .{});
         defer allocator.free(input);
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+        var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer output.deinit();
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
         defer parsed.deinit();
@@ -273,7 +513,7 @@ test "relative imports preserve virtual source names when normalized aliases coe
     var session = solidity.CompilerSession.init(allocator);
     defer session.deinit();
     for ([_]standard_json.Compiler{ dispatcher.compiler(), session.compiler() }) |compiler| {
-        var output = try compiler.compile(allocator, .{ .input = input });
+        var output = try compiler.compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer output.deinit();
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
         defer parsed.deinit();
@@ -315,7 +555,7 @@ test "name resolution stops after the first failing top-level declaration" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -360,7 +600,7 @@ test "single members retain argument diagnostics" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -404,7 +644,7 @@ test "matching attached members override unmatched contract members" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -439,7 +679,7 @@ test "native and attached mismatches do not retain either candidate" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -467,7 +707,7 @@ test "single library type members retain argument diagnostics" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -500,7 +740,7 @@ test "storage-only attached members retain their diagnostic" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -530,7 +770,7 @@ test "memory-compatible attached members suppress storage-only diagnostics" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -562,7 +802,7 @@ test "externally callable library calldata receivers attach to memory values" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -597,7 +837,7 @@ test "super lookup ignores unimplemented base declarations" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -631,7 +871,7 @@ test "literal conversion diagnostics retain reasons" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     try std.testing.expect(std.mem.find(
         u8,
@@ -695,7 +935,7 @@ test "fixed-point conversion diagnostics retain reasons" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     try std.testing.expect(std.mem.find(
         u8,
@@ -731,7 +971,7 @@ test "fixed-array bounds diagnostics stop after earlier errors" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -757,7 +997,7 @@ test "storage array push rejects incompatible arguments during member lookup" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -830,7 +1070,7 @@ test "native and attached array members share overload resolution" {
         }, .{});
         defer allocator.free(input);
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+        var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer output.deinit();
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
         defer parsed.deinit();
@@ -870,7 +1110,7 @@ test "array member lookup preserves zero-parameter attachment diagnostics regard
             }, .{});
             defer allocator.free(input);
             var dispatcher: libsolc.Dispatcher = .{};
-            var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+            var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
             defer output.deinit();
             const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
             defer parsed.deinit();
@@ -909,7 +1149,7 @@ test "recursive memory copies distinguish cycles from nested mappings" {
         }, .{});
         defer allocator.free(input);
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+        var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer output.deinit();
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
         defer parsed.deinit();
@@ -922,6 +1162,61 @@ test "recursive memory copies distinguish cycles from nested mappings" {
             const bytecode = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object.get("evm").?.object.get("bytecode").?.object.get("object").?.string;
             try std.testing.expect(bytecode.len != 0);
         }
+    }
+}
+
+test "recursive storage assignments emit guarded copies" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\// SPDX-License-Identifier: UNLICENSED
+        \\pragma solidity 0.8.36;
+        \\contract C {
+        \\    struct Node { uint256 value; Node[] children; }
+        \\    Node source;
+        \\    Node destination;
+        \\    Node[1] forest;
+        \\    Node[2] fixedSource;
+        \\    Node[2] fixedDestination;
+        \\    function copyTree() external { destination = source; }
+        \\    function copyChildren() external { destination.children = source.children; }
+        \\    function copyIntoForest() external { forest[0] = source; }
+        \\    function copyFixedArrays() external { fixedDestination = fixedSource; }
+        \\}
+    ;
+    const input = try std.json.Stringify.valueAlloc(allocator, .{
+        .language = "Solidity",
+        .sources = .{ .@"C.sol" = .{ .content = source } },
+        .settings = .{
+            .viaIR = true,
+            .optimizer = .{ .enabled = true },
+            .outputSelection = .{ .@"*" = .{ .C = &.{ "ir", "evm.bytecode.object" } } },
+        },
+    }, .{});
+    defer allocator.free(input);
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
+    defer output.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.contains("errors"));
+    const artifact = parsed.value.object.get("contracts").?.object.get("C.sol").?.object.get("C").?.object;
+    const ir = artifact.get("ir").?.string;
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, ir, "function storage_copy_with_overlap_guard_"));
+    try std.testing.expect(std.mem.find(u8, ir, "(targetSlot, offset, sourceSlot)") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "mstore(64, freeMemoryPointer)") != null);
+    try std.testing.expect(artifact.get("evm").?.object.get("bytecode").?.object.get("object").?.string.len > 0);
+}
+
+test "overlapping recursive storage assignment matches solc 0.8.39 bytecode" {
+    inline for (.{ "optimized", "unoptimized" }) |mode| {
+        const fixture = "solidity-recursive-storage-snapshot-" ++ mode ++ ".json";
+        var dispatcher: libsolc.Dispatcher = .{};
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_39,
+            .input = @embedFile("standard-json/" ++ fixture),
+        });
+        defer output.deinit();
+        try standard_json.compareExact(@embedFile("standard-json/expected/" ++ fixture), output.bytes);
     }
 }
 
@@ -939,7 +1234,7 @@ test "recursive struct diagnostics prefer a complete inner cycle" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -970,7 +1265,7 @@ test "recursive struct immediate validation reports the completed structure" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -998,7 +1293,7 @@ test "complete inner struct cycles stop enclosing array diagnostics" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -1015,9 +1310,9 @@ test "optimizer cache semantic edits preserve full solc output through diamonds 
             const request = @embedFile("optimizer-cache/" ++ shape ++ "-" ++ revision ++ ".json");
             const expected = @embedFile("optimizer-cache/" ++ shape ++ "-" ++ revision ++ ".expected.json");
             var fresh: libsolc.Dispatcher = .{};
-            var clean = try fresh.compiler().compile(std.testing.allocator, .{ .input = request });
+            var clean = try fresh.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = request });
             defer clean.deinit();
-            var actual = try session.compile(std.testing.allocator, .{ .input = request });
+            var actual = try session.compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = request });
             defer actual.deinit();
             // Include metadata, diagnostics, ASTs, creation/runtime bytecode,
             // and both source maps, not just a bytecode digest.
@@ -1083,9 +1378,9 @@ test "incremental reexports refresh overloads and bodies through import cycles" 
                 }, .{});
                 defer allocator.free(input);
                 var dispatcher: libsolc.Dispatcher = .{};
-                var clean = try dispatcher.compiler().compile(allocator, .{ .input = input });
+                var clean = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
                 defer clean.deinit();
-                var actual = try session.compile(allocator, .{ .input = input });
+                var actual = try session.compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
                 defer actual.deinit();
                 try standard_json.compareExact(clean.bytes, actual.bytes);
                 const parsed = try std.json.parseFromSlice(std.json.Value, allocator, actual.bytes, .{});
@@ -1118,10 +1413,10 @@ test "recursive structs validate after member annotation and preserve session re
         const input = @embedFile("standard-json/" ++ name ++ ".json");
         const expected = @embedFile("standard-json/expected/" ++ name ++ ".json");
         var dispatcher: libsolc.Dispatcher = .{};
-        var clean = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input });
+        var clean = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer clean.deinit();
         try standard_json.compareExact(expected, clean.bytes);
-        var actual = try session.compile(std.testing.allocator, .{ .input = input });
+        var actual = try session.compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer actual.deinit();
         try standard_json.compareExact(expected, actual.bytes);
     }
@@ -1134,6 +1429,7 @@ test "calldata reads and checked division preserve solc helper order and bytecod
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -1147,6 +1443,7 @@ test "calldata reads and checked division preserve solc helper order and bytecod
 test "local type expressions preserve solc evaluation order and bytecode" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-local-type-expression-bytecode.json"),
     });
     defer output.deinit();
@@ -1163,6 +1460,7 @@ test "using-for reference receivers preserve calldata memory and storage locatio
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -1176,6 +1474,7 @@ test "using-for reference receivers preserve calldata memory and storage locatio
 test "using-for members preserve imported aliases in via-IR bytecode" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-using-for-import-aliases.json"),
     });
     defer output.deinit();
@@ -1193,6 +1492,7 @@ test "using-for library lookup ignores zero-parameter helpers and preserves expl
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -1213,7 +1513,7 @@ test "parked analysis settings are rejected by stateless and incremental compila
             .{enabled},
         );
         defer std.testing.allocator.free(input);
-        var clean = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input });
+        var clean = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer clean.deinit();
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, clean.bytes, .{});
         defer parsed.deinit();
@@ -1222,7 +1522,7 @@ test "parked analysis settings are rejected by stateless and incremental compila
         try std.testing.expectEqualStrings("JSONError", diagnostic.get("type").?.string);
         try std.testing.expect(std.mem.find(u8, diagnostic.get("message").?.string, "abstractInterpretation") != null);
         for (0..2) |_| {
-            var cached = try session.compile(std.testing.allocator, .{ .input = input });
+            var cached = try session.compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = input });
             defer cached.deinit();
             try standard_json.compareExact(clean.bytes, cached.bytes);
         }
@@ -1271,6 +1571,7 @@ const ProgressRecorder = struct {
 test "valid empty-sources request matches the frozen solc output exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/empty-sources.json"),
     });
     defer output.deinit();
@@ -1285,6 +1586,7 @@ test "valid empty-sources request matches the frozen solc output exactly" {
 test "invalid JSON is handled by Zig with an exact stable response" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = "{\"language\":",
     });
     defer output.deinit();
@@ -1296,6 +1598,7 @@ test "invalid JSON is handled by Zig with an exact stable response" {
 test "invalid missing-language request preserves solc empty-source validation order" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = "{\"sources\":{}}",
     });
     defer output.deinit();
@@ -1309,6 +1612,7 @@ test "invalid missing-language request preserves solc empty-source validation or
 test "valid source input matches solc after the frontend became available" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input =
         \\{"language":"Solidity","sources":{"A.sol":{"content":"contract A {}"}}}
         ,
@@ -1352,7 +1656,7 @@ test "Solidity bytecode never silently enters the legacy pipeline" {
 
     for (cases) |input| {
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input });
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer output.deinit();
         try standard_json.compareExact(expected, output.bytes);
     }
@@ -1361,6 +1665,7 @@ test "Solidity bytecode never silently enters the legacy pipeline" {
 test "viaIR false remains accepted for frontend-only Solidity output" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-abi.json"),
     });
     defer output.deinit();
@@ -1375,6 +1680,7 @@ test "viaIR false remains accepted for frontend-only Solidity output" {
 test "complete inherited and library ABI surface matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-complete-abi.json"),
     });
     defer output.deinit();
@@ -1389,6 +1695,7 @@ test "complete inherited and library ABI surface matches solc 0.8.36 exactly" {
 test "NatSpec user and developer documentation matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-natspec-output.json"),
     });
     defer output.deinit();
@@ -1403,6 +1710,7 @@ test "NatSpec user and developer documentation matches solc 0.8.36 exactly" {
 test "NatSpec diagnostics and ordering match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-natspec-error.json"),
     });
     defer output.deinit();
@@ -1417,6 +1725,7 @@ test "NatSpec diagnostics and ordering match solc 0.8.36 exactly" {
 test "invalid explicit NatSpec inheritance matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-natspec-inherit-error.json"),
     });
     defer output.deinit();
@@ -1431,6 +1740,7 @@ test "invalid explicit NatSpec inheritance matches solc 0.8.36 exactly" {
 test "inline assembly NatSpec warnings match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-natspec-inline-assembly.json"),
     });
     defer output.deinit();
@@ -1445,6 +1755,7 @@ test "inline assembly NatSpec warnings match solc 0.8.36 exactly" {
 test "documented Solidity metadata matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-natspec-metadata.json"),
     });
     defer output.deinit();
@@ -1459,6 +1770,7 @@ test "documented Solidity metadata matches solc 0.8.36 exactly" {
 test "storage and transient-storage layouts match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-storage-layout.json"),
     });
     defer output.deinit();
@@ -1486,7 +1798,7 @@ test "storage layout byte counts wrap at 256 bits" {
     }, .{});
     defer allocator.free(input);
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
     defer parsed.deinit();
@@ -1505,6 +1817,7 @@ test "storage layout byte counts wrap at 256 bits" {
 test "viaIR false analyzed AST output matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-analyzed-ast.json"),
     });
     defer output.deinit();
@@ -1519,6 +1832,7 @@ test "viaIR false analyzed AST output matches solc 0.8.36 exactly" {
 test "Solidity parsed AST matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-parsed-ast.json"),
     });
     defer output.deinit();
@@ -1533,6 +1847,7 @@ test "Solidity parsed AST matches solc 0.8.36 exactly" {
 test "Solidity parser diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/parser-error.json"),
     });
     defer output.deinit();
@@ -1546,6 +1861,7 @@ test "Solidity parser diagnostics match solc 0.8.36 exactly" {
 test "Solidity parser recovery and diagnostic ordering match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-parser-recovery.json"),
     });
     defer output.deinit();
@@ -1560,6 +1876,7 @@ test "Solidity parser recovery and diagnostic ordering match solc 0.8.36 exactly
 test "Solidity syntax diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-syntax-error.json"),
     });
     defer output.deinit();
@@ -1574,6 +1891,7 @@ test "Solidity syntax diagnostics match solc 0.8.36 exactly" {
 test "Solidity reference diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-reference-error.json"),
     });
     defer output.deinit();
@@ -1588,6 +1906,7 @@ test "Solidity reference diagnostics match solc 0.8.36 exactly" {
 test "Solidity declaration-type diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-declaration-type-error.json"),
     });
     defer output.deinit();
@@ -1602,6 +1921,7 @@ test "Solidity declaration-type diagnostics match solc 0.8.36 exactly" {
 test "Solidity declaration-type mapping and transient boundaries match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-declaration-type-boundaries.json"),
     });
     defer output.deinit();
@@ -1616,6 +1936,7 @@ test "Solidity declaration-type mapping and transient boundaries match solc 0.8.
 test "Solidity rational-operator diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-rational-operator-error.json"),
     });
     defer output.deinit();
@@ -1630,6 +1951,7 @@ test "Solidity rational-operator diagnostics match solc 0.8.36 exactly" {
 test "Solidity static-analysis diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-static-analysis-error.json"),
     });
     defer output.deinit();
@@ -1644,6 +1966,7 @@ test "Solidity static-analysis diagnostics match solc 0.8.36 exactly" {
 test "Solidity static-analyzer storage and constructor boundaries match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-static-analyzer-boundaries.json"),
     });
     defer output.deinit();
@@ -1658,6 +1981,7 @@ test "Solidity static-analyzer storage and constructor boundaries match solc 0.8
 test "Solidity post-type loop classification and near-end storage layout match via-IR exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-post-type-loop-bytecode.json"),
     });
     defer output.deinit();
@@ -1672,6 +1996,7 @@ test "Solidity post-type loop classification and near-end storage layout match v
 test "Solidity constant-evaluator boundaries match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-constant-evaluator-boundaries.json"),
     });
     defer output.deinit();
@@ -1686,6 +2011,7 @@ test "Solidity constant-evaluator boundaries match solc 0.8.36 exactly" {
 test "Solidity control-flow definite-assignment diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-control-flow-uninitialized.json"),
     });
     defer output.deinit();
@@ -1700,6 +2026,7 @@ test "Solidity control-flow definite-assignment diagnostics match solc 0.8.36 ex
 test "Solidity unreachable-code ordering matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-control-flow-unreachable.json"),
     });
     defer output.deinit();
@@ -1714,6 +2041,7 @@ test "Solidity unreachable-code ordering matches solc 0.8.36 exactly" {
 test "Solidity structured inline-Yul and virtual control flow match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-control-flow-inline-yul.json"),
     });
     defer output.deinit();
@@ -1728,6 +2056,7 @@ test "Solidity structured inline-Yul and virtual control flow match solc 0.8.36 
 test "Solidity post-type diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-post-type-error.json"),
     });
     defer output.deinit();
@@ -1742,6 +2071,7 @@ test "Solidity post-type diagnostics match solc 0.8.36 exactly" {
 test "Solidity override graph and public getter signatures match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-override-graph-success.json"),
     });
     defer output.deinit();
@@ -1756,6 +2086,7 @@ test "Solidity override graph and public getter signatures match solc 0.8.36 exa
 test "Solidity constant-cycle diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-constant-cycle-error.json"),
     });
     defer output.deinit();
@@ -1770,6 +2101,7 @@ test "Solidity constant-cycle diagnostics match solc 0.8.36 exactly" {
 test "Solidity constant dependency depth limit matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-constant-depth-error.json"),
     });
     defer output.deinit();
@@ -1784,6 +2116,7 @@ test "Solidity constant dependency depth limit matches solc 0.8.36 exactly" {
 test "Solidity state-mutability diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-mutability-error.json"),
     });
     defer output.deinit();
@@ -1798,6 +2131,7 @@ test "Solidity state-mutability diagnostics match solc 0.8.36 exactly" {
 test "Solidity inline-Yul instruction mutability matches solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-inline-yul-mutability.json"),
     });
     defer output.deinit();
@@ -1812,6 +2146,7 @@ test "Solidity inline-Yul instruction mutability matches solc 0.8.36 exactly" {
 test "Solidity immutable-write diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-immutable-error.json"),
     });
     defer output.deinit();
@@ -1826,6 +2161,7 @@ test "Solidity immutable-write diagnostics match solc 0.8.36 exactly" {
 test "Solidity contract-bytecode dependency cycles match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-contract-dependency-cycle-error.json"),
     });
     defer output.deinit();
@@ -1840,6 +2176,7 @@ test "Solidity contract-bytecode dependency cycles match solc 0.8.36 exactly" {
 test "Solidity post-type contract diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-post-type-contract-error.json"),
     });
     defer output.deinit();
@@ -1854,6 +2191,7 @@ test "Solidity post-type contract diagnostics match solc 0.8.36 exactly" {
 test "Solidity storage-layout warnings preserve upstream phase ordering" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-storage-layout-warning.json"),
     });
     defer output.deinit();
@@ -1868,6 +2206,7 @@ test "Solidity storage-layout warnings preserve upstream phase ordering" {
 test "Solidity contract-level diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-contract-level-error.json"),
     });
     defer output.deinit();
@@ -1882,6 +2221,7 @@ test "Solidity contract-level diagnostics match solc 0.8.36 exactly" {
 test "Solidity override diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-override-error.json"),
     });
     defer output.deinit();
@@ -1896,6 +2236,7 @@ test "Solidity override diagnostics match solc 0.8.36 exactly" {
 test "Solidity ambiguous-override diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-ambiguous-override-error.json"),
     });
     defer output.deinit();
@@ -1910,6 +2251,7 @@ test "Solidity ambiguous-override diagnostics match solc 0.8.36 exactly" {
 test "Solidity selector-collision diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-selector-collision-error.json"),
     });
     defer output.deinit();
@@ -1924,6 +2266,7 @@ test "Solidity selector-collision diagnostics match solc 0.8.36 exactly" {
 test "Solidity external-type-clash diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-external-type-clash-error.json"),
     });
     defer output.deinit();
@@ -1938,6 +2281,7 @@ test "Solidity external-type-clash diagnostics match solc 0.8.36 exactly" {
 test "Solidity storage-size diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-storage-size-error.json"),
     });
     defer output.deinit();
@@ -1952,6 +2296,7 @@ test "Solidity storage-size diagnostics match solc 0.8.36 exactly" {
 test "Solidity inherited ABI-coder diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-base-abi-error.json"),
     });
     defer output.deinit();
@@ -1966,6 +2311,7 @@ test "Solidity inherited ABI-coder diagnostics match solc 0.8.36 exactly" {
 test "Solidity index-access diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-index-type-error.json"),
     });
     defer output.deinit();
@@ -1980,6 +2326,7 @@ test "Solidity index-access diagnostics match solc 0.8.36 exactly" {
 test "Solidity member-access diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-member-type-error.json"),
     });
     defer output.deinit();
@@ -1994,6 +2341,7 @@ test "Solidity member-access diagnostics match solc 0.8.36 exactly" {
 test "Solidity struct-constructor diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-struct-call-error.json"),
     });
     defer output.deinit();
@@ -2008,6 +2356,7 @@ test "Solidity struct-constructor diagnostics match solc 0.8.36 exactly" {
 test "Solidity abi.decode diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-abi-decode-error.json"),
     });
     defer output.deinit();
@@ -2022,6 +2371,7 @@ test "Solidity abi.decode diagnostics match solc 0.8.36 exactly" {
 test "Solidity ABI encode and encodeCall diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-abi-encode-errors.json"),
     });
     defer output.deinit();
@@ -2036,6 +2386,7 @@ test "Solidity ABI encode and encodeCall diagnostics match solc 0.8.36 exactly" 
 test "Solidity tuple-declaration diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-tuple-declaration-error.json"),
     });
     defer output.deinit();
@@ -2050,6 +2401,7 @@ test "Solidity tuple-declaration diagnostics match solc 0.8.36 exactly" {
 test "Solidity emit-statement diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-emit-type-error.json"),
     });
     defer output.deinit();
@@ -2064,6 +2416,7 @@ test "Solidity emit-statement diagnostics match solc 0.8.36 exactly" {
 test "Solidity direct-base override dominance diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-override-dominance-error.json"),
     });
     defer output.deinit();
@@ -2078,6 +2431,7 @@ test "Solidity direct-base override dominance diagnostics match solc 0.8.36 exac
 test "Solidity single-branch override dominance retains the inherited ABI" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-override-chain-abi.json"),
     });
     defer output.deinit();
@@ -2092,6 +2446,7 @@ test "Solidity single-branch override dominance retains the inherited ABI" {
 test "Solidity stateless inheritance matches via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-stateless-inheritance-bytecode.json"),
     });
     defer output.deinit();
@@ -2106,6 +2461,7 @@ test "Solidity stateless inheritance matches via-IR bytecode exactly" {
 test "Solidity interface-getter and diamond-super call graphs match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-function-call-graph-bytecode.json"),
     });
     defer output.deinit();
@@ -2120,6 +2476,7 @@ test "Solidity interface-getter and diamond-super call graphs match via-IR bytec
 test "Solidity scalar public-state getters match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-state-getter-bytecode.json"),
     });
     defer output.deinit();
@@ -2134,6 +2491,7 @@ test "Solidity scalar public-state getters match via-IR bytecode exactly" {
 test "Solidity scalar state reads and writes match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-state-read-write-bytecode.json"),
     });
     defer output.deinit();
@@ -2148,6 +2506,7 @@ test "Solidity scalar state reads and writes match via-IR bytecode exactly" {
 test "Solidity packed scalar state matches via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-packed-state-bytecode.json"),
     });
     defer output.deinit();
@@ -2162,6 +2521,7 @@ test "Solidity packed scalar state matches via-IR bytecode exactly" {
 test "Solidity scalar constructor state writes match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-scalar-constructor-bytecode.json"),
     });
     defer output.deinit();
@@ -2176,6 +2536,7 @@ test "Solidity scalar constructor state writes match via-IR bytecode exactly" {
 test "Solidity scalar state initializers match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-state-initializer-bytecode.json"),
     });
     defer output.deinit();
@@ -2190,6 +2551,7 @@ test "Solidity scalar state initializers match via-IR bytecode exactly" {
 test "Solidity scalar stateful inheritance matches via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-stateful-inheritance-bytecode.json"),
     });
     defer output.deinit();
@@ -2204,6 +2566,7 @@ test "Solidity scalar stateful inheritance matches via-IR bytecode exactly" {
 test "Solidity fallback and receive dispatch match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-fallback-receive-bytecode.json"),
     });
     defer output.deinit();
@@ -2218,6 +2581,7 @@ test "Solidity fallback and receive dispatch match via-IR bytecode exactly" {
 test "Solidity address state conversion matches via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-address-state-bytecode.json"),
     });
     defer output.deinit();
@@ -2232,6 +2596,7 @@ test "Solidity address state conversion matches via-IR bytecode exactly" {
 test "Solidity fixed-bytes state conversion matches via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-fixed-bytes-state-bytecode.json"),
     });
     defer output.deinit();
@@ -2246,6 +2611,7 @@ test "Solidity fixed-bytes state conversion matches via-IR bytecode exactly" {
 test "Solidity enum state conversion matches via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-enum-state-bytecode.json"),
     });
     defer output.deinit();
@@ -2260,6 +2626,7 @@ test "Solidity enum state conversion matches via-IR bytecode exactly" {
 test "Solidity no-argument modifiers match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-modifier-bytecode.json"),
     });
     defer output.deinit();
@@ -2274,6 +2641,7 @@ test "Solidity no-argument modifiers match via-IR bytecode exactly" {
 test "Solidity chained and repeated modifier placeholders match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-multiple-modifiers-bytecode.json"),
     });
     defer output.deinit();
@@ -2288,6 +2656,7 @@ test "Solidity chained and repeated modifier placeholders match via-IR bytecode 
 test "Solidity inherited virtual modifier annotations and resolved bodies match via-IR structurally" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-inherited-virtual-modifier-ir.json"),
     });
     defer output.deinit();
@@ -2303,6 +2672,7 @@ test "Solidity inherited virtual modifier annotations and resolved bodies match 
 test "Solidity typed modifier arguments match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-modifier-arguments-bytecode.json"),
     });
     defer output.deinit();
@@ -2317,6 +2687,7 @@ test "Solidity typed modifier arguments match via-IR bytecode exactly" {
 test "Solidity scalar constructor arguments match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-constructor-arguments-bytecode.json"),
     });
     defer output.deinit();
@@ -2331,6 +2702,7 @@ test "Solidity scalar constructor arguments match via-IR bytecode exactly" {
 test "Solidity scalar base-constructor arguments match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-base-constructor-arguments-bytecode.json"),
     });
     defer output.deinit();
@@ -2345,6 +2717,7 @@ test "Solidity scalar base-constructor arguments match via-IR bytecode exactly" 
 test "Solidity constructor hierarchy, dynamic arguments, and modifiers match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-constructor-hierarchy-bytecode.json"),
     });
     defer output.deinit();
@@ -2359,6 +2732,7 @@ test "Solidity constructor hierarchy, dynamic arguments, and modifiers match via
 test "Solidity create and create2 subobjects match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-contract-creation-bytecode.json"),
     });
     defer output.deinit();
@@ -2373,6 +2747,7 @@ test "Solidity create and create2 subobjects match via-IR bytecode exactly" {
 test "Solidity contract metatype code, name, and interface ID match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-contract-meta-bytecode.json"),
     });
     defer output.deinit();
@@ -2387,6 +2762,7 @@ test "Solidity contract metatype code, name, and interface ID match via-IR bytec
 test "Solidity scalar unary mutation matches via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-unary-mutation-bytecode.json"),
     });
     defer output.deinit();
@@ -2401,6 +2777,7 @@ test "Solidity scalar unary mutation matches via-IR bytecode exactly" {
 test "Solidity scalar constant state values match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-constant-state-bytecode.json"),
     });
     defer output.deinit();
@@ -2415,6 +2792,7 @@ test "Solidity scalar constant state values match via-IR bytecode exactly" {
 test "Solidity reference constants, internal-function immutables, and inherited modifiers match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-constants-immutables-modifiers-bytecode.json"),
     });
     defer output.deinit();
@@ -2429,6 +2807,7 @@ test "Solidity reference constants, internal-function immutables, and inherited 
 test "Solidity qualified imports, linked libraries, and external function members match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-qualified-members-library-bytecode.json"),
     });
     defer output.deinit();
@@ -2443,6 +2822,7 @@ test "Solidity qualified imports, linked libraries, and external function member
 test "library-qualified struct constructors remain callable" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-library-struct-constructor.json"),
     });
     defer output.deinit();
@@ -2457,6 +2837,7 @@ test "library-qualified struct constructors remain callable" {
 test "Solidity fixed-bytes indexing and transient value storage match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-fixed-index-transient-bytecode.json"),
     });
     defer output.deinit();
@@ -2471,6 +2852,7 @@ test "Solidity fixed-bytes indexing and transient value storage match via-IR byt
 test "Solidity abstract and interface artifacts remain empty exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-nondeployable-artifacts.json"),
     });
     defer output.deinit();
@@ -2485,6 +2867,7 @@ test "Solidity abstract and interface artifacts remain empty exactly" {
 test "Solidity aggregate storage, memory, calldata, and tuple lvalues match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-aggregate-lvalues-bytecode.json"),
     });
     defer output.deinit();
@@ -2499,6 +2882,7 @@ test "Solidity aggregate storage, memory, calldata, and tuple lvalues match via-
 test "Solidity scalar immutable state values match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-immutable-state-bytecode.json"),
     });
     defer output.deinit();
@@ -2513,6 +2897,7 @@ test "Solidity scalar immutable state values match via-IR bytecode exactly" {
 test "Solidity inherited scalar immutables match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-immutable-inheritance-bytecode.json"),
     });
     defer output.deinit();
@@ -2527,6 +2912,7 @@ test "Solidity inherited scalar immutables match via-IR bytecode exactly" {
 test "Solidity require assert and empty revert match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-require-assert-revert-bytecode.json"),
     });
     defer output.deinit();
@@ -2541,6 +2927,7 @@ test "Solidity require assert and empty revert match via-IR bytecode exactly" {
 test "Solidity nested scalar mappings match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-scalar-mapping-bytecode.json"),
     });
     defer output.deinit();
@@ -2555,6 +2942,7 @@ test "Solidity nested scalar mappings match via-IR bytecode exactly" {
 test "Solidity public nested scalar mapping getters match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-public-scalar-mapping-bytecode.json"),
     });
     defer output.deinit();
@@ -2569,6 +2957,7 @@ test "Solidity public nested scalar mapping getters match via-IR bytecode exactl
 test "Solidity environment member expressions match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-environment-members-bytecode.json"),
     });
     defer output.deinit();
@@ -2583,6 +2972,7 @@ test "Solidity environment member expressions match via-IR bytecode exactly" {
 test "Solidity address and fixed-bytes members match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-address-members-bytecode.json"),
     });
     defer output.deinit();
@@ -2597,6 +2987,7 @@ test "Solidity address and fixed-bytes members match via-IR bytecode exactly" {
 test "Solidity scalar indexed and anonymous events match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-scalar-events-bytecode.json"),
     });
     defer output.deinit();
@@ -2611,6 +3002,7 @@ test "Solidity scalar indexed and anonymous events match via-IR bytecode exactly
 test "Solidity scalar custom errors match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-custom-errors-bytecode.json"),
     });
     defer output.deinit();
@@ -2625,6 +3017,7 @@ test "Solidity scalar custom errors match via-IR bytecode exactly" {
 test "Solidity scalar EVM builtins match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-scalar-builtins-bytecode.json"),
     });
     defer output.deinit();
@@ -2639,6 +3032,7 @@ test "Solidity scalar EVM builtins match via-IR bytecode exactly" {
 test "Solidity enum and metatype members match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-type-members-bytecode.json"),
     });
     defer output.deinit();
@@ -2653,6 +3047,7 @@ test "Solidity enum and metatype members match via-IR bytecode exactly" {
 test "Solidity function error event and message selectors match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-selectors-bytecode.json"),
     });
     defer output.deinit();
@@ -2667,6 +3062,7 @@ test "Solidity function error event and message selectors match via-IR bytecode 
 test "Solidity scalar external calls match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-scalar-external-calls-bytecode.json"),
     });
     defer output.deinit();
@@ -2681,6 +3077,7 @@ test "Solidity scalar external calls match via-IR bytecode exactly" {
 test "Solidity composite ABI boundaries match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-composite-abi-bytecode.json"),
     });
     defer output.deinit();
@@ -2695,6 +3092,7 @@ test "Solidity composite ABI boundaries match via-IR bytecode exactly" {
 test "Solidity memory arrays, indexing, and calldata slicing match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-reference-values-bytecode.json"),
     });
     defer output.deinit();
@@ -2709,6 +3107,7 @@ test "Solidity memory arrays, indexing, and calldata slicing match via-IR byteco
 test "Solidity struct, array, magic, getter, and overloaded contract members match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-reference-members-bytecode.json"),
     });
     defer output.deinit();
@@ -2723,6 +3122,7 @@ test "Solidity struct, array, magic, getter, and overloaded contract members mat
 test "Solidity struct construction, ABI builtins, concat, and meta types match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-abi-concat-meta-bytecode.json"),
     });
     defer output.deinit();
@@ -2737,6 +3137,7 @@ test "Solidity struct construction, ABI builtins, concat, and meta types match v
 test "Solidity ABI decode materializes literal bytes and preserves reference inputs" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-abi-decode-literal.json"),
     });
     defer output.deinit();
@@ -2750,6 +3151,7 @@ test "Solidity ABI decode materializes literal bytes and preserves reference inp
 test "Solidity library and free-function using-for members match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-using-for-bytecode.json"),
     });
     defer output.deinit();
@@ -2764,6 +3166,7 @@ test "Solidity library and free-function using-for members match via-IR bytecode
 test "Solidity call options, dynamic calls, ABI encoders, storage arrays, and call builtins match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-callable-control-flow-bytecode.json"),
     });
     defer output.deinit();
@@ -2778,6 +3181,7 @@ test "Solidity call options, dynamic calls, ABI encoders, storage arrays, and ca
 test "Solidity inline assembly analysis, external references, and via-IR bytecode match exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-inline-assembly-bytecode.json"),
     });
     defer output.deinit();
@@ -2792,6 +3196,7 @@ test "Solidity inline assembly analysis, external references, and via-IR bytecod
 test "Solidity try success and Error, Panic, bytes, and forwarding catch paths match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-try-catch-bytecode.json"),
     });
     defer output.deinit();
@@ -2806,6 +3211,7 @@ test "Solidity try success and Error, Panic, bytes, and forwarding catch paths m
 test "Solidity checked, wrapping, narrow, wide, and literal exponentiation match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-exponentiation-bytecode.json"),
     });
     defer output.deinit();
@@ -2820,6 +3226,7 @@ test "Solidity checked, wrapping, narrow, wide, and literal exponentiation match
 test "Solidity typed shifts, loops, and external-function comparisons match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-control-flow-shifts-bytecode.json"),
     });
     defer output.deinit();
@@ -2834,6 +3241,7 @@ test "Solidity typed shifts, loops, and external-function comparisons match via-
 test "Solidity indexed reference and function events plus dynamic custom errors match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-reference-events-errors-bytecode.json"),
     });
     defer output.deinit();
@@ -2848,6 +3256,7 @@ test "Solidity indexed reference and function events plus dynamic custom errors 
 test "Solidity named events and custom errors preserve argument binding" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-named-events-errors-bytecode.json"),
     });
     defer output.deinit();
@@ -2868,6 +3277,7 @@ test "Solidity named require errors match positional encoding" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -2881,6 +3291,7 @@ test "Solidity named require errors match positional encoding" {
 test "Solidity creation and deployed internal-function dispatch match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-internal-dispatch-bytecode.json"),
     });
     defer output.deinit();
@@ -2895,6 +3306,7 @@ test "Solidity creation and deployed internal-function dispatch match via-IR byt
 test "Solidity array, mapping, struct, bytes getters and calldata fallback match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-composite-getters-fallback-bytecode.json"),
     });
     defer output.deinit();
@@ -2909,6 +3321,7 @@ test "Solidity array, mapping, struct, bytes getters and calldata fallback match
 test "Solidity user-defined value-type operators match via-IR bytecode exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-udvt-operator-bytecode.json"),
     });
     defer output.deinit();
@@ -2923,6 +3336,7 @@ test "Solidity user-defined value-type operators match via-IR bytecode exactly" 
 test "Solidity body-type diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-body-type-error.json"),
     });
     defer output.deinit();
@@ -2937,6 +3351,7 @@ test "Solidity body-type diagnostics match solc 0.8.36 exactly" {
 test "Solidity using-for and user-defined operator diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-using-operator-error.json"),
     });
     defer output.deinit();
@@ -2951,6 +3366,7 @@ test "Solidity using-for and user-defined operator diagnostics match solc 0.8.36
 test "Solidity TypeChecker boundary diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-typechecker-boundaries.json"),
     });
     defer output.deinit();
@@ -2965,6 +3381,7 @@ test "Solidity TypeChecker boundary diagnostics match solc 0.8.36 exactly" {
 test "Solidity TypeChecker historical EVM gates match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-typechecker-evm-version.json"),
     });
     defer output.deinit();
@@ -2979,6 +3396,7 @@ test "Solidity TypeChecker historical EVM gates match solc 0.8.36 exactly" {
 test "Solidity storage-only member diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-member-special-error.json"),
     });
     defer output.deinit();
@@ -2993,6 +3411,7 @@ test "Solidity storage-only member diagnostics match solc 0.8.36 exactly" {
 test "valid via-IR Solidity clears implemented frontend semantic phases" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/via-ir-smoke.json"),
     });
     defer output.deinit();
@@ -3008,6 +3427,7 @@ test "valid via-IR Solidity clears implemented frontend semantic phases" {
 test "Solidity using directives and function-typed state variables match solc AST" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-using-ast.json"),
     });
     defer output.deinit();
@@ -3021,6 +3441,7 @@ test "Solidity using directives and function-typed state variables match solc AS
 test "Solidity inline assembly embeds the exact parsed Yul AST" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-inline-assembly-ast.json"),
     });
     defer output.deinit();
@@ -3037,7 +3458,7 @@ test "oversized parsed Yul literals return the upstream internal diagnostic" {
         \\{"language":"Solidity","settings":{"outputSelection":{"C.sol":{"":["ast"]}},"stopAfter":"parsing"},"sources":{"C.sol":{"content":"contract C { function f() public { assembly { pop(115792089237316195423570985008687907853269984665640564039457584007913129639936) } } }"}}}
     ;
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input });
+    var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
 
     try standard_json.compareExact(libsolc.responses.yul_ast_assertion, output.bytes);
@@ -3046,6 +3467,7 @@ test "oversized parsed Yul literals return the upstream internal diagnostic" {
 test "Solidity inline assembly parser diagnostics match solc exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-inline-assembly-error.json"),
     });
     defer output.deinit();
@@ -3073,6 +3495,7 @@ test "Solidity SPDX warning is emitted by the parser with exact framing" {
 test "ordinary via-IR orchestration artifacts match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-orchestration-artifacts.json"),
     });
     defer output.deinit();
@@ -3086,6 +3509,7 @@ test "ordinary via-IR orchestration artifacts match solc 0.8.36 exactly" {
 test "via-IR assembly artifacts match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-assembly-artifacts.json"),
     });
     defer output.deinit();
@@ -3099,6 +3523,7 @@ test "via-IR assembly artifacts match solc 0.8.36 exactly" {
 test "remapped imports and compilation-wide AST IDs match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-remapped-import.json"),
     });
     defer output.deinit();
@@ -3137,6 +3562,7 @@ test "discovered Solidity imports use the host callback in upstream order" {
     var loader: SolidityImportLoader = .{};
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/solidity-callback-import.json"),
         .source_loader = .{
             .context = &loader,
@@ -3181,7 +3607,7 @@ test "deep dotted Yul namespaces keep request allocations bounded" {
 
     var accounting = std.testing.FailingAllocator.init(allocator, .{});
     var dispatcher: libsolc.Dispatcher = .{};
-    var output = try dispatcher.compiler().compile(accounting.allocator(), .{ .input = input });
+    var output = try dispatcher.compiler().compile(accounting.allocator(), .{ .solc_version = .v0_8_36, .input = input });
     defer output.deinit();
     try standard_json.compareExact("{\"errors\":[]}\n", output.bytes);
     // Cover the complete request, including each subtree's analysis. This
@@ -3235,7 +3661,7 @@ test "Yul rejects literal and qualified name collisions in every declaration ord
                 }, .{});
                 defer allocator.free(input);
                 var dispatcher: libsolc.Dispatcher = .{};
-                var output = try dispatcher.compiler().compile(allocator, .{ .input = input });
+                var output = try dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
                 defer output.deinit();
                 const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
                 defer parsed.deinit();
@@ -3255,6 +3681,7 @@ test "Yul rejects literal and qualified name collisions in every declaration ord
 test "Yul Standard JSON artifacts match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/yul-basic.json"),
     });
     defer output.deinit();
@@ -3269,6 +3696,7 @@ test "Yul Standard JSON artifacts match solc 0.8.36 exactly" {
 test "Yul Standard JSON diagnostics match solc 0.8.36 exactly" {
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = @embedFile("standard-json/yul-parser-error.json"),
     });
     defer output.deinit();
@@ -3297,6 +3725,7 @@ test "Yul wildcard, optimizer, and deployed artifacts match solc 0.8.36" {
     for (cases) |case| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = case.input,
         });
         defer output.deinit();
@@ -3318,6 +3747,7 @@ test "Yul link references and configured libraries match solc 0.8.36" {
     for (cases) |case| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = case.input,
         });
         defer output.deinit();
@@ -3384,7 +3814,7 @@ test "experimental Yul backends fail explicitly without semantic substitution" {
     };
     for (cases) |case| {
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = case.input });
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = case.input });
         defer output.deinit();
         try std.testing.expect(std.mem.find(u8, output.bytes, case.message) != null);
         try std.testing.expect(std.mem.find(u8, output.bytes, "UnimplementedFeatureError") != null);
@@ -3422,7 +3852,7 @@ test "experimental settings preserve ordinary Solidity typing and session recove
             },
         }, .{});
         defer allocator.free(input);
-        var output = try session.compiler().compile(allocator, .{ .input = input });
+        var output = try session.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer output.deinit();
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
         defer parsed.deinit();
@@ -3465,7 +3895,7 @@ test "experimental Solidity backends fail explicitly without semantic substituti
     };
     for (cases) |case| {
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = case.input });
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = case.input });
         defer output.deinit();
         const expected = try std.testing.allocator.print(
             "{{\"errors\":[{{\"component\":\"general\",\"formattedMessage\":\"{s}\",\"message\":\"{s}\",\"severity\":\"error\",\"type\":\"UnimplementedFeatureError\"}}]}}\n",
@@ -3484,7 +3914,7 @@ test "unsupported Standard JSON languages have a stable response" {
     };
     for (inputs) |input| {
         var dispatcher: libsolc.Dispatcher = .{};
-        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input });
+        var output = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = input });
         defer output.deinit();
         try standard_json.compareExact(libsolc.responses.invalid_envelope, output.bytes);
     }
@@ -3581,6 +4011,7 @@ test "hash-pinned URL sources skip mismatches and retain diagnostics" {
             var loader: Loader = .{ .source = source };
             var dispatcher: libsolc.Dispatcher = .{};
             var output = try dispatcher.compiler().compile(allocator, .{
+                .solc_version = .v0_8_36,
                 .input = input,
                 .source_loader = .{ .context = &loader, .read_fn = Loader.read },
             });
@@ -3651,6 +4082,7 @@ test "hash-pinned URL diagnostics survive sequential and parallel stack exceptio
             var loader: Loader = .{};
             var dispatcher: libsolc.Dispatcher = .{};
             var output = try dispatcher.compiler().compile(allocator, .{
+                .solc_version = .v0_8_36,
                 .input = input,
                 .source_loader = .{ .context = &loader, .read_fn = Loader.read },
                 .io = if (parallel) threaded.io() else null,
@@ -3722,6 +4154,7 @@ test "hash-pinned URL sources retain terminal callback failures" {
                 var loader: Loader = .{ .source = source };
                 var dispatcher: libsolc.Dispatcher = .{};
                 const result = dispatcher.compiler().compile(allocator, .{
+                    .solc_version = .v0_8_36,
                     .input = input,
                     .source_loader = .{ .context = &loader, .read_fn = Loader.read },
                 });
@@ -3756,6 +4189,7 @@ test "URL callbacks consume and release owned failure and content results" {
     };
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input =
         \\{"language":"Solidity","sources":{"A.sol":{"urls":["missing.sol","A.sol"]}}}
         ,
@@ -3772,10 +4206,47 @@ test "URL callbacks consume and release owned failure and content results" {
     try std.testing.expect(loader_state.saw_loaded_url);
 }
 
+test "URL sources with long malformed UTF-8 literals report a syntax error" {
+    const Loader = struct {
+        fn read(_: ?*anyopaque, allocator: std.mem.Allocator, kind: []const u8, url: []const u8) standard_json.SourceReadError!standard_json.SourceReadResult {
+            if (!std.mem.eql(u8, kind, "source") or !std.mem.eql(u8, url, "C.sol")) return .unsupported;
+            const prefix = "// SPDX-License-Identifier: UNLICENSED\npragma solidity >=0.8.36;\ncontract C {\n    string value = unicode\"";
+            const invalid: [180]u8 = @splat(0x80);
+            const suffix = "\";\n}\n";
+            return .{ .contents = try std.mem.concat(allocator, u8, &.{ prefix, &invalid, suffix }) };
+        }
+    };
+    const allocator = std.testing.allocator;
+    var dispatcher: libsolc.Dispatcher = .{};
+    var output = try dispatcher.compiler().compile(allocator, .{
+        .input =
+        \\{"language":"Solidity","sources":{"C.sol":{"urls":["C.sol"]}}}
+        ,
+        .source_loader = .{ .context = null, .read_fn = Loader.read },
+    });
+    defer output.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.bytes, .{});
+    defer parsed.deinit();
+    const diagnostics = parsed.value.object.get("errors").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    const diagnostic = diagnostics[0].object;
+    try std.testing.expectEqualStrings("8452", diagnostic.get("errorCode").?.string);
+    try std.testing.expectEqualStrings("Contains invalid UTF-8 sequence at position 0.", diagnostic.get("message").?.string);
+    try std.testing.expectEqualStrings(
+        "SyntaxError: Contains invalid UTF-8 sequence at position 0.\n" ++
+            " --> C.sol:4:20:\n" ++
+            "  |\n" ++
+            "4 |     string value = unicode\" ... \";\n" ++
+            "  |                    ^^^^^^^^^^^^^^\n\n",
+        diagnostic.get("formattedMessage").?.string,
+    );
+}
+
 test "source callbacks follow nlohmann lexicographic object order" {
     var loader_state: RecordingLoaderState = .{};
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input =
         \\{"language":"Solidity","sources":{"Z.sol":{"urls":["z.url"]},"A.sol":{"urls":["a.url"]}}}
         ,
@@ -3801,6 +4272,7 @@ test "unknown root and source keys are rejected before callbacks" {
         var loader_state: RecordingLoaderState = .{};
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = input,
             .source_loader = loader_state.loader(),
         });
@@ -3822,6 +4294,7 @@ test "duplicate object members use the last value" {
         var loader_state: RecordingLoaderState = .{};
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = input,
             .source_loader = loader_state.loader(),
         });
@@ -3839,6 +4312,7 @@ test "duplicate source fields select the last URL array" {
     var loader_state: RecordingLoaderState = .{};
     var dispatcher: libsolc.Dispatcher = .{};
     var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input =
         \\{"language":"Solidity","sources":{"A.sol":{"urls":["bad.url"],"urls":["good.url"]}}}
         ,
@@ -3863,6 +4337,7 @@ test "missing and null sources retain the no-input result" {
     for (inputs) |input| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = input,
         });
         defer output.deinit();
@@ -3930,6 +4405,7 @@ fn compileWithParallelJobs(
     defer threaded.deinit();
     var dispatcher: libsolc.Dispatcher = .{ .optimizer_profiler = profiler };
     const request: standard_json.Request = .{
+        .solc_version = .v0_8_36,
         .input = input,
         .io = threaded.io(),
         .progress = progress,
@@ -3943,6 +4419,7 @@ fn compileWithParallelJobs(
 test "parallel single-worker and multi-worker output matches sequential output" {
     var dispatcher: libsolc.Dispatcher = .{};
     var sequential = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = parallel_solidity_input,
     });
     defer sequential.deinit();
@@ -3976,6 +4453,7 @@ test "parallel single-worker and multi-worker output matches sequential output" 
 test "parallel multi-worker output is deterministic across fresh backends" {
     var dispatcher: libsolc.Dispatcher = .{};
     var expected = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = parallel_solidity_input,
     });
     defer expected.deinit();
@@ -3999,7 +4477,7 @@ test "parallel mixed backend and metadata-only slots match sequential output" {
         \\{"language":"Solidity","sources":{"Mixed.sol":{"content":"pragma solidity 0.8.36; contract A { function value(uint256 x) external pure returns (uint256) { return x + 1; } } interface I { function value() external returns (uint256); } contract Metadata {} abstract contract Abstract { function value() external virtual returns (uint256); } contract B { function value(uint256 x) external pure returns (uint256) { return x * 2; } } contract Ignored {}"}},"settings":{"viaIR":true,"optimizer":{"enabled":true,"runs":200},"outputSelection":{"*":{"A":["evm.bytecode.object"],"I":["ir","evm.bytecode.object"],"Metadata":["metadata"],"Abstract":["irOptimized","evm.bytecode.object"],"B":["evm.bytecode.object"]}}}}
     ;
     var dispatcher: libsolc.Dispatcher = .{};
-    var expected = try dispatcher.compiler().compile(std.testing.allocator, .{ .input = input });
+    var expected = try dispatcher.compiler().compile(std.testing.allocator, .{ .solc_version = .v0_8_36, .input = input });
     defer expected.deinit();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, expected.bytes, .{});
     defer parsed.deinit();
@@ -4023,6 +4501,7 @@ test "parallel mixed backend and metadata-only slots match sequential output" {
 test "parallel progress and optimizer profiling retain parallel output" {
     var dispatcher: libsolc.Dispatcher = .{};
     var expected = try dispatcher.compiler().compile(std.testing.allocator, .{
+        .solc_version = .v0_8_36,
         .input = parallel_solidity_input,
     });
     defer expected.deinit();
@@ -4117,6 +4596,7 @@ test "parallel backend allocation failures propagate from inline consumers" {
             try std.testing.expectError(
                 error.OutOfMemory,
                 dispatcher.compiler().compile(failing.allocator(), .{
+                    .solc_version = .v0_8_36,
                     .input = parallel_solidity_input,
                     .io = backend.io(),
                 }),
@@ -4137,6 +4617,7 @@ test "Hackerbane HB-AR-2026.17 hack-06 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4154,6 +4635,7 @@ test "Hackerbane HB-AR-2026.17 hack-07 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4170,6 +4652,7 @@ test "Hackerbane HB-AR-2026.17 hack-08 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4186,6 +4669,7 @@ test "Hackerbane HB-AR-2026.17 hack-09 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4204,6 +4688,7 @@ test "Hackerbane HB-AR-2026.17 hack-10-internal matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4221,6 +4706,7 @@ test "Hackerbane HB-AR-2026.17 hack-11 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4238,6 +4724,7 @@ test "Hackerbane HB-AR-2026.17 hack-12-min matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4256,6 +4743,7 @@ test "Hackerbane HB-AR-2026.17 hack-13 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4273,6 +4761,7 @@ test "Hackerbane HB-AR-2026.17 hack-18 and hack-19 preserve readable bounds and 
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4290,6 +4779,7 @@ test "Hackerbane HB-AR-2026.17 hack-20 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4306,6 +4796,7 @@ test "Hackerbane HB-AR-2026.17 hack-21 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4323,6 +4814,7 @@ test "Hackerbane HB-AR-2026.17 hack-22 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4339,6 +4831,7 @@ test "Hackerbane HB-AR-2026.17 hack-24 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4356,6 +4849,7 @@ test "Hackerbane HB-AR-2026.17 hack-23 preserves explicit IR selection in serial
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4386,6 +4880,7 @@ test "Hackerbane HB-AR-2026.17 hack-25 matches solc 0.8.36" {
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();
@@ -4402,6 +4897,7 @@ test "Hackerbane HB-AR-2026.17 hack-19-array-pop preserves readable bounds and s
     }) |name| {
         var dispatcher: libsolc.Dispatcher = .{};
         var output = try dispatcher.compiler().compile(std.testing.allocator, .{
+            .solc_version = .v0_8_36,
             .input = @embedFile("standard-json/" ++ name ++ ".json"),
         });
         defer output.deinit();

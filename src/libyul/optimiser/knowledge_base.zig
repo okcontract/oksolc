@@ -9,19 +9,27 @@ const std = @import("std");
 const ordered = @import("cxx_compat");
 const AST = @import("../ast.zig");
 const BuiltinHandle = @import("../builtins.zig").BuiltinHandle;
-const NameCollector = @import("name_collector.zig");
 const YulName = @import("../yul_name.zig").YulName;
 
 fn lessYulName(left: YulName, right: YulName) bool {
     return left.lessThan(right);
 }
 
+const VersionedVariable = struct {
+    name: YulName = .{},
+    version: u64 = 0,
+
+    fn eql(self: VersionedVariable, other: VersionedVariable) bool {
+        return self.version == other.version and self.name.eql(other.name);
+    }
+};
+
 const VariableOffset = struct {
-    reference: YulName,
+    reference: VersionedVariable,
     offset: u256,
 
     fn isAbsolute(self: VariableOffset) bool {
-        return self.reference.empty();
+        return self.reference.name.empty();
     }
 
     fn absoluteValue(self: VariableOffset) ?u256 {
@@ -29,9 +37,12 @@ const VariableOffset = struct {
     }
 };
 
-const OffsetMap = ordered.OrderedMap(YulName, VariableOffset, lessYulName);
-const LastValueMap = ordered.OrderedMap(YulName, ?*const AST.Expression, lessYulName);
-const GroupMap = ordered.OrderedMap(YulName, NameCollector.NameSet, lessYulName);
+const VariableKnowledge = struct {
+    version: u64 = 0,
+    offset: ?VariableOffset = null,
+};
+
+const VariableMap = ordered.OrderedMap(YulName, VariableKnowledge, lessYulName);
 
 pub const ValueProvider = struct {
     context: ?*const anyopaque,
@@ -44,23 +55,18 @@ pub const ValueProvider = struct {
 
 pub const KnowledgeBase = struct {
     allocator: std.mem.Allocator,
-    values_are_ssa: bool,
     variable_values: ValueProvider,
     add_builtin_handle: ?BuiltinHandle,
     sub_builtin_handle: ?BuiltinHandle,
-    offsets: OffsetMap = .{},
-    last_known_value: LastValueMap = .{},
-    group_members: GroupMap = .{},
+    variables: VariableMap = .{},
 
     pub fn init(
         allocator: std.mem.Allocator,
         variable_values: ValueProvider,
         dialect: AST.Dialect,
-        values_are_ssa: bool,
     ) KnowledgeBase {
         return .{
             .allocator = allocator,
-            .values_are_ssa = values_are_ssa,
             .variable_values = variable_values,
             .add_builtin_handle = dialect.findBuiltin("add"),
             .sub_builtin_handle = dialect.findBuiltin("sub"),
@@ -68,11 +74,17 @@ pub const KnowledgeBase = struct {
     }
 
     pub fn deinit(self: *KnowledgeBase) void {
-        self.offsets.deinit(self.allocator);
-        self.last_known_value.deinit(self.allocator);
-        for (self.group_members.mutableItems()) |*entry| entry.value.deinit(self.allocator);
-        self.group_members.deinit(self.allocator);
+        self.variables.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// A changed value starts a new version, including when its expression
+    /// was and remains unknown. Other variables retain their existing offsets.
+    pub fn variableChanged(self: *KnowledgeBase, variable: YulName) void {
+        if (self.variables.getPtr(variable)) |knowledge| {
+            knowledge.version +%= 1;
+            knowledge.offset = null;
+        }
     }
 
     pub fn knownToBeDifferent(self: *KnowledgeBase, a: YulName, b: YulName) anyerror!bool {
@@ -123,19 +135,23 @@ pub const KnowledgeBase = struct {
     }
 
     fn exploreVariable(self: *KnowledgeBase, variable: YulName) anyerror!VariableOffset {
-        var value: ?*const AST.Expression = null;
-        if (self.values_are_ssa) {
-            if (self.offsets.get(variable)) |known| return known.*;
-            value = try self.valueOf(variable);
-        } else {
-            value = try self.valueOf(variable);
-            if (self.offsets.get(variable)) |known| return known.*;
-        }
+        var knowledge = if (self.variables.get(variable)) |known| known.* else VariableKnowledge{};
+        if (knowledge.offset) |offset| return offset;
 
-        if (value) |expression|
-            if (try self.exploreExpression(expression)) |offset|
-                return self.setOffset(variable, offset);
-        return self.setOffset(variable, .{ .reference = variable, .offset = 0 });
+        // The provider forgets an expression when one of the variables it
+        // references changes. Any offset already cached for this variable
+        // remains valid until the variable itself changes.
+        const offset = if (self.variable_values.get(variable)) |expression|
+            try self.exploreExpression(expression)
+        else
+            null;
+        const computed = offset orelse VariableOffset{
+            .reference = .{ .name = variable, .version = knowledge.version },
+            .offset = 0,
+        };
+        knowledge.offset = computed;
+        try self.variables.put(self.allocator, variable, knowledge);
+        return computed;
     }
 
     fn exploreExpression(
@@ -174,83 +190,13 @@ pub const KnowledgeBase = struct {
             },
         }
     }
-
-    fn valueOf(self: *KnowledgeBase, variable: YulName) anyerror!?*const AST.Expression {
-        const current_value = self.variable_values.get(variable);
-        if (self.values_are_ssa) return current_value;
-
-        const last_value = if (self.last_known_value.get(variable)) |known| known.* else null;
-        if (last_value != current_value) try self.reset(variable);
-        try self.last_known_value.put(self.allocator, variable, current_value);
-        return current_value;
-    }
-
-    fn reset(self: *KnowledgeBase, variable: YulName) anyerror!void {
-        std.debug.assert(!self.values_are_ssa);
-        _ = self.last_known_value.remove(variable);
-
-        if (self.offsets.get(variable)) |offset| {
-            if (!offset.isAbsolute()) {
-                if (self.group_members.getPtr(offset.reference)) |group|
-                    _ = group.remove(variable);
-            }
-            _ = self.offsets.remove(variable);
-        }
-
-        if (self.group_members.remove(variable)) |removed| {
-            var group = removed.value;
-            defer group.deinit(self.allocator);
-            if (!group.isEmpty()) {
-                const new_representative = group.at(0);
-                if (new_representative.eql(variable)) return error.InvalidKnowledgeGroup;
-                const new_offset = (self.offsets.get(new_representative) orelse
-                    return error.InvalidKnowledgeGroup).offset;
-                for (0..group.len()) |index| {
-                    const group_member = group.at(index);
-                    const member_offset = self.offsets.getPtr(group_member) orelse
-                        return error.InvalidKnowledgeGroup;
-                    if (!member_offset.reference.eql(variable)) return error.InvalidKnowledgeGroup;
-                    member_offset.reference = new_representative;
-                    member_offset.offset -%= new_offset;
-                }
-                if (try self.group_members.fetchPut(
-                    self.allocator,
-                    new_representative,
-                    group,
-                )) |displaced| {
-                    var old_group = displaced.value;
-                    old_group.deinit(self.allocator);
-                }
-                group = .{};
-            }
-        }
-    }
-
-    fn setOffset(
-        self: *KnowledgeBase,
-        variable: YulName,
-        value: VariableOffset,
-    ) anyerror!VariableOffset {
-        try self.offsets.put(self.allocator, variable, value);
-        if (!value.reference.empty()) {
-            if (self.group_members.getPtr(value.reference)) |group| {
-                _ = try group.insert(self.allocator, variable);
-            } else {
-                var group: NameCollector.NameSet = .{};
-                errdefer group.deinit(self.allocator);
-                _ = try group.insert(self.allocator, variable);
-                _ = try self.group_members.insert(self.allocator, value.reference, group);
-            }
-        }
-        return value;
-    }
 };
 
 fn optionalHandleEqual(handle: ?BuiltinHandle, expected: BuiltinHandle) bool {
     return if (handle) |value| value.eql(expected) else false;
 }
 
-test "knowledge base follows constant add/sub relations and refreshes changed values" {
+test "Yul simplification retains known offsets for unchanged variables" {
     const EVMVersion = @import("../../liblangutil/evm_version.zig").EVMVersion;
     const EVMDialect = @import("../backends/evm/evm_dialect.zig").EVMDialect;
     const allocator = std.testing.allocator;
@@ -287,12 +233,14 @@ test "knowledge base follows constant add/sub relations and refreshes changed va
         allocator,
         .{ .context = &provider, .get_value = Provider.get },
         dialect.dialect(),
-        false,
     );
     defer knowledge.deinit();
     try std.testing.expectEqual(@as(?u256, 9), try knowledge.valueIfKnownConstant(y));
     provider.x_value = null;
+    provider.y_value = null;
+    knowledge.variableChanged(x);
     try std.testing.expectEqual(@as(?u256, null), try knowledge.valueIfKnownConstant(x));
+    try std.testing.expectEqual(@as(?u256, 9), try knowledge.valueIfKnownConstant(y));
 
     var malformed_add: AST.Expression = .{ .function_call = .{
         .function_name = .{ .builtin = .{
@@ -308,5 +256,6 @@ test "knowledge base follows constant add/sub relations and refreshes changed va
         } },
     );
     provider.x_value = &malformed_add;
+    knowledge.variableChanged(x);
     try std.testing.expectEqual(@as(?u256, null), try knowledge.valueIfKnownConstant(x));
 }

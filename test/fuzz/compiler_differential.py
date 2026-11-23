@@ -25,7 +25,8 @@ import time
 from typing import Any, Callable, Sequence
 
 
-PREAMBLE = "// SPDX-License-Identifier: UNLICENSED\npragma solidity 0.8.36;\n"
+REFERENCE_VERSION = "0.8.36"
+PREAMBLE = f"// SPDX-License-Identifier: UNLICENSED\npragma solidity {REFERENCE_VERSION};\n"
 ARTIFACTS = (
     (
         "storageLayout",
@@ -1091,9 +1092,9 @@ def resolve_executable(value: str) -> Path:
     return Path(found).resolve()
 
 
-def compiler_version(executable: Path) -> str:
+def compiler_version(executable: Path, *args: str) -> str:
     result = subprocess.run(
-        [str(executable), "--version"],
+        [str(executable), *args, "--version"],
         check=False,
         capture_output=True,
         text=True,
@@ -1158,7 +1159,7 @@ class CandidateService:
         environment = dict(os.environ)
         environment["XDG_CACHE_HOME"] = str(directory / "cache")
         environment["XDG_CONFIG_HOME"] = str(directory / "config")
-        command = [str(executable), "serve", "--stdio"]
+        command = [str(executable), "serve", "--stdio", "--solc-version", REFERENCE_VERSION]
         if session_mode == "memory":
             command.append("--no-cache")
         else:
@@ -1320,7 +1321,7 @@ def run_compiler_response(
 ) -> tuple[bytes, dict[str, Any]]:
     command = [str(executable), "--standard-json"]
     if candidate:
-        command.append("--no-cache")
+        command.extend(("--no-cache", "--solc-version", REFERENCE_VERSION))
     result = subprocess.run(
         command,
         input=encode_request(request),
@@ -1825,10 +1826,10 @@ def main() -> int:
     candidate = resolve_executable(options.candidate)
     reference = resolve_executable(options.reference)
     evm = resolve_executable(options.evm) if options.evm else None
-    candidate_version = compiler_version(candidate)
+    candidate_version = compiler_version(candidate, "--solc-version", REFERENCE_VERSION)
     reference_version = compiler_version(reference)
-    if "Version: 0.8.36" not in reference_version:
-        raise RuntimeError(f"reference compiler is not solc 0.8.36: {reference_version}")
+    if f"Version: {REFERENCE_VERSION}" not in reference_version:
+        raise RuntimeError(f"reference compiler is not solc {REFERENCE_VERSION}: {reference_version}")
     execution_oracle_version = evm_version(evm) if evm is not None else None
 
     if options.replay is not None:

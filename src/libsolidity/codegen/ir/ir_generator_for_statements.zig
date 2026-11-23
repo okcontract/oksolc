@@ -219,6 +219,7 @@ pub const IRGeneratorForStatements = struct {
             self.allocator,
             self.context.compatibility_ids,
             declaration,
+            try self.context.constantArithmeticSuffix(declaration),
         );
         errdefer self.allocator.free(name);
         if (!(try self.context.functionCollector().beginFunction(name))) return name;
@@ -1403,6 +1404,8 @@ pub const IRGeneratorForStatements = struct {
             "basefee"
         else if (std.mem.eql(u8, access.member_name, "blobbasefee"))
             "blobbasefee"
+        else if (std.mem.eql(u8, access.member_name, "slotnum"))
+            "slotnum"
         else
             return error.UnsupportedExpression;
         const expression = try self.buildExpression("@0()", .{opcode});
@@ -3174,9 +3177,10 @@ pub const IRGeneratorForStatements = struct {
             const message_node = call.arguments[1];
             const message_type = try expressionType(message_node);
             if (message_type.asMagic()) |magic| if (magic.kind == .Error) {
-                if (message_node.nodeKind() != .function_call)
+                const constructor = ASTUtils.resolveOuterUnaryTuples(message_node) orelse return error.InvalidAst;
+                if (constructor.nodeKind() != .function_call)
                     return error.InvalidAst;
-                const error_call = message_node.payload.function_call;
+                const error_call = constructor.payload.function_call;
                 const error_function = (try expressionType(error_call.expression)).asFunction() orelse
                     return error.InvalidAst;
                 if (error_function.kind != .Error or
@@ -3189,7 +3193,7 @@ pub const IRGeneratorForStatements = struct {
                 const sorted_error_arguments = try ASTImplementation.sortedFunctionCallArgumentsAlloc(
                     self.context.type_provider,
                     self.allocator,
-                    message_node,
+                    constructor,
                 );
                 defer self.allocator.free(sorted_error_arguments);
                 if (sorted_error_arguments.len != error_function.parameterTypes().len)
@@ -5169,10 +5173,9 @@ pub const IRGeneratorForStatements = struct {
                     .constant => |constant| @as(?u32, constant),
                     .runtime => null,
                 };
-                const update = try self.utils.updateStorageValueAtLocationFunction(
+                const update = try self.utils.storageAssignmentFunction(
                     value.type_ref,
                     lvalue.type_ref,
-                    .Unspecified,
                     offset,
                 );
                 defer self.allocator.free(update);

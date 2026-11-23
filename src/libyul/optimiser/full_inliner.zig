@@ -90,7 +90,8 @@ pub const FullInliner = struct {
         try tracker.run(ast);
         var values = tracker.values().iterator();
         while (values.next()) |entry| {
-            if (entry.value_ptr.*.* == .literal) {
+            const expression = entry.value_ptr.* orelse continue;
+            if (expression.* == .literal) {
                 _ = try result.constants.insert(scratch_allocator, entry.key_ptr.*);
             }
         }

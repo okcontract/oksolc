@@ -29,6 +29,23 @@ pub const FunctionCalls = ordered.OrderedMap(
 pub const FunctionHandleSet = ordered.OrderedSet(AST.FunctionHandle, lessFunctionHandle);
 const HandleIndex = std.HashMapUnmanaged(AST.FunctionHandle, usize, NameCollectorModule.FunctionHandleContext, 80);
 
+/// Each component follows the components it calls in Tarjan's output.
+pub const Components = struct {
+    allocator: std.mem.Allocator,
+    handles: []AST.FunctionHandle,
+    groups: Tarjan.Components(usize),
+    component_of: HandleIndex,
+    recursive: []bool,
+
+    pub fn deinit(self: *Components) void {
+        self.allocator.free(self.handles);
+        self.groups.deinit();
+        self.component_of.deinit(self.allocator);
+        self.allocator.free(self.recursive);
+        self.* = undefined;
+    }
+};
+
 pub const CallGraph = struct {
     allocator: std.mem.Allocator,
     function_calls: FunctionCalls = .{},
@@ -41,14 +58,13 @@ pub const CallGraph = struct {
         self.* = undefined;
     }
 
-    /// The returned set is owned by the caller and uses this graph's allocator.
-    pub fn recursiveFunctions(self: *const CallGraph) anyerror!FunctionHandleSet {
+    /// The caller owns the decomposition and its component lookup.
+    pub fn stronglyConnectedComponents(self: *const CallGraph) !Components {
         var handles: std.ArrayList(AST.FunctionHandle) = .empty;
         defer handles.deinit(self.allocator);
-        // Lookup only: IDs retain their first-seen order, independently of hash
-        // iteration. The bridge and its index share this query's lifetime.
+        // IDs retain their first-seen order, independently of hash iteration.
         var indices: HandleIndex = .empty;
-        defer indices.deinit(self.allocator);
+        errdefer indices.deinit(self.allocator);
         for (self.function_calls.items()) |entry| {
             try appendUniqueHandle(self.allocator, &handles, &indices, entry.key);
             for (entry.value.items) |callee| try appendUniqueHandle(self.allocator, &handles, &indices, callee);
@@ -71,23 +87,40 @@ pub const CallGraph = struct {
         defer self.allocator.free(adjacency);
         for (adjacency_lists, adjacency) |list, *slice| slice.* = list.items;
         var components = try Tarjan.computeStronglyConnectedComponents(usize, self.allocator, adjacency);
-        defer components.deinit();
-
-        var recursive: FunctionHandleSet = .{};
-        errdefer recursive.deinit(self.allocator);
-        for (components.items) |component| {
-            if (component.len > 1) {
-                for (component) |node| _ = try recursive.insert(self.allocator, handles.items[node]);
-            } else if (component.len == 1 and
-                containsIndex(adjacency_lists[component[0]].items, component[0]))
-            {
-                _ = try recursive.insert(self.allocator, handles.items[component[0]]);
+        errdefer components.deinit();
+        const recursive = try self.allocator.alloc(bool, components.items.len);
+        errdefer self.allocator.free(recursive);
+        for (components.items, recursive, 0..) |members, *is_recursive, component_id| {
+            is_recursive.* = members.len > 1 or containsIndex(adjacency[members[0]], members[0]);
+            for (members) |node| {
+                const handle = handles.items[node];
+                if (is_recursive.*) switch (handle) {
+                    .user => |name| if (name.empty()) return error.TopLevelCannotBeRecursive,
+                    .builtin => return error.BuiltinCannotBeRecursive,
+                };
+                indices.getPtr(handle).?.* = component_id;
             }
         }
-        for (0..recursive.len()) |index| switch (recursive.at(index)) {
-            .user => |name| if (name.empty()) return error.TopLevelCannotBeRecursive,
-            .builtin => return error.BuiltinCannotBeRecursive,
+        return .{
+            .allocator = self.allocator,
+            .handles = try handles.toOwnedSlice(self.allocator),
+            .groups = components,
+            .component_of = indices,
+            .recursive = recursive,
         };
+    }
+
+    /// The returned set is owned by the caller and uses this graph's allocator.
+    pub fn recursiveFunctions(self: *const CallGraph) !FunctionHandleSet {
+        var components = try self.stronglyConnectedComponents();
+        defer components.deinit();
+        var recursive: FunctionHandleSet = .{};
+        errdefer recursive.deinit(self.allocator);
+        for (components.groups.items, components.recursive) |members, is_recursive| {
+            if (is_recursive) for (members) |node| {
+                _ = try recursive.insert(self.allocator, components.handles[node]);
+            };
+        }
         return recursive;
     }
 };

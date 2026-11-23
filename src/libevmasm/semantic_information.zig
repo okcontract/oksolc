@@ -369,6 +369,7 @@ pub fn invalidInPureFunctions(instruction: InstructionModule.Instruction) bool {
         .CHAINID,
         .BASEFEE,
         .BLOBBASEFEE,
+        .SLOTNUM,
         .GAS,
         .GASPRICE,
         .EXTCODESIZE,

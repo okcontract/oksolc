@@ -189,9 +189,9 @@ fn compareRevision(
     defer allocator.free(request);
 
     var clean_dispatcher: solidity.StandardJsonDispatcher = .{};
-    var clean = try clean_dispatcher.compiler().compile(allocator, .{ .input = request });
+    var clean = try clean_dispatcher.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = request });
     defer clean.deinit();
-    var warm = try session.compiler().compile(allocator, .{ .input = request });
+    var warm = try session.compiler().compile(allocator, .{ .solc_version = .v0_8_36, .input = request });
     defer warm.deinit();
     try solidity.standard_json.compareExact(clean.bytes, warm.bytes);
 }

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const execution = @import("execution.zig");
+const SolcVersion = @import("solc_version.zig").SolcVersion;
 
 pub const SourceReadError = error{
     OutOfMemory,
@@ -87,6 +88,7 @@ pub const ProgressReporter = struct {
 pub const Request = struct {
     /// Borrowed UTF-8 Standard Input JSON bytes. A terminator is not required.
     input: []const u8,
+    solc_version: SolcVersion = SolcVersion.default,
     /// Root-selected Zig 0.16 I/O backend. When absent, compilation retains
     /// the deterministic sequential implementation.
     io: ?std.Io = null,

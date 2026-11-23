@@ -4,14 +4,14 @@
 
 .{
     .name = .solidity_zig,
-    .version = "0.2.4",
+    .version = "0.2.5",
     .fingerprint = 0x532998ed66b1991d, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .httpz = .{
             .lazy = true,
-            .url = "git+https://github.com/karlseguin/http.zig.git#e8272bfd5727aade0dcee3e2aba6c50f57c374b6",
-            .hash = "httpz-0.0.0-PNVzrNAXCQDHb-rRH2jq07A3Ekv3GS6XOTkiqZJtKeqv",
+            .url = "https://github.com/karlseguin/http.zig/archive/faffd9f4cf6e0ea0a63428a52d8762dfd55d7c7f.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrFQxCQAxU-cJmpiM-PypKaYGYOkBsYfZ-Q2c2Flp",
         },
         .zqlite = .{
             .url = "git+https://github.com/karlseguin/zqlite.zig.git#865223b734a5113f731ab1eb1d7d81c8ac252913",
@@ -22,16 +22,16 @@
             .hash = "clap-0.12.0-oBajB4XpAQCF1WRKnD5KOKPsnwwT_NNdAJ7Ww3irYJac",
         },
         .yyjson = .{
-            .url = "https://github.com/ibireme/yyjson/archive/refs/tags/0.12.0.tar.gz",
-            .hash = "N-V-__8AADJobAAfcT3EULUqTBZto6rfWBxzeDyfBxrSCP_b",
+            .url = "https://github.com/ibireme/yyjson/archive/refs/tags/0.13.0.tar.gz",
+            .hash = "N-V-__8AABFlbgB11C3wOoHo9lqDatPMvTuIdHI0vwVxDpTe",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench.git#f12a2262bcd9d300207890555c577da5e29de453",
             .hash = "zbench-0.14.1-YTdc781OAQCR6wxqkgAwm9bG4TnFGzm8c9aE-ZPiTAU1",
         },
         .zlinter = .{
-            .url = "git+https://github.com/KurtWagner/zlinter.git#06dd3de40c2b69294376fe960844203dabbbc996",
-            .hash = "zlinter-0.0.1-OjQ08VewFQD0_VeKYjUlovRp4GGlG0Jpu2ZF0MFY4Vcb",
+            .url = "git+https://github.com/KurtWagner/zlinter.git#85e4417cabe720f36ceb34942293be0671dfe56e",
+            .hash = "zlinter-0.0.1-OjQ08VfgFQCLv5ay4IO1F_rsi810dAAG6j8wjU3ygrDd",
         },
         .toml = .{
             .url = "git+https://github.com/sam701/zig-toml.git#c661327bd9f02f774426c4fe78f60621411b7173",

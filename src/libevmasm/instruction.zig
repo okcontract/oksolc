@@ -69,6 +69,7 @@ pub const Instruction = enum(u8) {
     BASEFEE = 0x48,
     BLOBHASH = 0x49,
     BLOBBASEFEE = 0x4a,
+    SLOTNUM = 0x4b,
 
     POP = 0x50,
     MLOAD = 0x51,
@@ -318,6 +319,7 @@ pub fn instructionInfo(instruction: Instruction, evm_version: EVMVersion) Instru
         .CHAINID,
         .BASEFEE,
         .BLOBBASEFEE,
+        .SLOTNUM,
         .PC,
         .MSIZE,
         .GAS,

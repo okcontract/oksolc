@@ -11,6 +11,7 @@ const Diagnostics = @import("../liblangutil/diagnostics.zig");
 const ObjectModule = @import("object.zig");
 const ParserBase = @import("../liblangutil/parser_base.zig");
 const ScannerModule = @import("../liblangutil/scanner.zig");
+const SolcVersion = @import("common").SolcVersion;
 const StringUtils = @import("../libsolutil/string_utils.zig");
 
 pub const ParseError = AsmParser.ParseError || ParserBase.ParserFailure || error{
@@ -21,6 +22,7 @@ pub const ObjectParser = struct {
     allocator: std.mem.Allocator,
     base: ParserBase.ParserBase,
     dialect: AST.Dialect,
+    solc_version: SolcVersion = SolcVersion.default,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -206,9 +208,13 @@ pub const ObjectParser = struct {
         errdefer source_names.deinit(self.allocator);
         if (scanner.currentToken() == .EOS) return source_names;
 
-        while (scanner.currentToken() != .EOS) {
+        mapping: while (scanner.currentToken() != .EOS) {
             if (scanner.currentToken() != .Number) break;
-            const source_index = StringUtils.toUnsignedInt(scanner.currentLiteral()) orelse break;
+            const literal = scanner.currentLiteral();
+            if (self.solc_version.atLeast(.v0_8_38)) {
+                for (literal) |digit| if (!std.ascii.isDigit(digit)) break :mapping;
+            }
+            const source_index = StringUtils.toUnsignedInt(literal) orelse break;
             if (try scanner.next() != .Colon) break;
             if (try scanner.next() != .StringLiteral) break;
             try source_names.put(self.allocator, source_index, scanner.currentLiteral());
@@ -368,4 +374,29 @@ test "object parser diagnoses duplicate names but retains the first lookup" {
     try std.testing.expectEqual(@as(usize, 0), object.sub_index_by_name.get("x").?);
     try std.testing.expectEqual(@as(usize, 1), reporter.diagnostics().len);
     try std.testing.expectEqual(@as(u64, 8794), reporter.diagnostics()[0].error_id.value);
+}
+
+test "source mapping indices require a complete decimal number from Solidity 0.8.38" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\/// @use-src 1e1:"example.sol"
+        \\object "Example" { code {} }
+    ;
+    for ([_]SolcVersion{ .v0_8_37, .v0_8_38 }) |version| {
+        var reporter = Diagnostics.ErrorReporter.init(allocator);
+        defer reporter.deinit();
+        var stream = ScannerModule.CharStream.initBorrowed(input, "example.yul");
+        var scanner = try ScannerModule.Scanner.init(allocator, &stream, .Solidity);
+        defer scanner.deinit();
+        var parser = ObjectParser.init(allocator, &scanner, &reporter, .{});
+        parser.solc_version = version;
+        const object = (try parser.parse(false)).?;
+        defer object.destroy();
+        if (version == .v0_8_38) {
+            try std.testing.expectEqual(@as(usize, 1), reporter.diagnostics().len);
+            try std.testing.expectEqual(@as(u64, 9804), reporter.diagnostics()[0].error_id.value);
+        } else {
+            try std.testing.expect(!reporter.hasErrors());
+        }
+    }
 }

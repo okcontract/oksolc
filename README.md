@@ -22,8 +22,27 @@ and controls that we used.
 
 ## Status and compatibility
 
-The compatibility target is the original Solidity `0.8.36` compiler for Standard
-JSON, creation bytecode, diagnostics, and deterministic output.
+The optimized via-IR pipeline supports Solidity `0.8.36`, `0.8.37`, `0.8.38`,
+and `0.8.39` compatibility targets for Standard JSON, bytecode, and diagnostics.
+The default is `0.8.39`. Use `--solc-version` to select a different release.
+
+```sh
+oksolc standard-json --solc-version 0.8.36 request.json
+```
+
+All four targets include the applicable via-IR compiler security fixes from
+solc `0.8.37` through `0.8.39` (`SOL-2026-4`, `SOL-2026-6`, `SOL-2026-7`, and
+`SOL-2026-8`).
+[Solidity compiler bug list](https://docs.soliditylang.org/en/latest/bugs.html)
+
+A single pass over the 17 local and bundled external workloads matched the
+complete Standard JSON output of solc `0.8.37`, `0.8.38`, and `0.8.39` with
+both one and six jobs. Fifteen workloads produced exact creation and deployed
+bytecode, and Farcaster and Seaport returned identical compilation diagnostics.
+For the `0.8.36` target, 13 of the 15 bytecode-producing workloads matched
+exactly. Sablier v2 and the 2022 Uniswap v4 fixture differed in bytecode because
+oksolc applies a fix that separates constant helpers for checked and unchecked
+arithmetic. Four other workloads differed only in source maps. 
 
 Intentional exceptions:
 
@@ -53,15 +72,15 @@ when exact control of compiler settings or output selection is required.
 
 ## Versions and releases
 
-oksolc has an independent product version; the Solidity version identifies its
-compatibility target. See [CHANGELOG.md](CHANGELOG.md) for release history.
+oksolc has an independent product version. The Solidity version identifies its
+compatibility target. See the [changelog](CHANGELOG.md) for release history.
 
 ```console
 $ oksolc version
-oksolc 0.2.4 (Solidity 0.8.36)
+oksolc 0.2.5 (Solidity 0.8.39)
 $ oksolc --version
 oksolc, a solidity compiler commandline interface
-Version: 0.8.36+oksolc.0.2.4
+Version: 0.8.39+oksolc.0.2.5
 ```
 
 `oksolc version --json` returns `version` (the product version),
@@ -69,14 +88,14 @@ Version: 0.8.36+oksolc.0.2.4
 Solidity SemVer with oksolc build metadata), and `build_identity` (the compiler
 content identity, or `null` if unavailable). Include this output in bug reports.
 The public Zig module exposes the product version as `solidity.version` and the
-Solidity target as `solidity.baseline.version`.
+default Solidity target as `solidity.baseline.version`. Zig callers can select
+a release from `solidity.SolcVersion` through `solidity.standard_json.Request.solc_version`.
 
 `--version` and the C ABI's `solidity_version()` retain a Solidity-compatible
-SemVer for tools such as Foundry. Even development releases put the oksolc
-version after `+`, so the Solidity target is still treated as a release.
-Contract metadata and CBOR keep the pinned reference compiler identity to
-preserve output and bytecode compatibility. Use the product version for upgrade
-comparisons; SemVer precedence ignores the build metadata after `+`.
+SemVer for tools such as Foundry. The CLI accepts `--solc-version` with version
+reporting and `--standard-json`. The C ABI uses the default target. Contract
+metadata and CBOR use the selected reference compiler identity. Use the product
+version for upgrade comparisons because SemVer precedence ignores build metadata.
 
 ## Zig API migration for 0.2.0
 
@@ -114,14 +133,14 @@ same revision. Standard JSON and C ABI callers need no migration.
 
 ## Requirements
 
-- Zig `0.17.0`
-- TypeScript `7.0.2` (`tsc`) and Bun `1.4.4` only for the optional web browser
+- Zig `0.17.1`
+- TypeScript `7.0.2` (`tsc`) and Bun `1.4.5` only for the optional web browser
 - libc and a working C toolchain
 - Clang with ASan/UBSan runtimes for `fuzz-json-adapter` and `fuzz` (limited to
   the yyjson adapter for now)
 - Python 3 for tests and benchmark orchestration
-- `solc` version `0.8.36` for optional reference audits and benchmark
-  comparisons
+- `solc` version `0.8.36` for optional reference audits and local benchmark
+  comparisons, and `0.8.39` for external benchmark comparisons by default
 - `zstd` to replay the bundled external benchmarks; Forge and Git to capture
   fresh requests, plus Node.js/npm for old Uniswap and Node.js for Pendle setup
 
@@ -513,14 +532,19 @@ compatibility and record cache metrics:
 zig build benchmark-incremental -Doptimize=ReleaseFast
 ```
 
-The external suite compares oksolc with original `solc 0.8.36`. Replay the
-imported Standard JSON requests without project downloads or Forge:
+The external suite compares both compilers at Solidity 0.8.39 by default.
+Replay the imported Standard JSON requests without project downloads or Forge:
 
 ```sh
 zig build benchmark-external -Doptimize=ReleaseFast \
   -Dbenchmark-reference-solc=solc -Dbenchmark-runs=3 -Dbenchmark-warmups=1 \
   -- --bundled-requests
 ```
+
+To select a different release, pass `--solc-version VERSION` to the launcher
+and supply that release’s solc binary via `-Dbenchmark-reference-solc`. The
+launcher requires matching bytecode, so the documented 0.8.36 backport
+differences cause those fixtures to fail preflight.
 
 Select projects with repeated `--project NAME` flags. For example, to compare
 only Pendle, including all its production contracts and imported dependencies:

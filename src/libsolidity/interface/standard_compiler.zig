@@ -66,6 +66,7 @@ const LinkerObjectModule = @import("../../libevmasm/linker_object.zig");
 const LinkerObject = LinkerObjectModule.LinkerObject;
 const CompilationOptionsModule = @import("compilation_options.zig");
 const CompilationOptions = CompilationOptionsModule.CompilationOptions;
+const SolcVersion = @import("common").SolcVersion;
 const OutputSelection = CompilationOptionsModule.OutputSelection;
 const DebugSettings = @import("debug_settings.zig");
 const OptimiserSettingsModule = @import("optimiser_settings.zig");
@@ -206,6 +207,18 @@ const CompilationOptionsResult = union(enum) {
     fatal: Fatal,
 };
 
+fn evmDeprecationCutoff(solc_version: SolcVersion) EVMVersion {
+    return EVMVersion.init(if (solc_version.atLeast(.v0_8_37)) .London else .Constantinople);
+}
+
+fn appendEvmDeprecationWarning(allocator: std.mem.Allocator, errors: *Json, solc_version: SolcVersion) !void {
+    const message = try allocator.print(
+        "Support for EVM versions older than {s} is deprecated and will be removed in the future.",
+        .{evmDeprecationCutoff(solc_version).name()},
+    );
+    try appendError(allocator, errors, .Warning, message, message, null, null);
+}
+
 inline fn reportProgress(
     progress: ?StandardJson.ProgressReporter,
     update: StandardJson.ProgressUpdate,
@@ -255,6 +268,7 @@ fn assembleAndLinkBackend(
 pub fn compileSolidityStandardJsonAlloc(
     allocator: std.mem.Allocator,
     input: *const Json,
+    solc_version: SolcVersion,
     loaded_sources: []const SourceContent,
     source_errors: []const []const u8,
     read_callback: ?SolidityReadFile.ReadCallback,
@@ -296,6 +310,7 @@ pub fn compileSolidityStandardJsonAlloc(
     const parsed_options = try parseSettings(
         arena,
         input,
+        solc_version,
     );
     var settings = switch (parsed_options) {
         .options => |value| value,
@@ -315,10 +330,8 @@ pub fn compileSolidityStandardJsonAlloc(
     defer settings.deinit();
     const frontend_fingerprint = PhaseKey.frontendFingerprint(&settings);
 
-    if (settings.frontend.evm_version_deprecation_warning) {
-        const message = "Support for EVM versions older than constantinople is deprecated and will be removed in the future.";
-        try appendError(arena, errors_value, .Warning, message, message, null, null);
-    }
+    if (settings.frontend.evm_version_deprecation_warning)
+        try appendEvmDeprecationWarning(arena, errors_value, solc_version);
 
     if (requestsSolidityEvmOutput(&settings.projection.output_selection) and !settings.ir.via_ir) {
         const message = "Zig port: Solidity EVM output requires \"settings.viaIR\": true; the legacy direct-codegen pipeline is unsupported.";
@@ -448,6 +461,7 @@ pub fn compileSolidityStandardJsonAlloc(
                 if (previous.reusableFor(
                     &source.content_digest,
                     settings.frontend.evm_version,
+                    solc_version,
                 )) {
                     try candidate_syntax.retainReused(source_id, previous);
                     previous.replayParseDiagnostics(&reporter) catch |err| switch (err) {
@@ -458,12 +472,13 @@ pub fn compileSolidityStandardJsonAlloc(
                 };
 
             const diagnostic_start = reporter.diagnostics().len;
-            var parsed = try SolidityParser.parseSourceWithIdentity(
+            var parsed = try SolidityParser.parseSourceWithVersion(
                 allocator,
                 source.content,
                 source.name,
                 &reporter,
                 settings.frontend.evm_version,
+                solc_version,
                 source_id,
                 next_ast_id,
             );
@@ -959,6 +974,7 @@ fn analyzeSolidityFrontend(
             root,
             reporter,
             .{
+                .solc_version = settings.frontend.solc_version,
                 .use_yul_optimizer = settings.optimizer.settings.run_yul_optimiser,
                 .experimental = settings.frontend.experimental,
             },
@@ -1176,6 +1192,7 @@ fn analyzeSolidityFrontend(
             reporter,
         );
         checker.setCompatibilityIds(compatibility_ids);
+        checker.solc_version = settings.frontend.solc_version;
         if (!(try checker.checkTypeRequirements(root))) no_errors = false;
         try recordSemanticDiagnosticDelta(
             semantic,
@@ -1281,6 +1298,7 @@ fn analyzeSolidityFrontend(
                 reporter,
                 type_provider,
             );
+            checker.solc_version = settings.frontend.solc_version;
             if (!(try checker.check(root))) no_errors = false;
             try recordSemanticDiagnosticDelta(
                 semantic,
@@ -1915,6 +1933,7 @@ fn appendSolidityViaIRArtifacts(
         source_graph,
     );
     const metadata_options: SolidityCompilerStack.MetadataOptions = .{
+        .solc_version = settings.frontend.solc_version,
         .evm_version = settings.frontend.evm_version,
         .optimiser = settings.optimizer.settings,
         .bytecode_hash = settings.metadata.hash,
@@ -2323,7 +2342,7 @@ fn appendSolidityViaIRArtifacts(
             };
             defer assembly_pair.deinit();
             if (wants_bytecode or wants_assembly or wants_legacy_assembly or wants_gas_estimates)
-                try CodeSizeDiagnostics.report(scratch_allocator, reporter, contract.location, settings.frontend.evm_version, .{
+                try CodeSizeDiagnostics.report(scratch_allocator, reporter, contract.location, settings.frontend.evm_version, settings.frontend.solc_version, "Contract", .{
                     .creation = assembly_pair.creation.bytecode.?.bytecode.items.len,
                     .deployed = assembly_pair.deployed.bytecode.?.bytecode.items.len,
                 });
@@ -2338,7 +2357,7 @@ fn appendSolidityViaIRArtifacts(
                 "bytecode",
                 false,
                 &assembly_pair.creation,
-                settings.frontend.evm_version,
+                &settings.frontend,
                 true,
             );
             try appendMachineObject(
@@ -2350,7 +2369,7 @@ fn appendSolidityViaIRArtifacts(
                 "deployedBytecode",
                 true,
                 &assembly_pair.deployed,
-                settings.frontend.evm_version,
+                &settings.frontend,
                 true,
             );
             if (artifactContract(
@@ -2763,7 +2782,7 @@ const ParallelViaIRJob = struct {
             "bytecode",
             false,
             &assembly_pair.creation,
-            self.settings.frontend.evm_version,
+            &self.settings.frontend,
             true,
         );
         try appendMachineObject(
@@ -2775,7 +2794,7 @@ const ParallelViaIRJob = struct {
             "deployedBytecode",
             true,
             &assembly_pair.deployed,
-            self.settings.frontend.evm_version,
+            &self.settings.frontend,
             true,
         );
         if (artifactContract(
@@ -3296,7 +3315,7 @@ fn appendSolidityViaIRArtifactsParallel(
 
     for (jobs.items) |*job| {
         if (job.bytecode_sizes) |sizes|
-            try CodeSizeDiagnostics.report(scratch_allocator, reporter, job.contract.location, settings.frontend.evm_version, sizes);
+            try CodeSizeDiagnostics.report(scratch_allocator, reporter, job.contract.location, settings.frontend.evm_version, settings.frontend.solc_version, "Contract", sizes);
         try artifact_arenas.append(scratch_allocator, job.artifact_arena);
         job.artifact_arena_transferred = true;
         const contract_output = try ensureArtifactContract(
@@ -3558,6 +3577,7 @@ fn generateSolidityYulCached(
         settings.optimizer.settings,
     );
     defer generator.deinit();
+    generator.context.solc_version = settings.frontend.solc_version;
     const ir = try generator.run(
         contract_source.tree,
         @constCast(contract),
@@ -3999,6 +4019,7 @@ fn solidityContractAnnotationConst(
 pub fn compileYulStandardJsonAlloc(
     allocator: std.mem.Allocator,
     input: *const Json,
+    solc_version: SolcVersion,
     loaded_sources: []const SourceContent,
     source_errors: []const []const u8,
     shared_object_optimizer: ?*ObjectOptimizer,
@@ -4019,6 +4040,7 @@ pub fn compileYulStandardJsonAlloc(
     const parsed_options = try parseSettings(
         arena,
         input,
+        solc_version,
     );
     var settings = switch (parsed_options) {
         .options => |value| value,
@@ -4029,10 +4051,8 @@ pub fn compileYulStandardJsonAlloc(
     };
     defer settings.deinit();
 
-    if (settings.frontend.evm_version_deprecation_warning) {
-        const message = "Support for EVM versions older than constantinople is deprecated and will be removed in the future.";
-        try appendError(arena, errors_value, .Warning, message, message, null, null);
-    }
+    if (settings.frontend.evm_version_deprecation_warning)
+        try appendEvmDeprecationWarning(arena, errors_value, solc_version);
 
     const sources_value = objectMember(input, "sources") orelse {
         try appendError(arena, errors_value, .JSONError, "No input sources specified.", "No input sources specified.", null, null);
@@ -4155,6 +4175,16 @@ pub fn compileYulStandardJsonAlloc(
         };
     }
 
+    if (solc_version.atLeast(.v0_8_39)) {
+        if (assembly_pair.creation.bytecode) |*creation| {
+            const deployed_size = if (assembly_pair.deployed.bytecode) |*deployed| deployed.bytecode.items.len else 0;
+            try CodeSizeDiagnostics.report(allocator, &stack.error_reporter, .{ .source_name = source_name }, settings.frontend.evm_version, solc_version, "Yul object", .{
+                .creation = creation.bytecode.items.len,
+                .deployed = deployed_size,
+            });
+        }
+    }
+
     for (stack.errors()) |*diagnostic| {
         try appendDiagnostic(
             arena,
@@ -4175,7 +4205,7 @@ pub fn compileYulStandardJsonAlloc(
         "bytecode",
         false,
         &assembly_pair.creation,
-        settings.frontend.evm_version,
+        &settings.frontend,
         false,
     );
     try appendMachineObject(
@@ -4187,7 +4217,7 @@ pub fn compileYulStandardJsonAlloc(
         "deployedBytecode",
         true,
         &assembly_pair.deployed,
-        settings.frontend.evm_version,
+        &settings.frontend,
         false,
     );
 
@@ -4213,8 +4243,11 @@ pub fn compileYulStandardJsonAlloc(
 fn parseSettings(
     allocator: std.mem.Allocator,
     input: *const Json,
+    solc_version: SolcVersion,
 ) !CompilationOptionsResult {
     var result = CompilationOptions.init(allocator);
+    result.frontend.solc_version = solc_version;
+    result.optimizer.settings.solc_version = solc_version;
     var result_transferred = false;
     defer if (!result_transferred) result.deinit();
 
@@ -4268,9 +4301,7 @@ fn parseSettings(
             return .{ .fatal = .{ .message = "evmVersion must be a string." } };
         result.frontend.evm_version = EVMVersion.fromString(version_name) orelse
             return .{ .fatal = .{ .message = "Invalid EVM version requested." } };
-        result.frontend.evm_version_deprecation_warning = result.frontend.evm_version.before(
-            EVMVersion.init(.Constantinople),
-        );
+        result.frontend.evm_version_deprecation_warning = result.frontend.evm_version.before(evmDeprecationCutoff(solc_version));
         if (result.frontend.evm_version.isExperimental() and !result.frontend.experimental) {
             const message = try allocator.print(
                 "EVM version '{s}' is experimental and can only be used with the 'settings.experimental' option enabled.",
@@ -4405,12 +4436,11 @@ fn parseSettings(
                 const contract_selections = jsonObject(source_value) orelse continue;
                 for (contract_selections.keys(), contract_selections.values()) |contract_name, *contract_value| {
                     const artifacts = jsonArray(contract_value) orelse continue;
-                    for (artifacts.items) |*artifact_value|
-                        try result.addOutput(
-                            source_name,
-                            contract_name,
-                            jsonString(artifact_value).?,
-                        );
+                    for (artifacts.items) |*artifact_value| {
+                        const artifact = jsonString(artifact_value).?;
+                        if (solc_version.atLeast(.v0_8_38) and std.mem.eql(u8, artifact, "yulCFGJson")) continue;
+                        try result.addOutput(source_name, contract_name, artifact);
+                    }
                 }
             }
         } else {
@@ -4429,7 +4459,11 @@ fn parseSettings(
             hasExactArtifactRequest(&result.projection.output_selection, "irOptimizedAst") or
             hasExactArtifactRequest(&result.projection.output_selection, "yulCFGJson"))
         {
-            return .{ .fatal = .{ .error_type = .FatalError, .message = "'irAst', 'irOptimizedAst', 'yulCFGJson', and 'ethdebug' outputs are experimental and can only be used with the 'settings.experimental' option enabled." } };
+            const message = if (solc_version.atLeast(.v0_8_38))
+                "'irAst', 'irOptimizedAst', and 'ethdebug' outputs are experimental and can only be used with the 'settings.experimental' option enabled."
+            else
+                "'irAst', 'irOptimizedAst', 'yulCFGJson', and 'ethdebug' outputs are experimental and can only be used with the 'settings.experimental' option enabled.";
+            return .{ .fatal = .{ .error_type = .FatalError, .message = message } };
         }
         if (result.ir.via_ssa_cfg)
             return .{ .fatal = .{ .error_type = .FatalError, .message = "'viaSSACFG' setting is experimental and can only be used with the 'settings.experimental' option enabled." } };
@@ -4602,7 +4636,7 @@ fn appendMachineObject(
     kind: []const u8,
     deployed: bool,
     machine_object: *const YulStackModule.MachineAssemblyObject,
-    evm_version: EVMVersion,
+    frontend: *const CompilationOptionsModule.FrontendOptions,
     include_generated_sources: bool,
 ) !void {
     const prefix = try allocator.print("evm.{s}", .{kind});
@@ -4635,7 +4669,13 @@ fn appendMachineObject(
         try bytecode_json.object.put(allocator, "object", .{ .string = value });
     }
     if (requestedElement(output_selection, source_name, contract_name, prefix, "opcodes")) {
-        const value = try Disassemble.disassembleAlloc(allocator, bytecode.bytecode.items, evm_version, " ");
+        const value = try Disassemble.disassembleForSolcAlloc(
+            allocator,
+            bytecode.bytecode.items,
+            frontend.evm_version,
+            frontend.solc_version,
+            " ",
+        );
         try bytecode_json.object.put(allocator, "opcodes", .{ .string = value });
     }
     if (requestedElement(output_selection, source_name, contract_name, prefix, "sourceMap")) {
@@ -5256,7 +5296,7 @@ test "parsed compilation options do not borrow the JSON document" {
             "\"outputSelection\":{\"A.sol\":{\"A\":[\"evm.bytecode\"]}}}}",
     );
     const root = parsed.document.rootConst();
-    const result = try parseSettings(std.testing.allocator, root);
+    const result = try parseSettings(std.testing.allocator, root, SolcVersion.default);
     var options = switch (result) {
         .options => |value| value,
         .fatal => return error.UnexpectedFatalOptions,

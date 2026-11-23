@@ -64,6 +64,7 @@ pub const MetadataSources = struct {
 };
 
 pub const MetadataOptions = struct {
+    solc_version: Version.SolcVersion = Version.SolcVersion.default,
     evm_version: EVMVersion = EVMVersion.current(),
     optimiser: OptimiserSettings = OptimiserSettings.minimal(),
     bytecode_hash: MetadataHash = .ipfs,
@@ -96,7 +97,7 @@ pub fn createMetadataAlloc(
     var metadata: Json = .{ .object = .empty };
 
     var compiler: Json = .{ .object = .empty };
-    try putString(scratch, &compiler, "version", Version.MetadataVersion);
+    try putString(scratch, &compiler, "version", options.solc_version.metadataVersion());
     try metadata.object.put(scratch, "compiler", compiler);
     try putString(scratch, &metadata, "language", "Solidity");
 
@@ -170,7 +171,7 @@ pub fn createCBORMetadataAlloc(
         .none => {},
     }
     if (options.experimental) try encoder.pushBool("experimental", true);
-    try encoder.pushBytes("solc", &Version.VersionCompactBytes);
+    try encoder.pushBytes("solc", &options.solc_version.compactBytes());
     return encoder.serialise();
 }
 
@@ -338,6 +339,7 @@ fn metadataOptimiserSettings(
     );
 
     var without_runs = settings;
+    without_runs.solc_version = Version.SolcVersion.default;
     without_runs.expected_executions_per_deployment =
         OptimiserSettings.minimal().expected_executions_per_deployment;
     if (without_runs.eql(OptimiserSettings.minimal())) {
@@ -534,7 +536,7 @@ test "CBOR metadata encodes the compatibility version" {
     );
     defer std.testing.allocator.free(hex);
     try std.testing.expect(std.mem.startsWith(u8, hex, "a2646970667358221220"));
-    try std.testing.expect(std.mem.endsWith(u8, hex, "64736f6c63430008240033"));
+    try std.testing.expect(std.mem.endsWith(u8, hex, "64736f6c63430008270033"));
     try std.testing.expectEqual(@as(usize, 106), hex.len);
 }
 

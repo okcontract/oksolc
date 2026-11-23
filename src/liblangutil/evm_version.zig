@@ -122,6 +122,9 @@ pub const EVMVersion = struct {
     pub fn hasBlobBaseFee(self: EVMVersion) bool {
         return self.atLeast(.Cancun);
     }
+    pub fn hasSlotNum(self: EVMVersion) bool {
+        return self.atLeast(.Amsterdam);
+    }
     pub fn hasPrevRandao(self: EVMVersion) bool {
         return self.atLeast(.Paris);
     }
@@ -159,6 +162,7 @@ pub const EVMVersion = struct {
             0x48 => self.hasBaseFee(),
             0x49 => self.hasBlobHash(),
             0x4a => self.hasBlobBaseFee(),
+            0x4b => self.hasSlotNum(),
             0x5e => self.hasMcopy(),
             0x5c, 0x5d => self.supportsTransientStorage(),
             else => true,

@@ -16,8 +16,10 @@ const Diagnostics = @import("../../liblangutil/diagnostics.zig");
 const UTF8 = @import("../../libsolutil/utf8.zig");
 const SetOnceError = @import("../../libsolutil/set_once.zig").SetOnceError;
 const YulSemantics = @import("../../libyul/optimiser/semantics.zig");
+const SolcVersion = @import("common").SolcVersion;
 
 pub const Options = struct {
+    solc_version: SolcVersion = SolcVersion.default,
     use_yul_optimizer: bool = false,
     experimental: bool = false,
 };
@@ -136,11 +138,12 @@ const SyntaxChecker = struct {
     fn endSourceUnit(self: *SyntaxChecker, node: *AST.Node) CheckError!void {
         if (self.source_unit != node) return error.InvalidAst;
         const annotation = try sourceUnitAnnotation(self.tree, node);
-        if (!self.version_pragma_found) try self.reporter.warning(
-            errorId(3420),
-            .{ .source_name = node.location.source_name },
-            "Source file does not specify required compiler version! Consider adding \"pragma solidity ^0.8.36;\"",
-        );
+        if (!self.version_pragma_found) {
+            const message = switch (self.options.solc_version) {
+                inline else => |version| comptime "Source file does not specify required compiler version! Consider adding \"pragma solidity ^" ++ version.number() ++ ";\"",
+            };
+            try self.reporter.warning(errorId(3420), .{ .source_name = node.location.source_name }, message);
+        }
         if (!annotation.use_abi_coder_v2.isSet())
             try annotation.use_abi_coder_v2.assign(true);
         self.source_unit = null;
@@ -207,6 +210,12 @@ const SyntaxChecker = struct {
                 node.location,
                 "Unsupported experimental feature name.",
             );
+        if (feature == .Solidity and self.options.solc_version.atLeast(.v0_8_37))
+            return self.reporter.syntaxError(
+                errorId(3332),
+                node.location,
+                "The experimental Solidity prototype has been removed from the compiler.",
+            );
         const source = self.source_unit orelse return error.InvalidAst;
         const annotation = try sourceUnitAnnotation(self.tree, source);
         if (containsFeature(annotation.experimental_features.items, feature))
@@ -230,6 +239,11 @@ const SyntaxChecker = struct {
         }
 
         if (feature == .ABIEncoderV2) {
+            if (self.options.solc_version.atLeast(.v0_8_37)) try self.reporter.warning(
+                errorId(8506),
+                node.location,
+                "Experimental pragma ABIEncoderV2 is deprecated and will be removed in a future release.",
+            );
             if (annotation.use_abi_coder_v2.isSet()) {
                 if (!(try annotation.use_abi_coder_v2.get()).*)
                     try self.reporter.syntaxError(
