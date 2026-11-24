@@ -1,10 +1,10 @@
 # oksolc
 
-`oksolc` is a Zig implementation of the Solidity compiler that we built for our
-internal use in developing [Chainwall](https://chainwall.org).
+`oksolc` is a Zig implementation of the Solidity compiler, originally built for
+our work on [Chainwall](https://chainwall.org).
 
-Its goal is to provide an alternative implementation of Solidity for development
-purposes, allowing faster iteration on the developer experience.
+The project aims to enable faster iteration on the Solidity developer
+experience and introduce new features.
 
 The supported compilation path is the optimized, via-IR compilation through the
 Standard JSON interface.

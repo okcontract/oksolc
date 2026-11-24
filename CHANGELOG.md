@@ -432,5 +432,5 @@ Initial project import at
 
 ### Limitations
 
-- Intended for development; not considered production ready for deploying
-  contracts onchain. The supported compilation path is optimized via-IR.
+- The initial release targeted development workflows and supported optimized
+  via-IR compilation.
