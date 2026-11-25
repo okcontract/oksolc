@@ -7,6 +7,9 @@
 .zsolc/
 .oksolc/
 
+# Lean Lake build output
+/lean/.lake/
+
 # Local build and benchmark output
 /build/
 /benchmarks/

@@ -144,6 +144,9 @@ pub const ExpressionClasses = struct {
         return if (builtin.is_test) self.test_id_limit else invalid_id;
     }
 
+    /// Borrows an array element until the next operation that can grow the
+    /// representative array. Copy the descriptor before recursive interning;
+    /// its separately allocated item and argument slice remain stable.
     pub fn representative(self: *const ExpressionClasses, id: Id) ExpressionError!*const Expression {
         if (id >= self.representatives.items.len) return error.InvalidExpressionId;
         return &self.representatives.items[id];
@@ -321,6 +324,8 @@ pub const ExpressionClasses = struct {
         return self.knownConstantValue(inverted) == 0;
     }
 
+    /// Borrows the separately allocated item payload across interning/growth.
+    /// Ends at deinit; clients must not mutate published representatives.
     pub fn knownConstant(self: *const ExpressionClasses, id: Id) ?*const u256 {
         const expression = self.representative(id) catch return null;
         if (expression.item.item_type != .Push) return null;
@@ -332,6 +337,8 @@ pub const ExpressionClasses = struct {
         return value.*;
     }
 
+    /// Borrows independently allocated operands across interning/growth.
+    /// Ends at deinit; clients must not mutate published representatives.
     pub fn operationArguments(
         self: *const ExpressionClasses,
         id: Id,
@@ -427,8 +434,13 @@ test "expression classes intern, simplify, and retain stable constants" {
     const identity = try classes.makeOperation(.ADD, &.{ unknown, try classes.makeConstant(0, .{}) }, .{});
     try std.testing.expectEqual(unknown, identity);
     const before = classes.knownConstant(seven).?;
+    const other = try classes.newClass(.{});
+    const difference = try classes.makeOperation(.SUB, &.{ unknown, other }, .{});
+    const operands = classes.operationArguments(difference, .SUB).?;
     for (0..128) |_| _ = try classes.newClass(.{});
     try std.testing.expectEqual(@as(u256, 7), before.*);
+    try std.testing.expectEqualSlices(Id, &.{ unknown, other }, operands);
+    try std.testing.expectEqual(operands.ptr, classes.operationArguments(difference, .SUB).?.ptr);
 }
 
 test "nested logical and arithmetic rules retain first-match semantics" {
@@ -496,7 +508,8 @@ test "expression classes misses retain owned arguments through allocation failur
             try std.testing.expectEqualSlices(Id, &.{ y, x }, (try classes.representative(difference)).arguments);
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(backing.allocator(), Check.run, .{});
 }
 
 test "expression classes insertion failure preserves earlier IDs and constant borrows" {
@@ -506,16 +519,23 @@ test "expression classes insertion failure preserves earlier IDs and constant bo
             defer classes.deinit();
             const seven = try classes.makeConstant(7, .{});
             const borrowed = classes.knownConstant(seven).?;
+            const x = try classes.newClass(.{});
+            const y = try classes.newClass(.{});
+            const difference = try classes.makeOperation(.SUB, &.{ x, y }, .{});
+            const operands = classes.operationArguments(difference, .SUB).?;
             const before = classes.size();
             _ = classes.makeConstant(13, .{}) catch |err| {
                 try std.testing.expectEqual(before, classes.size());
                 try std.testing.expectEqual(@as(u256, 7), borrowed.*);
                 try std.testing.expectEqual(borrowed, classes.knownConstant(seven).?);
+                try std.testing.expectEqualSlices(Id, &.{ x, y }, operands);
+                try std.testing.expectEqual(operands.ptr, classes.operationArguments(difference, .SUB).?.ptr);
                 try std.testing.expectEqual(seven, try classes.makeConstant(7, .{}));
                 return err;
             };
             try std.testing.expectEqual(before + 1, classes.size());
             try std.testing.expectEqual(@as(u256, 7), borrowed.*);
+            try std.testing.expectEqualSlices(Id, &.{ x, y }, operands);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});

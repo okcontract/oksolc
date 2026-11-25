@@ -10,6 +10,7 @@
 //! the first-match semantics used by `ExpressionClasses`.
 
 const std = @import("std");
+const Algebraic = @import("algebraic_rules.zig");
 const DebugData = @import("../liblangutil/debug_data.zig").DebugData;
 const EVMVersion = @import("../liblangutil/evm_version.zig").EVMVersion;
 const Instruction = @import("instruction.zig").Instruction;
@@ -85,78 +86,16 @@ pub fn simplifyWithOptions(
         const left_constant = classes.knownConstantValue(left);
         const right_constant = classes.knownConstantValue(right);
 
-        // Part 2: invariants involving constants.
+        // Part 2: the checked algebraic table, then the remaining nested and
+        // byte rules before the equal-expression stage.
+        if (Algebraic.select(instruction, .constants, .{ .left = left_constant, .right = right_constant })) |replacement|
+            return try Algebraic.apply(replacement, classes, left, right, debug_data);
         switch (instruction) {
-            .ADD => {
-                if (right_constant == 0) return left;
-                if (left_constant == 0) return right;
-            },
-            .SUB => {
-                if (right_constant == 0) return left;
-                if (left_constant == max_word)
-                    return try classes.makeOperation(.NOT, &.{right}, debug_data);
-            },
-            .MUL => {
-                if (right_constant == 0 or left_constant == 0)
-                    return try classes.makeConstant(0, debug_data);
-                if (right_constant == 1) return left;
-                if (left_constant == 1) return right;
-                if (right_constant == max_word)
-                    return try classes.makeOperation(.SUB, &.{ try classes.makeConstant(0, debug_data), left }, debug_data);
-                if (left_constant == max_word)
-                    return try classes.makeOperation(.SUB, &.{ try classes.makeConstant(0, debug_data), right }, debug_data);
-            },
-            .DIV, .SDIV => {
-                if (right_constant == 0 or left_constant == 0)
-                    return try classes.makeConstant(0, debug_data);
-                if (right_constant == 1) return left;
-            },
             .AND => {
-                if (right_constant == max_word) return left;
-                if (left_constant == max_word) return right;
-                if (right_constant == 0 or left_constant == 0)
-                    return try classes.makeConstant(0, debug_data);
-
                 if (right_constant == 0xff) {
                     if (classes.operationArguments(left, .BYTE)) |byte_args|
                         return try classes.makeOperation(.BYTE, byte_args, debug_data);
                 }
-            },
-            .OR => {
-                if (right_constant == 0) return left;
-                if (left_constant == 0) return right;
-                if (right_constant == max_word or left_constant == max_word)
-                    return try classes.makeConstant(max_word, debug_data);
-            },
-            .XOR => {
-                if (right_constant == 0) return left;
-                if (left_constant == 0) return right;
-            },
-            .MOD => {
-                if (right_constant == 0 or left_constant == 0)
-                    return try classes.makeConstant(0, debug_data);
-            },
-            .EQ => {
-                if (right_constant == 0)
-                    return try classes.makeOperation(.ISZERO, &.{left}, debug_data);
-                if (left_constant == 0)
-                    return try classes.makeOperation(.ISZERO, &.{right}, debug_data);
-            },
-            .SHL, .SHR => {
-                if (left_constant == 0) return right;
-                if (right_constant == 0) return try classes.makeConstant(0, debug_data);
-            },
-            .GT => {
-                if (right_constant == 0)
-                    return try doubleIsZero(classes, left, debug_data);
-                if (right_constant == max_word or left_constant == 0)
-                    return try classes.makeConstant(0, debug_data);
-            },
-            .LT => {
-                if (left_constant == 0)
-                    return try doubleIsZero(classes, right, debug_data);
-                if (left_constant == max_word or right_constant == 0)
-                    return try classes.makeConstant(0, debug_data);
             },
             .BYTE => {
                 if (left_constant == 31)
@@ -169,13 +108,11 @@ pub fn simplifyWithOptions(
             else => {},
         }
 
-        // Part 3: operations involving the same expression.
-        if (sameExpression(classes, left, right)) switch (instruction) {
-            .AND, .OR => return left,
-            .XOR, .SUB, .LT, .SLT, .GT, .SGT, .MOD => return try classes.makeConstant(0, debug_data),
-            .EQ => return try classes.makeConstant(1, debug_data),
-            else => {},
-        };
+        // Part 3: operations involving the same stable expression value.
+        if (sameExpression(classes, left, right)) {
+            if (Algebraic.select(instruction, .equal, .{ .equal = true })) |replacement|
+                return try Algebraic.apply(replacement, classes, left, right, debug_data);
+        }
 
         // Part 4: logical combinations.
         if (instruction == .XOR) {
@@ -537,11 +474,6 @@ fn splitConstant(classes: anytype, arguments: []const ExpressionId) ?ConstantOpe
     return null;
 }
 
-fn doubleIsZero(classes: anytype, value: ExpressionId, debug_data: DebugData) !ExpressionId {
-    const inner = try classes.makeOperation(.ISZERO, &.{value}, debug_data);
-    return classes.makeOperation(.ISZERO, &.{inner}, debug_data);
-}
-
 fn cancelNestedBinary(
     classes: anytype,
     instruction: Instruction,
@@ -875,4 +807,73 @@ test "constant EVM arithmetic uses 256-bit wrapping and signed semantics" {
     try std.testing.expectEqual(max_word, foldConstants(.SMOD, &.{ max_word, 2 }).?);
     try std.testing.expectEqual(@as(u256, 0), foldConstants(.SHL, &.{ 256, max_word }).?);
     try std.testing.expectEqual(@as(u256, 5), foldConstants(.ADDMOD, &.{ max_word, 8, 9 }).?);
+    const min_signed: u256 = @as(u256, 1) << 255;
+    try std.testing.expectEqual(min_signed, foldConstants(.SDIV, &.{ min_signed, max_word }).?);
+    try std.testing.expectEqual(@as(u256, 0), foldConstants(.SMOD, &.{ min_signed, max_word }).?);
+    try std.testing.expectEqual(@as(u256, 1), foldConstants(.MULMOD, &.{ max_word, max_word, 7 }).?);
+    try std.testing.expectEqual(@as(u256, 0), foldConstants(.MULMOD, &.{ max_word, max_word, 0 }).?);
+    try std.testing.expectEqual(@as(u256, 1), foldConstants(.EXP, &.{ 1, max_word }).?);
+    try std.testing.expectEqual(@as(u256, 1), foldConstants(.EXP, &.{ 0, 0 }).?);
+    try std.testing.expectEqual(@as(u256, 255), foldConstants(.BYTE, &.{ 31, 511 }).?);
+    try std.testing.expectEqual(@as(u256, 0), foldConstants(.BYTE, &.{ 32, max_word }).?);
+    try std.testing.expectEqual(max_word, foldConstants(.SIGNEXTEND, &.{ 0, 255 }).?);
+    try std.testing.expectEqual(@as(u256, 127), foldConstants(.SIGNEXTEND, &.{ 0, 383 }).?);
+    try std.testing.expectEqual(max_word, foldConstants(.SIGNEXTEND, &.{ 30, (@as(u256, 1) << 248) - 1 }).?);
+    try std.testing.expectEqual(@as(u256, 123), foldConstants(.SIGNEXTEND, &.{ 31, 123 }).?);
+    try std.testing.expectEqual(@as(u256, 1), foldConstants(.SHR, &.{ 255, max_word }).?);
+    try std.testing.expectEqual(@as(?u256, null), foldConstants(.ADD, &.{}));
+    try std.testing.expectEqual(@as(?u256, null), foldConstants(.ADD, &.{ 1, 2, 3 }));
+    try std.testing.expectEqual(@as(?u256, null), foldConstants(.INVALID, &.{ 1, 2 }));
+}
+
+test "algebraic rules agree with EVM arithmetic at word boundaries" {
+    const Graph = struct {
+        const Self = @This();
+        allocator: std.mem.Allocator,
+        values: std.ArrayList(u256) = .empty,
+
+        pub fn makeConstant(self: *Self, value: u256, _: DebugData) !ExpressionId {
+            const id: ExpressionId = @intCast(self.values.items.len);
+            try self.values.ensureTotalCapacityPrecise(self.allocator, self.values.items.len + 1);
+            self.values.appendAssumeCapacity(value);
+            return id;
+        }
+
+        pub fn makeOperation(self: *Self, instruction: Instruction, arguments: []const ExpressionId, debug_data: DebugData) !ExpressionId {
+            var values: [2]u256 = undefined;
+            for (arguments, 0..) |id, index| values[index] = self.values.items[id];
+            return self.makeConstant(foldConstants(instruction, values[0..arguments.len]).?, debug_data);
+        }
+
+        fn check(allocator: std.mem.Allocator) !void {
+            var graph: Self = .{ .allocator = allocator };
+            defer graph.values.deinit(allocator);
+            const boundary = [_]u256{ 0, 1, 2, 31, 32, 255, 256, 257, @as(u256, 1) << 255, max_word - 1, max_word };
+            for (Algebraic.rules) |rule| {
+                var exercised = false;
+                for (boundary) |left| for (boundary) |right| {
+                    const facts: Algebraic.Facts = .{ .left = left, .right = right, .equal = left == right };
+                    if (!Algebraic.matches(rule.guard, facts)) continue;
+                    exercised = true;
+                    graph.values.clearRetainingCapacity();
+                    const a = try graph.makeConstant(left, .{});
+                    const b = try graph.makeConstant(right, .{});
+                    const result = try Algebraic.apply(rule.replacement, &graph, a, b, .{});
+                    try std.testing.expectEqual(foldConstants(rule.instruction, &.{ left, right }).?, graph.values.items[result]);
+                };
+                try std.testing.expect(exercised);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Graph.check, .{});
+}
+
+test "algebraic selection retains stage order and unknown facts" {
+    try std.testing.expectEqual(@as(?Algebraic.Replacement, null), Algebraic.select(.ADD, .constants, .{}));
+    try std.testing.expectEqual(@as(?Algebraic.Replacement, null), Algebraic.select(.SUB, .equal, .{}));
+    try std.testing.expectEqual(Algebraic.Replacement.left, Algebraic.select(.ADD, .constants, .{ .left = 0, .right = 0 }).?);
+    try std.testing.expectEqual(Algebraic.Replacement.right, Algebraic.select(.MUL, .constants, .{ .left = 1, .right = max_word }).?);
+    try std.testing.expectEqual(Algebraic.Replacement.not_right, Algebraic.select(.SUB, .constants, .{ .left = max_word, .equal = true }).?);
+    try std.testing.expectEqual(Algebraic.Replacement.zero, Algebraic.select(.SUB, .equal, .{ .left = max_word, .equal = true }).?);
+    try std.testing.expectEqual(@as(?Algebraic.Replacement, null), Algebraic.select(.CALL, .constants, .{ .left = 0, .right = 0, .equal = true }));
 }
